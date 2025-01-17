@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" 
+        content="width=device-width, initial-scale=1.0">
+    <meta name="description" 
+        content="Contoh halaman website">
+    <meta name="keywords" content="HTML, tag, contoh">
+    <title>Contoh Halaman Website</title>
+
+    <link rel="stylesheet" href="style.css">
+    
+</head>
+<body>
+    <header>
+        <h1>Selamat Datang di Contoh Halaman Website</h1>
+        <h1>ITN Malang</h1>
+    </header>
+    
+    <nav>
+        <ul>
+            <li><a href="index.html">Beranda</a></li>
+            <li><a href="about.html">Tentang</a></li>
+            <li><a href="contact.html">Kontak</a></li>
+        </ul>
+    </nav>
+    
+    <main>
+        <section id="home">
+            <h2>Beranda</h2>
+            <p>
+                Ini adalah contoh halaman 
+                beranda menggunakan HTML.
+            </p>
+            <img src="cameraman.png"
+             alt="Contoh Gambar">
+        </section>
+        
+        <section id="about">
+            <h2>Tentang</h2>
+            <p>
+                <span style="font-weight: bold;">HTML</span>
+                 adalah bahasa markup standar untuk membuat halaman web. 
+                <span style="color: blue;">HTML</span> 
+                terdiri dari berbagai elemen yang digunakan untuk
+                 menyusun konten dan struktur halaman web.
+            </p>
+        </section>
+        
+        <section id="form">
+            <h2>Formulir</h2>
+            <form action="/submit" method="post">
+                <label for="name">Nama:</label><br>
+                <input type="text" id="name" name="name"><br><br>
+                
+                <label for="email">Email:</label><br>
+                <input type="email" id="email" name="email"><br><br>
+                
+                <label for="message">Pesan:</label><br>
+                <textarea id="message" name="message">
+                </textarea><br><br>
+                
+                <button type="submit">Kirim</button>
+            </form>
+        </section>
+        
+        <section id="table">
+            <h2>Tabel</h2>
+            <table>
+                <tr>
+                    <th>Nama</th>
+                    <th>Umur</th>
+                    <th>Kota</th>
+                </tr>
+                <tr>
+                    <td>Eko Heri</td>
+                    <td>45</td>
+                    <td>Malang</td>
+                </tr>
+                <tr>
+                    <td>Aryo Sanjaya</td>
+                    <td>45</td>
+                    <td>Malang</td>
+                </tr>
+            </table>
+        </section>
+    </main>
+    
+    <aside>
+        <h3>Artikel Terkait</h3>
+        <p>
+            Pelajari lebih lanjut tentang HTML dan pengembangan web di 
+            <a href="https://www.w3schools.com/html/">W3Schools</a>.
+        </p>
+    </aside>
+    
+    <footer>
+        <p>
+            &copy; 2024 Contoh Halaman Website. 
+            Semua hak cipta dilindungi undang-undang.
+        </p>
+    </footer>
+    
+    <script>
+        console.log("Selamat datang di contoh halaman website!");
+    </script>
+</body>
+</html>

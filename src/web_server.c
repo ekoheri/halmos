@@ -16,7 +16,7 @@
 #include "../include/config.h"
 #include "../include/log.h"
 
-#define CONFIG_FILE "/etc/halempos/halempos.conf"
+#define CONFIG_FILE "/etc/halmos/halmos.conf"
 
 extern Config config;
 

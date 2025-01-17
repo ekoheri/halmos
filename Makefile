@@ -8,6 +8,8 @@ OBJ_DIR = build
 BIN_DIR = bin
 ETC_DIR = /etc/halmos
 LOG_DIR  = /var/log/halmos
+HTML_SOURCE_DIR = html
+HTML_DEST_DIR = /var/www/html/halmos
 
 # File sumber dan objek
 SRCS = $(wildcard $(SRC_DIR)/*.c)
@@ -32,6 +34,9 @@ install: all
 	@mkdir -p $(ETC_DIR)
 #	@chmod 0777 $(ETC_DIR)
 	@cp $(CONFIG_FILE) $(ETC_DIR)
+	@mkdir -p $(HTML_DEST_DIR)
+	@chmod 0777 $(HTML_DEST_DIR)
+	@cp -r $(HTML_SOURCE_DIR)/* $(HTML_DEST_DIR)
 	@mkdir -p $(LOG_DIR)
 	@chmod 0777 $(LOG_DIR)
 #	@cp $(TARGET) /usr/local/bin/
@@ -42,4 +47,5 @@ clean:
 
 # Membersihkan lebih lengkap (opsional)
 dist-clean: clean
+	rm -rf $(HTML_DEST_DIR)/*
 	rm -rf $(TARGET)

@@ -1,0 +1,21 @@
+body {
+    font-family: Arial, sans-serif;
+}
+header, nav, main, footer {
+    padding: 10px;
+    margin: 10px;
+    border: 1px solid #ccc;
+}
+nav ul {
+    list-style-type: none;
+    padding: 0;
+}
+nav ul li {
+    display: inline;
+    margin-right: 10px;
+}
+table, th, td {
+    border: 1px solid black;
+    border-collapse: collapse;
+    padding: 5px;
+}
