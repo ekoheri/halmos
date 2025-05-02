@@ -257,6 +257,8 @@ char *create_response(
         memcpy(response, response_header, header_size);   // Copy header
         memcpy(response + header_size, final_body, final_body_size);  // Copy body
         *response_size = header_size + final_body_size;
+
+        printf("\nResponse size : %d\n", final_body_size);
     }
     free(responseTime);
     free(response_header);
@@ -271,7 +273,8 @@ char *create_response(
 
     // Hanya untuk menampilkan hasil uji coba
     // Jika diimplementasikan beneran, printf dihapus
-    printf("\nResponse Ciphertext ke browser\n%s\n", response);
+    // printf("\nResponse Ciphertext ke browser\n%s\n", response);
+
     
     return response;
 }
