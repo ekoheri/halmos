@@ -1,6 +1,6 @@
 CC = gcc
 CFLAGS = -Wall -Iinclude
-LDFLAGS = -lm
+LDFLAGS = -lm -lbrotlienc -lbrotlidec -lbrotlicommon
 
 # Direktori
 SRC_DIR = src

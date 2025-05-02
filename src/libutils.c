@@ -18,56 +18,64 @@ void hex_to_bytes(const char* hex, uint8_t* bytes, size_t bytes_len) {
     }
 }
 
-const char base64_table[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+// Base64 encode table
+static const char base64_table[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
-void base64_encode(const unsigned char *input, int len, char *output) {
-    int i, j;
+// Base64 encode
+char *base64_encode(const unsigned char *input, size_t len) {
+    size_t output_len = 4 * ((len + 2) / 3);
+    char *output = malloc(output_len + 1);
+    if (!output) return NULL;
+
+    size_t i, j;
     for (i = 0, j = 0; i < len;) {
-        unsigned int octet_a = i < len ? input[i++] : 0;
-        unsigned int octet_b = i < len ? input[i++] : 0;
-        unsigned int octet_c = i < len ? input[i++] : 0;
-
-        unsigned int triple = (octet_a << 16) | (octet_b << 8) | octet_c;
+        uint32_t octet_a = i < len ? input[i++] : 0;
+        uint32_t octet_b = i < len ? input[i++] : 0;
+        uint32_t octet_c = i < len ? input[i++] : 0;
+        uint32_t triple = (octet_a << 16) | (octet_b << 8) | octet_c;
 
         output[j++] = base64_table[(triple >> 18) & 0x3F];
         output[j++] = base64_table[(triple >> 12) & 0x3F];
         output[j++] = (i > len + 1) ? '=' : base64_table[(triple >> 6) & 0x3F];
         output[j++] = (i > len) ? '=' : base64_table[triple & 0x3F];
     }
+
     output[j] = '\0';
+    return output;
 }
 
-int base64_char_value(char c) {
-    if (c >= 'A' && c <= 'Z') return c - 'A';
-    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
-    if (c >= '0' && c <= '9') return c - '0' + 52;
-    if (c == '+') return 62;
-    if (c == '/') return 63;
-    return -1; // invalid character
-}
+// Base64 decode
+unsigned char *base64_decode(const char *input, size_t *out_len) {
+    size_t len = strlen(input);
+    if (len % 4 != 0) return NULL;
 
-int base64_decode(const char *input, unsigned char *output) {
-    int len = strlen(input);
-    int i = 0, j = 0;
+    size_t output_len = len / 4 * 3;
+    if (input[len - 1] == '=') output_len--;
+    if (input[len - 2] == '=') output_len--;
+
+    unsigned char *output = malloc(output_len + 1);
+    if (!output) return NULL;
+
     uint32_t buffer = 0;
-    int bits_collected = 0;
-
-    while (i < len) {
-        int val = base64_char_value(input[i]);
-        if (val >= 0) {
-            buffer = (buffer << 6) | val;
-            bits_collected += 6;
-
-            if (bits_collected >= 8) {
-                bits_collected -= 8;
-                output[j++] = (buffer >> bits_collected) & 0xFF;
-            }
-        } else if (input[i] != '=' && input[i] != '\n' && input[i] != '\r') {
-            // skip invalid characters or line breaks
-            return -1; // error
+    size_t i, j, k = 0;
+    for (i = 0; i < len;) {
+        for (j = 0; j < 4; j++) {
+            buffer <<= 6;
+            char c = input[i++];
+            if (c >= 'A' && c <= 'Z') buffer |= c - 'A';
+            else if (c >= 'a' && c <= 'z') buffer |= c - 'a' + 26;
+            else if (c >= '0' && c <= '9') buffer |= c - '0' + 52;
+            else if (c == '+') buffer |= 62;
+            else if (c == '/') buffer |= 63;
+            else if (c == '=') buffer |= 0;
         }
-        i++;
+
+        if (k < output_len) output[k++] = (buffer >> 16) & 0xFF;
+        if (k < output_len) output[k++] = (buffer >> 8) & 0xFF;
+        if (k < output_len) output[k++] = buffer & 0xFF;
     }
 
-    return j; // jumlah byte hasil decode
+    output[output_len] = '\0';
+    *out_len = output_len;
+    return output;
 }

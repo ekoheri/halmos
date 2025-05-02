@@ -11,12 +11,17 @@
 #include <netinet/in.h>
 #include <netdb.h>
 
+// Tambahan library untuk kompresi
+#include <brotli/encode.h>
+#include <brotli/decode.h>
+
 #include "../include/http.h"
 #include "../include/config.h"
 #include "../include/log.h"
 #include "../include/sha256.h"
 #include "../include/chacha20.h"
 #include "../include/pasaran.h"
+#include "../include/brotli_compression.h"
 
 #define BUFFER_SIZE 1024
 
@@ -212,14 +217,26 @@ char *create_response(
     if(encrypted == 1) {
         char *key = masehi2jawa(responseTime);
         char *hash_key = sha256_hash(key);
+        long compressed_size; //, decompressed_size;
         // Hanya untuk menampilkan hasil uji coba
         // Jika diimplementasikan beneran, printf dihapus
         printf("\nEncription Proccess\nTime Value : %s\n", responseTime);
         printf("Javanese time Key : %s\n", key);
         printf("Hash Key : %s\n", hash_key);
 
+        printf("Original data size : %d\n", body_size);
         encrypt_body = encrypt(body, hash_key, body_size);
-        final_body_size = strlen(encrypt_body) + 1;
+        printf("Cipher data size : %ld\n", strlen(encrypt_body));
+        
+        char *compressed = compress_brotli(encrypt_body, strlen(encrypt_body));
+        compressed_size = strlen(compressed) + 1;
+        if (!compressed) {
+            printf("Kompresi gagal.\n");
+            return NULL;
+        }
+        printf("Compresion data size : %zu bytes\n", compressed_size);
+
+        final_body_size = compressed_size;
 
         // Alokasikan memori untuk final_body
         final_body = (char *)malloc(final_body_size);
@@ -230,7 +247,7 @@ char *create_response(
         }
 
         // Gabungkan encrypt_body, separator, dan public_key
-        strcpy(final_body, encrypt_body);
+        strcpy(final_body, compressed);
 
         res_header->encrypted = "yes";
 
@@ -258,7 +275,8 @@ char *create_response(
         memcpy(response + header_size, final_body, final_body_size);  // Copy body
         *response_size = header_size + final_body_size;
 
-        printf("\nResponse size : %d\n", final_body_size);
+        printf("Header size : %d\n", header_size);
+        printf("Response size : %d\n", (header_size + final_body_size));
     }
     free(responseTime);
     free(response_header);
