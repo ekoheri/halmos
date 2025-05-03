@@ -220,13 +220,14 @@ char *create_response(
         long compressed_size; //, decompressed_size;
         // Hanya untuk menampilkan hasil uji coba
         // Jika diimplementasikan beneran, printf dihapus
-        printf("\nEncription Proccess\nTime Value : %s\n", responseTime);
+        printf("SERVER SEND DATA\n");
+        printf("Original data size : %d bytes\n", body_size);
+        printf("\n\nENCRYPTION\nTime Value : %s\n", responseTime);
         printf("Javanese time Key : %s\n", key);
         printf("Hash Key : %s\n", hash_key);
 
-        printf("Original data size : %d\n", body_size);
         encrypt_body = encrypt(body, hash_key, body_size);
-        printf("Cipher data size : %ld\n", strlen(encrypt_body));
+        printf("\n\nCOMPRESION\nData size after encryption : %ld bytes\n", strlen(encrypt_body));
         
         char *compressed = compress_brotli(encrypt_body, strlen(encrypt_body));
         compressed_size = strlen(compressed) + 1;
@@ -234,7 +235,7 @@ char *create_response(
             printf("Kompresi gagal.\n");
             return NULL;
         }
-        printf("Compresion data size : %zu bytes\n", compressed_size);
+        printf("Data size after compression : %zu bytes\n", compressed_size);
 
         final_body_size = compressed_size;
 
@@ -275,8 +276,9 @@ char *create_response(
         memcpy(response + header_size, final_body, final_body_size);  // Copy body
         *response_size = header_size + final_body_size;
 
-        printf("Header size : %d\n", header_size);
-        printf("Response size : %d\n", (header_size + final_body_size));
+        printf("\n\nSEND to the Browser\nHeader data size : %d bytes\n", header_size);
+        printf("Body data size : %d bytes\n", final_body_size);
+        printf("Data Size to Be Sent to the Browser : %d bytes\n", (header_size + final_body_size));
     }
     free(responseTime);
     free(response_header);

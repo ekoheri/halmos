@@ -45,7 +45,7 @@ char *base64_encode(const unsigned char *input, size_t len) {
 }
 
 // Base64 decode
-unsigned char *base64_decode(const char *input, size_t *out_len) {
+char *base64_decode(const char *input) {
     size_t len = strlen(input);
     if (len % 4 != 0) return NULL;
 
@@ -53,12 +53,13 @@ unsigned char *base64_decode(const char *input, size_t *out_len) {
     if (input[len - 1] == '=') output_len--;
     if (input[len - 2] == '=') output_len--;
 
-    unsigned char *output = malloc(output_len + 1);
-    if (!output) return NULL;
+    unsigned char *binary = malloc(output_len);
+    if (!binary) return NULL;
 
     uint32_t buffer = 0;
     size_t i, j, k = 0;
     for (i = 0; i < len;) {
+        buffer = 0;
         for (j = 0; j < 4; j++) {
             buffer <<= 6;
             char c = input[i++];
@@ -70,12 +71,23 @@ unsigned char *base64_decode(const char *input, size_t *out_len) {
             else if (c == '=') buffer |= 0;
         }
 
-        if (k < output_len) output[k++] = (buffer >> 16) & 0xFF;
-        if (k < output_len) output[k++] = (buffer >> 8) & 0xFF;
-        if (k < output_len) output[k++] = buffer & 0xFF;
+        if (k < output_len) binary[k++] = (buffer >> 16) & 0xFF;
+        if (k < output_len) binary[k++] = (buffer >> 8) & 0xFF;
+        if (k < output_len) binary[k++] = buffer & 0xFF;
     }
 
-    output[output_len] = '\0';
-    *out_len = output_len;
-    return output;
+    // Konversi biner ke string heksadesimal
+    char *hex_output = malloc(output_len * 2 + 1);
+    if (!hex_output) {
+        free(binary);
+        return NULL;
+    }
+
+    for (i = 0; i < output_len; i++) {
+        sprintf(hex_output + (i * 2), "%02X", binary[i]);
+    }
+
+    hex_output[output_len * 2] = '\0';
+    free(binary);
+    return hex_output;
 }

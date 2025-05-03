@@ -34,11 +34,28 @@ char *compress_brotli(const char *input, size_t input_size) {
 
 // Fungsi dekompresi Brotli
 char *decompress_brotli(const char *input_base64, size_t *output_size) {
-    size_t compressed_size;
-    unsigned char *compressed = base64_decode(input_base64, &compressed_size);
-    if (!compressed) return NULL;
+    // Langkah 1: Decode base64 → hasil: string hex
+    char *hexstr = base64_decode(input_base64);  // hasil: "ABCDEF..."
+    if (!hexstr) return NULL;
 
-    size_t output_buf_size = compressed_size * 6;
+    size_t hex_len = strlen(hexstr);
+    if (hex_len % 2 != 0) {
+        free(hexstr);
+        return NULL;  // panjang hex harus genap
+    }
+
+    // Langkah 2: Convert hex string → binary
+    size_t compressed_size = hex_len / 2;
+    uint8_t *compressed = malloc(compressed_size);
+    if (!compressed) {
+        free(hexstr);
+        return NULL;
+    }
+    hex_to_bytes(hexstr, compressed, compressed_size);
+    free(hexstr);  // tidak dibutuhkan lagi
+
+    // Langkah 3: Brotli decompress
+    size_t output_buf_size = compressed_size * 2;  // Estimasi yang lebih aman
     uint8_t *output = malloc(output_buf_size);
     if (!output) {
         free(compressed);
@@ -51,60 +68,31 @@ char *decompress_brotli(const char *input_base64, size_t *output_size) {
         &output_buf_size,
         output
     );
-
     free(compressed);
 
     if (result != BROTLI_DECODER_RESULT_SUCCESS) {
+        fprintf(stderr, "Brotli decompression failed: %d\n", result);
         free(output);
         return NULL;
     }
 
+    // Langkah 4: Ubah ke string biasa
     char *output_str = malloc(output_buf_size + 1);
     if (!output_str) {
         free(output);
         return NULL;
     }
 
+    // Hanya menyalin ukuran yang benar sesuai dengan hasil dekompresi
     memcpy(output_str, output, output_buf_size);
-    output_str[output_buf_size] = '\0';
-    *output_size = output_buf_size;
+    output_str[output_buf_size] = '\0';  // null-terminate
+
     free(output);
+
+    // Menyimpan ukuran output, jika diminta
+    if (output_size) {
+        *output_size = output_buf_size;
+    }
+
     return output_str;
 }
-
-/*int main() {
-    const char *original = "Ini adalah data yang akan dikompresi menggunakan Brotli.";
-    size_t original_size = strlen(original);
-
-    uint8_t *compressed = malloc(BUFFER_SIZE);
-    uint8_t *decompressed = malloc(BUFFER_SIZE);
-
-    // Kompresi
-    size_t compressed_size = compress_brotli((const uint8_t*)original, original_size, compressed, BUFFER_SIZE);
-    if (compressed_size == 0) {
-        printf("Kompresi gagal.\n");
-        return 1;
-    }
-
-    // Tampilkan hasil kompresi dalam hex
-    printf("Data terkompresi (%zu byte):\n", compressed_size);
-    for (size_t i = 0; i < compressed_size; i++) {
-        printf("%02X ", compressed[i]);
-    }
-    printf("\n");
-
-    // Dekompresi
-    size_t decompressed_size = decompress_brotli(compressed, compressed_size, decompressed, BUFFER_SIZE);
-    if (decompressed_size == 0) {
-        printf("Dekompresi gagal.\n");
-        return 1;
-    }
-
-    // Tambahkan null-terminator
-    decompressed[decompressed_size] = '\0';
-    printf("Hasil dekompresi: %s\n", decompressed);
-
-    free(compressed);
-    free(decompressed);
-    return 0;
-}*/
