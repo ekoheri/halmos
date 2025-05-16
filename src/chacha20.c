@@ -1,16 +1,13 @@
 #include <stdio.h>
-#include <stdint.h>
 #include <stdlib.h>
-#include <stddef.h>
 #include <string.h>
 
 #include "../include/chacha20.h"
-#include "../include/libutils.h"
 
 #define CHACHA20_BLOCK_SIZE 64
 #define ROTATE_LEFT(x, n) (((x) << (n)) | ((x) >> (32 - (n))))
 
-uint32_t counter = 1;  
+uint32_t counter = 1; 
 
 void chacha20_block(uint32_t output[16], const uint32_t input[16]) {
     uint32_t state[16];
@@ -63,89 +60,52 @@ void chacha20_block(uint32_t output[16], const uint32_t input[16]) {
     }
 }
 
-char* encrypt(
-    const char *plaintext, 
-    const char *key, long length) {
+void prepare_input(uint32_t input[16], const uint8_t key[32], const uint8_t nonce[12], uint32_t counter) {
+    // Constants "expand 32-byte k" dalam 4 x uint32_t (little endian)
+    input[0] = 0x61707865;
+    input[1] = 0x3320646e;
+    input[2] = 0x79622d32;
+    input[3] = 0x6b206574;
 
-    uint8_t *ciphertext_bytes = malloc(length);
-    if (!ciphertext_bytes) {
-        return NULL;
+    // Key (256-bit) 8 kata
+    for (int i = 0; i < 8; i++) {
+        input[4 + i] = ((uint32_t)key[i * 4]) |
+                       ((uint32_t)key[i * 4 + 1] << 8) |
+                       ((uint32_t)key[i * 4 + 2] << 16) |
+                       ((uint32_t)key[i * 4 + 3] << 24);
     }
 
-    uint32_t block[16] = {0};
+    // Counter
+    input[12] = counter;
 
-    // Memisahkan `key` dan `nonce` dari parameter `key`
-    memcpy(block, key, 32);      // 32 byte pertama sebagai kunci
-    memcpy(block + 8, key + 32, 8);  // 8 byte terakhir sebagai nonce
-    block[12] = counter;
-
-    uint32_t output_block[16];
-    
-    for (uint32_t i = 0; i < length; i++) {
-        if (i % CHACHA20_BLOCK_SIZE == 0) {
-            chacha20_block(output_block, block);  // Membuat blok enkripsi baru
-            block[12]++;                          // Meningkatkan counter setiap blok
-        }
-        ciphertext_bytes[i] = plaintext[i] ^ ((uint8_t*)output_block)[i % CHACHA20_BLOCK_SIZE];
+    // Nonce (96 bit) 3 kata
+    for (int i = 0; i < 3; i++) {
+        input[13 + i] = ((uint32_t)nonce[i * 4]) |
+                        ((uint32_t)nonce[i * 4 + 1] << 8) |
+                        ((uint32_t)nonce[i * 4 + 2] << 16) |
+                        ((uint32_t)nonce[i * 4 + 3] << 24);
     }
-
-    char *ciphertext_hex = malloc(length * 2 + 1);
-    if (!ciphertext_hex) {
-        free(ciphertext_bytes);
-        return NULL;
-    }
-    bytes_to_hex(ciphertext_bytes, ciphertext_hex, length);
-
-    free(ciphertext_bytes);
-    return ciphertext_hex;
 }
 
-char* decrypt(const char *ciphertext, const char *key, long length) {
-    uint8_t *ciphertext_bytes = malloc(length);
-    if (!ciphertext_bytes) {
-        return NULL;
-    }
+uint8_t* chacha20_crypt(const uint8_t *input, size_t len, const uint8_t key[32], const uint8_t nonce[12]) {
+    uint8_t *output = malloc(len);
+    if (!output) return NULL;
 
-    // Mengonversi ciphertext dari hex ke bytes
-    hex_to_bytes(ciphertext, ciphertext_bytes, length);
+    uint32_t block[16];
+    uint32_t keystream[16];
+    size_t i;
 
-    uint8_t *plaintext_bytes = malloc(length);
-    if (!plaintext_bytes) {
-        free(ciphertext_bytes);
-        return NULL;
-    }
+    uint32_t counter = 0;
 
-    uint32_t block[16] = {0};
-    
-    // Mengambil kunci (32 byte pertama dari key) dan nonce (8 byte terakhir dari key)
-    memcpy(block, key, 32);          // 32 byte pertama sebagai kunci
-    memcpy(block + 8, key + 32, 8);  // 8 byte terakhir sebagai nonce
-    block[12] = counter;             // Menggunakan counter yang diberikan
-
-    uint32_t output_block[16];
-    
-    // Proses dekripsi dengan XOR
-    for (uint32_t i = 0; i < length; i++) {
+    for (i = 0; i < len; i++) {
+        // Set ulang block setiap 64 byte
         if (i % CHACHA20_BLOCK_SIZE == 0) {
-            chacha20_block(output_block, block);  // Membuat blok baru dari chacha20
-            block[12]++;                          // Meningkatkan counter setiap blok
+            prepare_input(block, key, nonce, counter++);
+            chacha20_block(keystream, block);
         }
-        plaintext_bytes[i] = ciphertext_bytes[i] ^ ((uint8_t*)output_block)[i % CHACHA20_BLOCK_SIZE];
+        output[i] = input[i] ^ ((uint8_t*)keystream)[i % CHACHA20_BLOCK_SIZE];
     }
 
-    char *plaintext = malloc(length + 1);  // Mengalokasikan memori untuk hasil dekripsi
-    if (!plaintext) {
-        free(ciphertext_bytes);
-        free(plaintext_bytes);
-        return NULL;
-    }
-
-    memcpy(plaintext, plaintext_bytes, length);  // Menyalin hasil dekripsi ke dalam plaintext
-    plaintext[length] = '\0';  // Menambahkan null terminator
-
-    free(ciphertext_bytes);
-    free(plaintext_bytes);
-    return plaintext;
+    return output;
 }
 
-// compile : gcc -shared -o chacha20 -fPIC enkripsi/chacha20.c

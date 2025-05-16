@@ -21,7 +21,9 @@
 #include "../include/sha256.h"
 #include "../include/chacha20.h"
 #include "../include/pasaran.h"
-#include "../include/brotli_compression.h"
+#include "../include/brotli_comp.h"
+#include "../include/bs64.h"
+#include "../include/libutils.h"
 
 #define BUFFER_SIZE 1024
 
@@ -210,50 +212,69 @@ char *create_response(
         
     char *response = NULL;
 
-    char *encrypt_body;
+    //char *encrypt_body;
     char *final_body;
     int final_body_size;
     char *responseTime = get_time_string();
     if(encrypted == 1) {
-        char *key = masehi2jawa(responseTime);
-        char *hash_key = sha256_hash(key);
-        long compressed_size; //, decompressed_size;
-        // Hanya untuk menampilkan hasil uji coba
-        // Jika diimplementasikan beneran, printf dihapus
-        printf("SERVER SEND DATA\n");
+        printf("\nSERVER SEND DATA\n");
         printf("Original data size : %d bytes\n", body_size);
-        printf("\n\nENCRYPTION\nTime Value : %s\n", responseTime);
-        printf("Javanese time Key : %s\n", key);
-        printf("Hash Key : %s\n", hash_key);
-
-        encrypt_body = encrypt(body, hash_key, body_size);
-        printf("\n\nCOMPRESION\nData size after encryption : %ld bytes\n", strlen(encrypt_body));
         
-        char *compressed = compress_brotli(encrypt_body, strlen(encrypt_body));
-        compressed_size = strlen(compressed) + 1;
+        // =================== Kompresi
+        size_t compressed_size = 0;
+        uint8_t *compressed = compress_brotli(body, body_size, &compressed_size);
         if (!compressed) {
-            printf("Kompresi gagal.\n");
+            fprintf(stderr, "Kompresi gagal.\n");
             return NULL;
         }
-        printf("Data size after compression : %zu bytes\n", compressed_size);
+        printf("\n\nCOMPRESSION\nUkuran kompresi : %zu byte\n", compressed_size);
+        printf("Rasio kompresi Brotli : %.2f%%\n", ((double)(body_size - compressed_size) / body_size) * 100);//(compressed_size * 100.0) / body_size);
 
-        final_body_size = compressed_size;
+        // ====================== Encrypt
+        char *java_key = masehi2jawa(responseTime);
+        char *hash_key = sha256_hash(java_key);
+        uint8_t buffer_key[44];
+        hex_to_bytes(hash_key, buffer_key, 44);
+        uint8_t key[32];
+        uint8_t nonce[12];
+        memcpy(key, buffer_key, 32);
+        memcpy(nonce, buffer_key + 32, 12);
+
+        uint8_t *ciphertext = chacha20_crypt((const uint8_t*)compressed, compressed_size, key, nonce);
+        if (!ciphertext) {
+            fprintf(stderr, "Enkripsi gagal\n");
+            return NULL;
+        }
+
+        printf("\n\nENCRYPTION\nTime Value : %s\n", responseTime);
+        printf("Javanese time Key : %s\n", java_key);
+        printf("Hash Key : %s\n", hash_key);
+
+
+        // ====================== Encode Base64
+        char *cipher_b64 = base64_encode(ciphertext, compressed_size);
+        size_t b64_len = strlen(cipher_b64);
+        printf("\n\nENCODE BASE64\nUkuran setelah base64 : %zu byte\n", b64_len);
+        printf("Rasio Base64  : %.2f%%\n", ((double)(body_size - b64_len) / body_size) * 100);;
+        //printf("Ciphertext (base64): \n%s\n", cipher_b64);
+
+        final_body_size = b64_len;
 
         // Alokasikan memori untuk final_body
         final_body = (char *)malloc(final_body_size);
         if (!final_body) {
-            free(key);
+            free(java_key);
             free(hash_key);
             return NULL;
         }
 
         // Gabungkan encrypt_body, separator, dan public_key
-        strcpy(final_body, compressed);
+        strcpy(final_body, cipher_b64);
 
         res_header->encrypted = "yes";
 
         // Bebaskan memori yang tidak lagi diperlukan
-        free(key);
+        free(java_key);
         free(hash_key);
     } else {
         final_body = (char *)body;  // Use body directly if not encrypted
@@ -295,7 +316,6 @@ char *create_response(
     // Jika diimplementasikan beneran, printf dihapus
     // printf("\nResponse Ciphertext ke browser\n%s\n", response);
 
-    
     return response;
 }
 
@@ -349,7 +369,7 @@ char *handle_method(int *response_size, RequestHeader req_header) {
             char *post_data = NULL;
             if (strcmp(req_header.post_data, "") > 0) {
                 if (req_header.encrypted != NULL && strcmp(req_header.encrypted, "yes") == 0) {
-                    char *key = masehi2jawa(req_header.request_time);
+                    /*char *key = masehi2jawa(req_header.request_time);
                     char *hash_key = sha256_hash(key);
 
                     char *decrypt_post_data = decrypt(req_header.post_data, hash_key, req_header.content_length);
@@ -362,7 +382,7 @@ char *handle_method(int *response_size, RequestHeader req_header) {
                     } 
 
                     free(key);
-                    free(hash_key);
+                    free(hash_key);*/
                 }
             }
 
