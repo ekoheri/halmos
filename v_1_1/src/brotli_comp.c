@@ -41,37 +41,39 @@ uint8_t *compress_brotli(const char *input, size_t input_size, size_t *compresse
 
 // Fungsi untuk dekompresi menggunakan Brotli
 char *decompress_brotli(const uint8_t *compressed, size_t compressed_size, size_t *output_size) {
-    size_t output_buf_size = compressed_size * 4; // Estimasi awal
-    uint8_t *output = malloc(output_buf_size);
-    if (!output) return NULL;
+    size_t output_buf_size = compressed_size * 4;
+    uint8_t *output = NULL;
 
-    BrotliDecoderResult result = BrotliDecoderDecompress(
-        compressed_size,
-        compressed,
-        &output_buf_size,
-        output
-    );
-
-    if (result != BROTLI_DECODER_RESULT_SUCCESS) {
-        fprintf(stderr, "Brotli decompression failed: %d\n", result);
+    for (int tries = 0; tries < 5; ++tries) {
         free(output);
-        return NULL;
+        output = malloc(output_buf_size);
+        if (!output) return NULL;
+
+        size_t actual_size = output_buf_size;
+        BrotliDecoderResult result = BrotliDecoderDecompress(
+            compressed_size,
+            compressed,
+            &actual_size,
+            output
+        );
+
+        if (result == BROTLI_DECODER_RESULT_SUCCESS) {
+            char *output_str = malloc(actual_size + 1);
+            if (!output_str) {
+                free(output);
+                return NULL;
+            }
+            memcpy(output_str, output, actual_size);
+            output_str[actual_size] = '\0';
+            free(output);
+            if (output_size) *output_size = actual_size;
+            return output_str;
+        }
+
+        output_buf_size *= 2; // Gandakan buffer dan coba lagi
     }
 
-    char *output_str = malloc(output_buf_size + 1);
-    if (!output_str) {
-        free(output);
-        return NULL;
-    }
-
-    memcpy(output_str, output, output_buf_size);
-    output_str[output_buf_size] = '\0';  // Null-terminate
-
+    fprintf(stderr, "Brotli decompression failed after retries\n");
     free(output);
-
-    if (output_size) {
-        *output_size = output_buf_size;
-    }
-
-    return output_str;
+    return NULL;
 }

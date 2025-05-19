@@ -7,9 +7,11 @@ typedef struct {
     int server_port;
     char document_root[256];
     char default_page[256];
-    char server_cgi[256];
-    int port_cgi;
+    int request_buffer_size;
+    char server_fpm[256];
+    int port_fpm;
     int max_event;
+    char default_key_sengkalan[256];
 } Config;
 
 // Deklarasikan variabel global untuk menyimpan konfigurasi

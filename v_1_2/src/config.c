@@ -76,12 +76,16 @@ void load_config(const char *filename) {
                 strncpy(config.document_root, value, sizeof(config.document_root));
             } else if (strcmp(key, "default_page") == 0) {
                 strncpy(config.default_page, value, sizeof(config.default_page));
-            } else if (strcmp(key, "server_cgi") == 0) {
-                strncpy(config.server_cgi, value, sizeof(config.server_cgi));
-            } else if (strcmp(key, "port_cgi") == 0) {
-                config.port_cgi = atoi(value);
+            } else if (strcmp(key, "request_buffer_size") == 0) {
+                config.request_buffer_size = atoi(value);
+            } else if (strcmp(key, "server_fpm") == 0) {
+                strncpy(config.server_fpm, value, sizeof(config.server_fpm));
+            } else if (strcmp(key, "port_fpm") == 0) {
+                config.port_fpm = atoi(value);
             } else if (strcmp(key, "max_event") == 0) {
                 config.max_event = atoi(value);
+            } else if (strcmp(key, "default_key_sengkalan") == 0) {
+                strncpy(config.default_key_sengkalan, value, sizeof(config.default_key_sengkalan));
             }
         }
     }

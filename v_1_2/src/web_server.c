@@ -15,8 +15,11 @@
 #include "../include/http.h"
 #include "../include/config.h"
 #include "../include/log.h"
+#include "../include/sengkalan.h"
+#include "../include/steganography.h"
 
 #define CONFIG_FILE "/etc/halmos/halmos.conf"
+#define STEGO_COVER_FILE "/etc/halmos/touch-icon-cover.png"
 
 extern Config config;
 
@@ -174,6 +177,20 @@ void run_server() {
     }
 }
 
+void init_public_key() {
+    int cols[] = {MAX_COLS, MAX_COLS, MAX_COLS, MAX_COLS, MAX_COLS, MAX_COLS, MAX_COLS, MAX_COLS, MAX_COLS, MAX_COLS};
+    char message[4096];
+
+    encrypt_sengkalan();
+    sengkalan_array_to_string(cipher_sengkalan, MAX_ROWS, cols, message, sizeof(message));
+
+    char stego_filename[300];
+    snprintf(stego_filename, sizeof(stego_filename), "%s%s", config.document_root,"touch-icon.png");
+    if (Inject(STEGO_COVER_FILE, stego_filename,  message) == 0) {
+        write_log("Sukses mengisialisasi public key pada file touch-icon.png");
+    }
+}
+
 void stop_server(int signal) {
   if (signal == SIGINT || signal == SIGTERM)
   {
@@ -227,11 +244,16 @@ int main() {
 
     load_config(CONFIG_FILE);
 
+    init_public_key();
+
     // Buat Web Server menjadi daemon
-    //set_daemon();
+    // set_daemon();
 
     // Server dijalankan
     start_server();
     run_server();
     return 0;
 }
+
+//ps aux | grep halmos | grep -v grep
+//kill <<PID>>
