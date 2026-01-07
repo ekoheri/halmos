@@ -1,6 +1,8 @@
 CC = gcc
-CFLAGS = -Wall -Iinclude
-LDFLAGS = -lm -lbrotlienc -lbrotlidec -lbrotlicommon -lpng
+# Tambahkan -pthread di CFLAGS agar compiler tahu kita menggunakan multithreading
+CFLAGS = -Wall -Iinclude -pthread
+# Tambahkan -pthread di LDFLAGS agar linker menghubungkan library libpthread
+LDFLAGS = -pthread -lm -lbrotlienc -lbrotlidec -lbrotlicommon -lpng
 
 # Direktori
 SRC_DIR = src
@@ -16,7 +18,7 @@ SRCS = $(wildcard $(SRC_DIR)/*.c)
 OBJS = $(patsubst $(SRC_DIR)/%.c, $(OBJ_DIR)/%.o, $(SRCS))
 TARGET = $(BIN_DIR)/halmos
 CONFIG_FILE = config/halmos.conf
-IMG_COVER_FILE = config/touch-icon-cover.png
+#IMG_COVER_FILE = config/touch-icon-cover.png
 
 # Aturan utama
 all: $(TARGET)
@@ -35,7 +37,7 @@ install: all
 	@mkdir -p $(ETC_DIR)
 #	@chmod 0777 $(ETC_DIR)
 	@cp $(CONFIG_FILE) $(ETC_DIR)
-	@cp $(IMG_COVER_FILE) $(ETC_DIR)
+#	@cp $(IMG_COVER_FILE) $(ETC_DIR)
 	@mkdir -p $(HTML_DEST_DIR)
 	@chmod 0777 $(HTML_DEST_DIR)
 	@cp -r $(HTML_SOURCE_DIR)/* $(HTML_DEST_DIR)
