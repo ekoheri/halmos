@@ -5,16 +5,25 @@
 
 // Struktur data untuk konfigurasi
 typedef struct {
+    //Network
     char server_name[256];
     int server_port;
+    //Storage
     char document_root[256];
     char default_page[256];
-    int request_buffer_size;
+    //Security
     size_t max_body_size; // Misal dalam byte
-    char server_fpm[256];
-    int port_fpm;
-    int max_event;
     bool secure_application;
+    //Backend_PHP
+    char php_server[256];
+    int php_port;
+    //Backend_Rust
+    char rust_ext[256];
+    char rust_server[256];
+    int rust_port;
+    //Performance    
+    int request_buffer_size;
+    int max_queue_size;
 } Config;
 
 // Deklarasikan variabel global untuk menyimpan konfigurasi

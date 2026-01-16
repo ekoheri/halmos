@@ -14,7 +14,8 @@ HTML_SOURCE_DIR = html
 HTML_DEST_DIR = /var/www/html/halmos
 
 # File sumber dan objek
-SRCS = $(wildcard $(SRC_DIR)/*.c)
+# Menggunakan 'find' agar mencari ke seluruh sub-folder secara rekursif
+SRCS = $(shell find $(SRC_DIR) -name "*.c")
 OBJS = $(patsubst $(SRC_DIR)/%.c, $(OBJ_DIR)/%.o, $(SRCS))
 TARGET = $(BIN_DIR)/halmos
 CONFIG_FILE = config/halmos.conf
@@ -30,7 +31,7 @@ $(TARGET): $(OBJS)
 
 # Membuat file objek
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c
-	@mkdir -p $(OBJ_DIR)
+	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 install: all

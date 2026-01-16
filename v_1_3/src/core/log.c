@@ -6,8 +6,8 @@
 #include <errno.h>
 #include <stdarg.h>
 
-#include "../include/log.h"
-#include "../include/config.h"
+#include "../include/core/log.h"
+#include "../include/core/config.h"
 
 extern Config config;
 

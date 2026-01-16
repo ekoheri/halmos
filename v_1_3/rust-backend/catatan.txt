@@ -1,0 +1,106 @@
+A. INSTALL RUST
+
+1. Persiapan Dependency (Build Tools)
+Sebelum install Rust, pastikan Linux Anda punya alat untuk kompilasi (linker). Karena Anda sudah bisa menjalankan server C, kemungkinan besar ini sudah ada, tapi baiknya dipastikan:
+
+sudo apt update
+sudo apt install build-essential gcc make
+
+2. Jalankan Script Instalasi Resmi
+Gunakan perintah curl untuk mengunduh script dari situs resmi Rust:
+
+
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+
+Penting: Nanti akan muncul pilihan instalasi. Ketik 1 (Proceed with installation - default) lalu tekan Enter.
+
+3. Konfigurasi Environment (PENTING)
+Setelah instalasi selesai, terminal Anda belum akan mengenali perintah cargo secara langsung. Anda perlu me-refresh shell Anda:
+
+source $HOME/.cargo/env
+
+
+4. Verifikasi Instalasi
+Cek apakah Rust dan Cargo (package manager-nya) sudah terpasang dengan benar:
+
+rustc --version
+cargo --version
+
+
+5. Tips Tambahan untuk Skripsi (Manajemen Versi)
+Dalam skripsi, Anda bisa mencatat versi Rust yang Anda gunakan agar pengujiannya reproducible. Beberapa perintah berguna lainnya:
+
+Update Rust ke versi terbaru: rustup update
+Uninstall Rust: rustup self uninstall
+Cek Toolchain: rustup show
+
+6. Buat project baru
+
+# 1. Buat project (otomatis bikin folder)
+cargo new halmos-rust-v2
+
+# 2. Masuk ke foldernya
+cd halmos-rust-v2
+
+# 3. Langsung bisa dicompile/run
+cargo run
+
+6.b opsi B
+
+# 1. Buat folder manual dulu
+mkdir halmos-rust-v2
+cd halmos-rust-v2
+
+# 2. Inisialisasi Rust di folder ini
+cargo init
+
+# 3. Jalankan
+cargo run
+
+
+7. Cara Compile ke Binary (Untuk Halmos)
+Karena untuk Server Halmos Anda butuh file binary yang kencang, setelah selesai menulis kode di src/main.rs, lakukan ini:
+
+
+# Compile mode produksi
+
+cargo build --release
+
+B. spawn-ci
+
+1. Cara install 
+Jalankan perintah berikut di terminal:
+
+sudo apt update
+sudo apt install spawn-fcgi
+
+2. Cara Menjalankan untuk Backend Rust
+Ada dua cara untuk menjalankannya, yaitu mode Background (untuk penggunaan normal) dan mode Foreground (untuk debug/melihat error secara langsung).
+
+A. Mode Foreground (Disarankan untuk Debug/Skripsi)
+Gunakan flag -n. Dengan cara ini, jika Rust Anda mengalami panic atau error, pesannya akan langsung muncul di terminal ini.
+
+spawn-fcgi -n -p 9001 ./target/release/nama_binary_anda
+
+B. Mode Background (Normal)
+Tanpa flag -n, perintah ini akan langsung melepas proses ke latar belakang.
+
+spawn-fcgi -p 9001 ./target/release/nama_binary_anda
+
+3. Penjelasan Parameter Utama
+Penting bagi Anda untuk memahami parameter ini jika nanti ditanya saat sidang skripsi:
+-p 9001: Menentukan nomor Port. Ini harus sama dengan port yang dipanggil oleh Server C (Halmos).
+-n: No-fork. Membuat proses tetap di depan (tidak menjadi daemon).
+-f: (Opsional) Menentukan path ke binary jika tidak ingin ditaruh di akhir perintah.
+-a: (Opsional) Menentukan alamat IP (defaultnya 127.0.0.1).
+
+4. Cara Mematikan (Stop)
+Karena spawn-fcgi menjalankan aplikasi Anda sebagai proses mandiri, cara mematikannya adalah dengan menggunakan perintah pkill atau killall:
+
+
+# Mematikan berdasarkan nama file binary Rust Anda
+sudo pkill nama_binary_anda
+
+# Atau paksa tutup port jika masih tersangkut
+sudo fuser -k 9001/tcp
+
