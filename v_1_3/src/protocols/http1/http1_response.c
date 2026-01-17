@@ -9,10 +9,20 @@
 #include "../include/protocols/http1/http1_response.h"
 #include "../include/core/log.h"
 
-/**
- * Fungsi Internal: Mengirimkan raw teks header HTTP/1.1
- * Ini adalah evolusi dari send_http_headers lama Anda.
- */
+/**********************************************************************
+ * send_http1_headers()
+ * ANALOGI :
+ * Petugas AMBIL NOMOR ANTRIAN yang menyiapkan amplop balasan.
+ *
+ * Dia hanya menulis bagian KOP (header) surat:
+ * - Status: "200 OK" → seperti cap “BERHASIL”
+ * - Jenis isi: HTML / gambar / JSON
+ * - Panjang isi: berapa gram berat paket
+ * - Mau tutup loket atau tetap buka (keep-alive)
+ *
+ * Petugas ini TIDAK menyentuh isi surat,
+ * hanya menyiapkan header/amplopnya saja.
+ **********************************************************************/
 static void send_http1_headers(int client_fd, const HalmosResponse *res, bool keep_alive) {
     char header[512];
     const char *conn_status = keep_alive ? "keep-alive" : "close";
@@ -30,22 +40,46 @@ static void send_http1_headers(int client_fd, const HalmosResponse *res, bool ke
     send(client_fd, header, len, 0);
 }
 
-/**
- * Fungsi Utama: Mengirim respon lengkap berdasarkan objek HalmosResponse
- */
+/**********************************************************************
+ * send_halmos_response()
+ * ANALOGI :
+ * Kurir pengantar paket yang bekerja 2 langkah:
+ *
+ * 1. Kirim dulu label paket (panggil send_http1_headers)
+ * 2. Kalau surat ada isinya → kirim isinya
+ *
+ * Fungsi ini seperti kurir umum:
+ * tidak peduli isi paket apa,
+ * yang penting mengikuti aturan protokol pengiriman.
+ **********************************************************************/
 void send_halmos_response(int sock_client, HalmosResponse res, bool keep_alive) {
-    // 1. Kirim Header
+    // 1. Kirim dulu label paket/kop surat/amplop (panggil send_http1_headers)
     send_http1_headers(sock_client, &res, keep_alive);
 
-    // 2. Kirim Body jika data ada di memori
+    // 2. Kalau surat ada isinya → kirim isinya
     if (res.type == RES_TYPE_MEMORY && res.content != NULL && res.length > 0) {
         send(sock_client, res.content, res.length, 0);
     }
 }
 
-/**
- * Shortcut untuk mengirim pesan teks/error cepat
- */
+/**********************************************************************
+ * send_mem_response()
+ * ANALOGI :
+ * Petugas cetak pesan cepat di loket informasi.
+ *
+ * Misal ada tamu bertanya:
+ * → “Halaman tidak ada”
+ *
+ * Petugas langsung:
+ * 1. Mengetik teks sederhana di kertas
+ * 2. Memasukkannya ke format HalmosResponse
+ * 3. Memanggil kurir (send_halmos_response)
+ *
+ * Cocok untuk:
+ * - pesan sukses (200), error surat tidak ada 404
+ * - pesan sederhana HTML
+ * - balasan singkat tanpa file.
+ **********************************************************************/
 void send_mem_response(int client_fd, int status_code, const char *status_text, 
                        const char *content, bool keep_alive) {
     HalmosResponse res = {
@@ -60,9 +94,27 @@ void send_mem_response(int client_fd, int status_code, const char *status_text,
     send_halmos_response(client_fd, res, keep_alive);
 }
 
-/**
- * Melayani pengiriman file statis
- */
+/**********************************************************************
+ * send_file_response()
+ * ANALOGI :
+ * Bagian GUDANG yang mengirim barang fisik.
+ *
+ * Alurnya seperti:
+ * 1. Cari barang di rak (fopen)
+ *    → kalau tidak ketemu, kirim surat “404”
+ *
+ * 2. Timbang barang dulu (hitung ukuran file)
+ *
+ * 3. Tempel label paket (send_http1_headers)
+ *
+ * 4. Kirim barang sedikit-sedikit pakai troli
+ *    → dibaca per 8KB seperti kardus per kardus
+ *
+ * Fungsi ini khusus untuk:
+ * - HTML statis
+ * - gambar
+ * - CSS/JS
+ **********************************************************************/
 void send_file_response(int client_fd, const char *file_path, const char *mime_type, bool keep_alive) {
     FILE *file = fopen(file_path, "rb");
     if (!file) {

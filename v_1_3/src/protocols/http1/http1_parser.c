@@ -50,9 +50,23 @@ extern Config config;
 
 extern TaskQueue global_queue;
 
-/**
- * Fungsi internal (static) untuk membedah baris pertama HTTP (Method & URI)
- */
+/********************************************************************
+ * parse_request_line()
+ * ANALOGI :
+ * Petugas loket yang membaca BARIS PERTAMA surat pesanan.
+ *
+ * Tamu datang membawa tulisan:
+ *    "GET /produk?id=10 HTTP/1.1"
+ *
+ * Tugas petugas ini:
+ * - Memisahkan jenis layanan  → GET / POST (seperti jenis menu)
+ * - Memisahkan alamat tujuan  → /produk
+ * - Membaca catatan kecil     → ?id=10 (query string)
+ * - Mengetahui gaya bahasa    → HTTP/1.1
+ *
+ * Kalau formatnya rusak → petugas langsung bilang:
+ * “Maaf formulir tidak terbaca.”
+ ********************************************************************/
 static void parse_request_line(char *line, RequestHeader *req) {
     char *m = strtok(line, " ");
     char *u = strtok(NULL, " ");
@@ -80,9 +94,23 @@ static void parse_request_line(char *line, RequestHeader *req) {
     }
 }
 
-/**
- * Fungsi Utama Parser
- */
+/********************************************************************
+ * parse_http_request()
+ * ANALOGI :
+ * Bagian Tata Usaha yang MEMBUKA AMPLOP surat secara lengkap.
+ *
+ * Langkah kerjanya seperti:
+ * 1. Mencari lipatan surat (\r\n\r\n atau Enter 2 kali) → batas kop surat & isi
+ * 2. Memanggil petugas pembaca judul (parse_request_line)
+ * 3. Membaca keterangan tambahan:
+ *      - Content-Length  → tebal isi surat
+ *      - Content-Type    → jenis lampiran
+ * 4. Menyalin isi surat ke map kerja (body)
+ * 5. Kalau isinya paket multipart → kirim ke petugas bongkar paket
+ *
+ * Hasilnya:
+ * → formulir digital yang rapi siap diproses pelayan.
+ ********************************************************************/
 bool parse_http_request(const char *raw_data, size_t total_received, RequestHeader *req) {
     // 1. Cari batas Header (\r\n\r\n)
     char *header_end = strstr(raw_data, "\r\n\r\n");
@@ -138,6 +166,19 @@ bool parse_http_request(const char *raw_data, size_t total_received, RequestHead
     return req->is_valid;
 }
 
+/********************************************************************
+ * free_request_header()
+ * ANALOGI :
+ * Petugas kebersihan meja arsip.
+ *
+ * Setelah pesanan selesai:
+ * - fotokopi dibuang,
+ * - map dikosongkan,
+ * - meja disiapkan untuk tamu berikutnya.
+ *
+ * Tanpa petugas ini:
+ * → kantor akan penuh sampah memori.
+ ********************************************************************/
 void free_request_header(RequestHeader *req) {
     if (req->uri) free(req->uri);
     if (req->query_string) free(req->query_string);
@@ -156,6 +197,22 @@ void free_request_header(RequestHeader *req) {
     }
 }
 
+/********************************************************************
+ * handle_get_request()
+ * ANALOGI :
+ * Pelayan yang melayani tamu tipe GET : “hanya ingin melihat/mengambil”.
+ *
+ * Alur kerjanya seperti:
+ * 1. Satpam cek alamat aman (tidak boleh keluar area)
+ * 2. Tentukan tujuan:
+ *    - Kalau PHP  → kirim ke dapur PHP via FastCGI
+ *    - Kalau Rust → kirim ke dapur Rust via FastCGI
+ *    - Kalau file biasa → ambil dari gudang
+ *
+ * Saat ambil file:
+ * → pakai sendfile seperti conveyor,
+ *   barang dikirim tanpa dipegang tangan pelayan.
+ ********************************************************************/
 void handle_get_request(int sock_client, RequestHeader *req) {
     char *safe_file_path = NULL;
     // 1. Cek apakah ini request untuk Rust (Bypass pengecekan fisik)
@@ -176,10 +233,9 @@ void handle_get_request(int sock_client, RequestHeader *req) {
         return;
     }
 
-    // 2. Cek apakah ini file PHP
+    // 2. Kalau PHP  → kirim ke dapur PHP via FastCGI
     if (strstr(req->uri, ".php")) {
-        // Panggil fungsi FastCGI yang kita buat di fpm.c
-        // Catatan: Anda mungkin perlu membagi URI menjadi directory dan script_name
+        // 2.1. Panggil fungsi FastCGI yang dibuat di handlers/fastcgi.c
         FastCGI_Response res = fastcgi_request(
             config.php_server,
             config.php_port,
@@ -189,10 +245,10 @@ void handle_get_request(int sock_client, RequestHeader *req) {
             req->query_string ? req->query_string : "",
             "",                     // path_info
             "",                     // post_data
-            0,                      // post_data_len (TAMBAHKAN INI SEBAGAI ARGUMEN KE-9)
-            ""                      // content_type (SEKARANG JADI ARGUMEN KE-10)
+            0,                      // post_data_len
+            ""                      // content_type
         );
-
+        // 2.2 Hasil dari PHP kirim balik ke browser
         if (res.body != NULL) {
             char header[1024];
             int h_len = snprintf(header, sizeof(header),
@@ -206,20 +262,21 @@ void handle_get_request(int sock_client, RequestHeader *req) {
             send(sock_client, header, h_len, 0);
             send(sock_client, res.body, strlen(res.body), 0);
 
-            // Bebaskan memori yang dialokasikan fpm.c
+            // Bebaskan memori yang dialokasikan
             if (res.header) free(res.header);
             if (res.body) free(res.body);
         } else {
+            // kalau body kosong, maka kirimkan keterangan 504 gateway timeout
             send_mem_response(sock_client, 504, "Gateway Timeout", "<h1>504 Gateway Timeout</h1>", req->is_keep_alive);
         }
         
         free(safe_file_path);
-        return; // Keluar agar tidak lanjut ke pengiriman file statis
+        return; 
     }
 
-    // 3. Logika pemanggilan Rust
+    // 3. Kalau Rust → kirim ke dapur Rust via FastCGI
     if (strstr(req->uri, config.rust_ext)) {
-        // 1. Bersihkan path (Sudah benar)
+        // 3.1. Bersihkan path
         char clean_path[PATH_MAX];
         memset(clean_path, 0, sizeof(clean_path));
         int j = 0;
@@ -229,7 +286,7 @@ void handle_get_request(int sock_client, RequestHeader *req) {
         }
         clean_path[j] = '\0';
 
-        // 2. Panggil Rust
+        // 3.2. Panggil Rust via FastCGI
         FastCGI_Response res_rust = fastcgi_request(
             config.rust_server, 
             config.rust_port, 
@@ -243,12 +300,11 @@ void handle_get_request(int sock_client, RequestHeader *req) {
             ""   // content_type (TAMBAHKAN INI)
         );
 
+        // 3.3 Hasil dari Rust kirim balik ke browser
         if (res_rust.body != NULL) {
-            // --- PERBAIKAN TOTAL DI SINI ---
             char header[1024];
             size_t body_len = strlen(res_rust.body);
             
-            // Kita buat header yang bersih dan satu kesatuan
             int h_len = snprintf(header, sizeof(header),
                 "HTTP/1.1 200 OK\r\n"
                 "Content-Type: text/html\r\n"
@@ -258,22 +314,23 @@ void handle_get_request(int sock_client, RequestHeader *req) {
                 body_len, 
                 req->is_keep_alive ? "keep-alive" : "close");
             
-            // Kirim Header buatan Halmos
+            // Kirim Header (kop surat) ke browser
             send(sock_client, header, h_len, 0);
             
-            // Kirim Body hasil eksekusi Rust
+            // Kirim Body hasil eksekusi Rust ke browser
             send(sock_client, res_rust.body, body_len, 0);
 
             // Bersihkan memori
             if (res_rust.header) free(res_rust.header);
             if (res_rust.body) free(res_rust.body);
         } else {
+            // kalau body kosong, maka kirimkan keterangan 504 gateway timeout
             send_mem_response(sock_client, 504, "Gateway Timeout", "<h1>504 Gateway Timeout</h1>", req->is_keep_alive);
         }
         free(safe_file_path);
         return;
     }
-    // 4. Logika File Statis
+    // 4. Logika File Statis : Kalau file biasa → ambil dari gudang
     struct stat st;
     if (stat(safe_file_path, &st) != 0 || !S_ISREG(st.st_mode)) {
         send_mem_response(sock_client, 404, "Not Found", "<h1>404 Not Found</h1>", req->is_keep_alive);
@@ -305,14 +362,13 @@ void handle_get_request(int sock_client, RequestHeader *req) {
             ssize_t sent = sendfile(sock_client, fd, &offset, remaining);
             if (sent <= 0) {
                 if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                    //usleep(1000); // Tunggu buffer socket kosong
-                    // Berikan yield agar thread lain bisa jalan jika di satu core
+                    // Berikan yield agar thread lain 
+                    // bisa jalan jika di satu core
                     sched_yield();
                     continue;
                 }
                 break; // Error atau koneksi terputus
             }
-            //remaining -= sent;
             if (sent == 0) break; // Client menutup koneksi tengah jalan
             remaining -= sent;
         }
@@ -321,15 +377,35 @@ void handle_get_request(int sock_client, RequestHeader *req) {
     free(safe_file_path);
 }
 
+/********************************************************************
+ * handle_post_request()
+ * ANALOGI :
+ * Loket penerima BERKAS dari pelanggan.
+ *
+ * Tamu menyerahkan:
+ * - formulir pendaftaran,
+ * - upload foto,
+ * - data transaksi.
+ *
+ * Petugas:
+ * 1. Cek tujuan valid
+ * 2. Pilih dapur pemroses:
+ *      - PHP?
+ *      - Rust?
+ * 3. Data dialirkan bertahap seperti selang air,
+ *    tidak ditumpuk dulu agar hemat tenaga.
+ * 4. Balasan dari dapur dikirim lagi ke tamu.
+ ********************************************************************/
 void handle_post_request(int sock_client, RequestHeader *req) {
-    // 1. WAJIB: Validasi Path dulu sebelum komunikasi ke backend
+    // 1. Cek tujuan valid: Validasi Path dulu sebelum komunikasi ke backend
     char *safe_file_path = sanitize_path(config.document_root, req->uri);
     if (safe_file_path == NULL) {
         send_mem_response(sock_client, 404, "Not Found", "<h1>404 Not Found</h1>", req->is_keep_alive);
         return;
     }
 
-    // 2. Tentukan target IP & Port berdasarkan ekstensi
+    // 2. Pilih dapur pemroses: PHP atau Rust?
+    // Tentukan target IP & Port berdasarkan ekstensi
     const char *t_ip;
     int t_port;
 
@@ -346,7 +422,9 @@ void handle_post_request(int sock_client, RequestHeader *req) {
         return;
     }
 
-    // 3. Panggil Modul Unified Streaming (Hasil kerja keras kita tadi)
+    // 3. Panggil Modul Unified Streaming 
+    // Data dialirkan bertahap seperti selang air,
+    // tidak ditumpuk dulu agar hemat tenaga.
     FastCGI_Response res = cgi_request_stream(
         t_ip, 
         t_port, 
@@ -360,7 +438,8 @@ void handle_post_request(int sock_client, RequestHeader *req) {
         req->content_type
     );
 
-    // 2. Kirim Balasan ke Browser jika ada respon
+    // 4. Balasan dari dapur (Rust/PHP) dikirim lagi ke tamu (browser).
+    // Kirim Balasan ke Browser jika ada respon
     if (res.body) {
         char header[512];
         int h_len = snprintf(header, sizeof(header),
@@ -383,21 +462,38 @@ void handle_post_request(int sock_client, RequestHeader *req) {
     free(safe_file_path);
 }
 
+/********************************************************************
+ * handle_method()
+ * ANALOGI :
+ * Manajer front office / pengarah lalu lintas tamu.
+ *
+ * Dia hanya memutuskan:
+ * - Tamu mau ngobrol lama?      → jalur WebSocket
+ * - Tamu cuma melihat?          → kirim ke pelayan GET
+ * - Tamu kirim berkas?          → kirim ke loket POST
+ * - Metode aneh?                → satpam tolak (405)
+ *
+ * Manajer ini tidak mengerjakan detail,
+ * hanya menunjuk petugas yang tepat.
+ ********************************************************************/
 void handle_method(int sock_client, RequestHeader req_header) {
-    // Jalur WebSocket
+    // 1. Tamu mau ngobrol lama? → jalur WebSocket
+    // Ini belum diimplementasikan ya?
     if (config.secure_application && req_header.is_upgrade) {
         // ... logika websocket ...
         return;
     }
 
-    // Jalur GET (File Statis)
+    // 2. Tamu cuma melihat? → kirim ke pelayan GET
+    // Cuma melihat ini maksudnya tidak melampirkan berkas (foto, pdf, dll.)
     if (strcmp(req_header.method, "GET") == 0) {
         handle_get_request(sock_client, &req_header); // Pindah ke sini
     } 
-    // Jalur POST (Upload/Data)
+    // 3. Tamu kirim berkas? → kirim ke loket POST
     else if (strcmp(req_header.method, "POST") == 0) {
         handle_post_request(sock_client, &req_header);
     } 
+    // 4. Metode aneh? tidak dikenal? → satpam tolak (405)
     else {
         send_mem_response(sock_client, 405, "Method Not Allowed", "<h1>405 Method Not Allowed</h1>", req_header.is_keep_alive);
     }

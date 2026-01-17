@@ -5,8 +5,6 @@
 #include <limits.h>
 #include <sys/stat.h>
 
-// Kita include http.h di file .c saja, bukan di .h
-// Ini aman karena tidak akan menyebabkan circular include
 #include "../include/protocols/common/http_common.h" 
 #include "../include/core/fs_handler.h"
 #include "../include/core/log.h"
@@ -50,6 +48,9 @@ const char *get_mime_type(const char *file) {
     else return "text/html";  // Default MIME type
 } //end get_mime_type
 
+// Fungsi untuk menyimpan file yang di-upload dari browser
+// Fungsi ini di dunia pemrograman web nyata, nyaris tidak digunakan
+// karena biasanya penanganan file langsung dilakukan oleh backend PHP/Rust
 bool save_uploaded_file(MultipartPart *part, const char *destination_folder) {
     if (!part || !part->filename || !part->data) return false;
 

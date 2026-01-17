@@ -52,7 +52,22 @@ void set_daemon() {
     }
 }
 
-// --- FUNGSI UTILITAS ---
+/********************************************************************
+ * set_nonblocking()
+ * ---------------------------------------------------------------
+ * Analogi:
+ * Ini seperti mengubah cara pelayan bekerja.
+ *
+ * Normal blocking:
+ *   Pelayan menunggu satu pelanggan selesai bicara dulu
+ *   baru bisa melayani yang lain.
+ *
+ * Non-blocking:
+ *   Pelayan bisa bilang:
+ *   “Silakan pikir dulu pesanannya, saya layani meja lain.”
+ *
+ * Sehingga satu thread tidak tersandera oleh satu klien.
+ ********************************************************************/
 void set_nonblocking(int sock) {
     int flags = fcntl(sock, F_GETFL, 0);
     if (flags == -1) {
@@ -64,15 +79,24 @@ void set_nonblocking(int sock) {
     }
 }
 
-// DETECT PROTOCOL HTTP1/HTTP2
-/**
- * Mendeteksi jenis protokol tanpa menghapus data dari buffer socket.
- */
+/********************************************************************
+ * detect_protocol()
+ * ---------------------------------------------------------------
+ * Analogi:
+ * Ini seperti resepsionis yang hanya “mengintip” gaya bicara tamu
+ * tanpa langsung mengajaknya ngobrol.
+ *
+ * - Kalau tamu membuka dengan kalimat resmi ala HTTP/2,
+ *   berarti tamu VIP (HTTP2).
+ * - Kalau mulai dengan “GET /”, “POST /” → tamu biasa HTTP/1.
+ *
+ * MSG_PEEK = mengintip tanpa menghapus data asli,
+ * seperti melihat dari balik kaca tanpa memanggil tamu masuk.
+ ********************************************************************/
+
 protocol_type_t detect_protocol(int client_fd) {
     char buffer[24];
-    // MSG_PEEK membiarkan data tetap ada di kernel untuk dibaca recv() nanti
     ssize_t n = recv(client_fd, buffer, sizeof(buffer), MSG_PEEK);
-    
     if (n <= 0) return PROTO_UNKNOWN;
 
     // Cek Magic String HTTP/2: "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
@@ -93,27 +117,47 @@ protocol_type_t detect_protocol(int client_fd) {
     return PROTO_HTTP1;
 }
 
-// --- LOGIKA HANDLING CLIENT ---
-/**
- * DISPATCHER UTAMA
- * Fungsi ini dijalankan oleh Worker Thread saat ada koneksi masuk.
- */
+/********************************************************************
+ * handle_client()
+ * ---------------------------------------------------------------
+ * Analogi:
+ * Ini seperti kepala pelayan yang menentukan:
+ *
+ * - Tamu ini harus diarahkan ke ruang HTTP1?
+ * - Atau ruang HTTP2?
+ *
+ * Dia tidak memasak sendiri,
+ * hanya menentukan jalur layanan yang tepat.
+ ********************************************************************/
 int handle_client(int sock_client) {
-    // 1. Deteksi Protokol
     protocol_type_t proto = detect_protocol(sock_client);
 
     if (proto == PROTO_HTTP2) {
         send_mem_response(sock_client, 505, "Not Supported", "<h1>H2 Soon</h1>", false);
-        return 0; // Beritahu worker untuk tutup koneksi
+        return 0; 
     } 
     else {
-        // JALANKAN SATU KALI SAJA (Tanpa While)
-        // handle_http1_session akan memproses 1 request, lalu return 1 jika keep-alive
         return handle_http1_session(sock_client);
     }
 }
 
-// --- FUNGSI WORKER THREAD ---
+/********************************************************************
+ * worker_routine()
+ * ---------------------------------------------------------------
+ * Analogi:
+ * Ini adalah KOKI di dapur restoran.
+ *
+ * - dequeue()  = koki mengambil nota pesanan dari meja antre.
+ * - handle_client() = koki memasak sesuai pesanan.
+ *
+ * Setelah selesai:
+ * - Kalau tamu masih mau tambah (keep-alive),
+ *   piring dikembalikan ke resepsionis (epoll re-arm).
+ * - Kalau selesai makan, meja dibersihkan (close).
+ *
+ * mark_worker_idle() = koki angkat tangan:
+ *   “Saya siap terima order berikutnya!”
+ ********************************************************************/
 void* worker_routine(void* arg) {
     while (1) {
         struct timeval arrival;
@@ -146,6 +190,22 @@ void* worker_routine(void* arg) {
     return NULL;
 }
 
+/********************************************************************
+ * start_server()
+ * ---------------------------------------------------------------
+ * Analogi:
+ * Ini seperti membuka cabang restoran baru:
+ *
+ * - Menentukan kapasitas kursi (MAX_EVENTS)
+ *   berdasarkan ukuran gedung (ulimit).
+ *
+ * - Membuat pintu masuk utama (socket listen).
+ * - Memasang resepsionis epoll sebagai
+ *   sistem antrian elektronik.
+ *
+ * Level Triggered pada listen socket =
+ * resepsionis selalu sadar kalau ada tamu baru.
+ ********************************************************************/
 void start_server() {
     // --- LOGIKA ADAPTIVE MAX_EVENTS ---
     struct rlimit rl;
@@ -199,7 +259,25 @@ void start_server() {
     write_log("Halmos Server berjalan di %s:%d", config.server_name, config.server_port);
 }
 
-// --- MAIN LOOP (PRODUCER) ---
+/********************************************************************
+ * run_server()
+ * ---------------------------------------------------------------
+ * Analogi:
+ * Ini adalah RESEPSIONIS utama restoran (event-driven core).
+ *
+ * - epoll_wait() = resepsionis melihat bel notifikasi:
+ *   “Meja mana yang manggil?”
+ *
+ * Jika event dari pintu utama:
+ *   → tamu baru datang → buat meja baru.
+ *
+ * Jika event dari klien lama:
+ *   → nota pesanan dimasukkan ke antrean dapur
+ *     (enqueue ke worker).
+ *
+ * Kalau antrean penuh:
+ *   → resepsionis menolak dengan sopan 503.
+ ********************************************************************/
 void run_server() {
     while (1) {
         int num_fds = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
@@ -242,6 +320,17 @@ void run_server() {
     }
 }
 
+/********************************************************************
+ * stop_server()
+ * ---------------------------------------------------------------
+ * Analogi:
+ * Ini seperti manajer restoran menerima perintah tutup:
+ *
+ * - Mengumumkan ke log,
+ * - Mengunci pintu masuk,
+ * - Membersihkan ruang resepsionis (free events),
+ * - Mematikan operasional dengan rapi.
+ ********************************************************************/
 void stop_server(int sig) {
     write_log("Menerima sinyal %d, menghentikan server...", sig);
     close(sock_server);

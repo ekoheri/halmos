@@ -49,7 +49,7 @@ void load_config(const char *filename) {
         // 1. Bersihkan newline (Pertahankan kode Anda)
         line[strcspn(line, "\n")] = '\0';
 
-        // 2. Gunakan trim dulu (PENTING!)
+        // 2. Gunakan trim dulu
         // Supaya jika ada baris "   # Komentar", tetap terdeteksi sebagai komentar
         char *current_line = trim(line);
 

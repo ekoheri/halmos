@@ -11,15 +11,11 @@
 
 extern Config config;
 
-/*void create_log_directory() {
-    struct stat st;
-    if (stat(config.log_directory, &st) != 0) { // Cek apakah folder log sudah ada
-        if (mkdir(config.log_directory, 0700) != 0) { // Buat folder log jika belum ada
-            fprintf(stderr, "Warning: Failed to create log directory: %s\n", strerror(errno));
-            // Tidak keluar program, biarkan log tetap berjalan atau lakukan penanganan lebih lanjut
-        }
-    }
-}*/
+/***************************************
+ * Fungsi ini berguna untuk menuliskan kejadian di server ke log
+ * Log disimpan di folder /var/log/halmos
+ * Anda bisa melihat per hari
+****************************************/
 
 void write_log(const char *format, ...) {
     time_t now = time(NULL);
@@ -27,10 +23,13 @@ void write_log(const char *format, ...) {
 
     // Format tanggal untuk nama file log
     char log_filename[100];
-    snprintf(log_filename, sizeof(log_filename), "%s%04d-%02d-%02d.log",
-         LOG_DIR, t->tm_year + 1900, t->tm_mon + 1, t->tm_mday); // Simpan di dalam folder logs
 
-    FILE *log_file = fopen(log_filename, "a"); // Buka file log untuk menambahkan
+    // Simpan di dalam folder logs (/var/log/halmos/)
+    snprintf(log_filename, sizeof(log_filename), "%s%04d-%02d-%02d.log",
+         LOG_DIR, t->tm_year + 1900, t->tm_mon + 1, t->tm_mday); 
+
+    // Buka file log untuk menambahkan
+    FILE *log_file = fopen(log_filename, "a"); 
     if (log_file != NULL) {
         // Format timestamp dalam format yang sesuai
         char timestamp[25];
@@ -42,10 +41,13 @@ void write_log(const char *format, ...) {
         // Mengelola variadic arguments
         va_list args;
         va_start(args, format);
-        vfprintf(log_file, format, args); // Tulis pesan dengan format variadic ke file log
+
+        // Tulis pesan dengan format variadic ke file log
+        vfprintf(log_file, format, args); 
         va_end(args);
 
-        fprintf(log_file, "\n"); // Tambahkan newline otomatis
+        // Tambahkan newline otomatis
+        fprintf(log_file, "\n"); 
         fclose(log_file); // Tutup file
     } else {
         fprintf(stderr, "Failed to open log file: %s\n", strerror(errno));

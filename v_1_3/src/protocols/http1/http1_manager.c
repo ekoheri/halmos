@@ -19,30 +19,76 @@
 // Objek Antrean Global (Pusat Kendali)
 TaskQueue global_queue;
 
+/***********************************************************************
+ * handle_http1_session()
+ * ANALOGI BESAR FUNGSI INI :
+ * Fungsi ini adalah seperti PETUGAS FRONT OFFICE di sebuah kantor
+ * yang menerima tamu dari pintu masuk sampai diarahkan ke layanan
+ * yang sesuai.
+ *
+ * Tugas utamanya:
+ * 1. Menerima surat dari tamu (recv)
+ * 2. Membaca dan memeriksa formulir (parsing HTTP)
+ * 3. Mengecek apakah berkas lengkap atau rusak
+ * 4. Jika ada lampiran besar → ditunggu sampai selesai
+ * 5. Jika formulir multipart → kirim ke bagian pembongkar berkas
+ * 6. Menyerahkan pekerjaan ke pelayan sesuai metode (GET/POST)
+ * 7. Mencatat aktivitas di buku tamu (log)
+ *
+ * Jika ada masalah di salah satu tahap,
+ * petugas langsung menolak dengan surat balasan resmi.
+ ***********************************************************************/
 int handle_http1_session(int sock_client) {
+     /**************************************************************
+    * 1. Alokasi buffer
+     * ANALOGI :
+     * Petugas menyiapkan MAP KOSONG untuk menampung surat dari tamu.
+     * Ukuran map mengikuti aturan kantor (config.request_buffer_size).
+     * Kalau map tidak bisa disiapkan → tamu langsung ditolak.
+     **************************************************************/
     int buf_size = config.request_buffer_size > 0 ? config.request_buffer_size : 4096;
     char *buffer = (char *)malloc(buf_size);
-    if (!buffer) return 0; // Kembalikan 0 jika gagal alokasi
+    if (!buffer) return 0; 
 
-    // 1. Baca data pertama
+    /**************************************************************
+     * 2. Menerima data pertama
+     * ANALOGI :
+     * Petugas membuka pintu dan menerima halaman pertama surat.
+     * Kalau tamu langsung pergi atau surat kosong,
+     * maka loket ditutup kembali.
+     **************************************************************/
     ssize_t received = recv(sock_client, buffer, buf_size - 1, 0);
     if (received <= 0) { 
         free(buffer); 
         close(sock_client); 
-        return 0; // Gagal baca, tutup koneksi
+        return 0; 
     }
     buffer[received] = '\0';
 
-    // 2. Eksekusi Parsing (Memanggil modul http_parser.c)
-    // Kita gunakan parse_http_request yang di dalamnya sudah mencakup 
-    // logika parse_request_line kompleks.
-
+    /**************************************************************
+     * 3. Parsing HTTP
+     * ANALOGI :
+     * Surat diberikan ke BAGIAN ADMIN untuk dibaca:
+     * - siapa pengirim?
+     * - mau layanan apa?
+     * - ada lampiran berapa halaman?
+     *
+     * Ini dilakukan oleh modul parse_http_request.
+     **************************************************************/
     RequestHeader req_header; 
     memset(&req_header, 0, sizeof(RequestHeader));
     
     bool success = parse_http_request(buffer, (size_t)received, &req_header);
 
-    // 3. Cek validitas (Sesuai dengan logika asli Anda)
+    
+    /**************************************************************
+     * 4. Validasi permintaan
+     * ANALOGI :
+     * Jika formulir tidak sesuai format:
+     * → petugas mengembalikan surat “400 Bad Request”
+     *    seperti loket yang bilang:
+     *    “Maaf formulir Anda salah isi.”
+     **************************************************************/
     if (!success || !req_header.is_valid) {
         // Memanggil fungsi response (nanti ada di http_response.c)
         send_mem_response(sock_client, 400, "Bad Request", "<h1>400 Bad Request</h1>", false);
@@ -53,9 +99,19 @@ int handle_http1_session(int sock_client) {
         return 0; 
     }
 
-    // 3. Baca sisa body jika belum lengkap
+     /**************************************************************
+     * 5. Membaca sisa body
+     * ANALOGI :
+     * Kalau tamu membawa berkas tebal:
+     * petugas tidak bisa terima sekali,
+     * harus dicicil halaman demi halaman.
+     *
+     * Juga ada aturan:
+     * - tidak boleh lebih besar dari batas kantor
+     * - kalau kelamaan kirim → dianggap kabur (timeout)
+     **************************************************************/
     if (req_header.content_length > 0 && req_header.body_length < (size_t)req_header.content_length) {
-        
+        // tidak boleh lebih besar dari batas yang ditetapkan yaitu 50MB
         size_t max_allowed = config.max_body_size > 0 ? config.max_body_size : (10 * 1024 * 1024);
         if ((size_t)req_header.content_length > max_allowed) {
             send_mem_response(sock_client, 413, "Payload Too Large", "<h1>413 Payload Too Large</h1>", false);
@@ -103,7 +159,7 @@ int handle_http1_session(int sock_client) {
                 break;
             }
         }
-
+        // kalau kelamaan kirim → dianggap kabur (timeout)
         if (retry_count >= MAX_RETRY) {
             write_log("Timeout: Client failed to send full body");
             send_mem_response(sock_client, 408, "Request Timeout", "<h1>408 Request Timeout</h1>", false);
@@ -116,6 +172,10 @@ int handle_http1_session(int sock_client) {
         ((char*)req_header.body_data)[req_header.body_length] = '\0';
 
         // khusus menangani post data multipart
+        // Kalau tamu (browser )membawa berkas tebal,
+        // misal gambar besar, PDF, dll.
+        // Petugas tidak bisa terima sekali,
+        // harus dicicil halaman demi halaman (chunk).
         if (req_header.content_type && strstr(req_header.content_type, "multipart/form-data")) {
             parse_multipart_body(&req_header);
         }
@@ -126,7 +186,7 @@ int handle_http1_session(int sock_client) {
     // Ambil status sebelum struct dibebaskan
     int keep_alive_status = req_header.is_keep_alive;
 
-    // 1. TAMBAHKAN DISINI (Logika ambil IP)
+    // Logika ambil IP
     struct sockaddr_in addr;
     socklen_t addr_len = sizeof(addr);
     char client_ip[INET_ADDRSTRLEN] = "0.0.0.0";
@@ -136,7 +196,7 @@ int handle_http1_session(int sock_client) {
         inet_ntop(AF_INET, &addr.sin_addr, client_ip, INET_ADDRSTRLEN);
     }
 
-    // 5. Proses Method
+    // Proses Method
     handle_method(sock_client, req_header);
 
     // Tambahkan Log Monitoring
@@ -150,6 +210,7 @@ int handle_http1_session(int sock_client) {
     free_request_header(&req_header);
     
     // Logika Hybrid: Jika bukan keep-alive, tutup socket di sini
+    // Tapi karena browser mayoritas keep-alive, maka ini di-remark
     /*if (!keep_alive_status) {
         close(sock_client);
     }*/

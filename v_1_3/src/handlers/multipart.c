@@ -6,6 +6,12 @@
 #include "../include/protocols/common/http_utils.h"
 #include "../include/core/log.h"
 
+/**********************************************
+ * Ini hanya fungsi cadangan saja untuk menangani upload file besar
+ * Di dunia pemrograman nyata, fungsi ini nyaris tidak digunakan
+ * karena yang menangani multipart biasanya adalah backend (PHP/Rust)
+ * Hanya jika diperlukan, maka fungsi ini disediakan
+***********************************************/
 void parse_multipart_body(RequestHeader *req) {
     if (!req->content_type || !req->body_data || req->body_length == 0) return;
 

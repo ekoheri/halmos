@@ -7,7 +7,9 @@
 #include <time.h>
 #include "../include/protocols/common/http_utils.h"
 
-
+// Fungsi untuk men-dekode URL
+// Contoh : ?nama=Eko+hHeri
+// Menjadi : ?nama = Eko Heri
 void url_decode(char *src) {
     char *dst = src;
     while (*src) {
@@ -28,6 +30,7 @@ void url_decode(char *src) {
     *dst = '\0';
 }
 
+// Fungsi untuk menghapus spasi sebelah kanan tulisan
 void trim_right(char *s) {
     if (!s) return;
     int len = strlen(s);
@@ -46,6 +49,10 @@ void trim_whitespace(char *str) {
     }
 }
 
+/****************************************
+ * Fungsi untuk mengambil nilai waktu sistem
+ * Tanggal, bulan, tahun, jam, menit, detik, milidetik
+****************************************/
 char *get_time_string() {
     struct timeval tv;
     gettimeofday(&tv, NULL);
@@ -53,9 +60,9 @@ char *get_time_string() {
     // Mengambil waktu dalam format struct tm (GMT)
     struct tm *tm_info = localtime(&tv.tv_sec);
 
-    // Alokasikan buffer yang cukup besar untuk waktu dan milidetik
-    char *buf = (char *)malloc(64);  // Ukuran buffer yang memadai
-    if (!buf) return NULL;  // Cek jika malloc gagal
+    // Alokasikan buffer untuk waktu dan milidetik
+    char *buf = (char *)malloc(64);
+    if (!buf) return NULL; 
 
     // Format waktu tanpa milidetik terlebih dahulu
     strftime(buf, 64, "%a, %d %b %Y %H:%M:%S", tm_info);
@@ -65,4 +72,4 @@ char *get_time_string() {
     snprintf(buf + strlen(buf), 64 - strlen(buf), ".%03d GMT", millis);
 
     return buf;
-} //end get_time_string
+} 
