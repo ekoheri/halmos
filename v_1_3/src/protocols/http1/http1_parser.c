@@ -244,29 +244,25 @@ void handle_get_request(int sock_client, RequestHeader *req) {
         );
 
         if (res_rust.body != NULL) {
-            // --- LOGIKA PERBAIKAN PENGIRIMAN HEADER ---
+            // --- PERBAIKAN TOTAL DI SINI ---
+            char header[1024];
+            size_t body_len = strlen(res_rust.body);
             
-            // A. Kirim Status Line (Wajib Pertama)
-            send(sock_client, "HTTP/1.1 200 OK\r\n", 17, 0);
-
-            // B. Kirim Header tambahan dari Server C (Kirim SEBELUM header Rust ditutup)
-            char len_header[64];
-            snprintf(len_header, sizeof(len_header), "Content-Length: %zu\r\n", strlen(res_rust.body));
-            send(sock_client, "Server: Halmos-Core\r\n", 21, 0);
-            send(sock_client, "Connection: keep-alive\r\n", 24, 0);
-            send(sock_client, len_header, strlen(len_header), 0);
-
-            // C. Kirim Header dari Rust
-            // Berdasarkan log, res_rust.header berisi "Content-Type: text/html\r\n\r\n"
-            if (res_rust.header != NULL) {
-                send(sock_client, res_rust.header, strlen(res_rust.header), 0);
-            } else {
-                // Jika Rust tidak kirim header sama sekali, kita wajib tutup headernya di sini
-                send(sock_client, "Content-Type: text/html\r\n\r\n", 27, 0);
-            }
-
-            // D. Kirim Body
-            send(sock_client, res_rust.body, strlen(res_rust.body), 0);
+            // Kita buat header yang bersih dan satu kesatuan
+            int h_len = snprintf(header, sizeof(header),
+                "HTTP/1.1 200 OK\r\n"
+                "Content-Type: text/html\r\n"
+                "Content-Length: %zu\r\n"
+                "Server: Halmos-Core\r\n"
+                "Connection: %s\r\n\r\n", 
+                body_len, 
+                req->is_keep_alive ? "keep-alive" : "close");
+            
+            // Kirim Header buatan Halmos
+            send(sock_client, header, h_len, 0);
+            
+            // Kirim Body hasil eksekusi Rust
+            send(sock_client, res_rust.body, body_len, 0);
 
             // Bersihkan memori
             if (res_rust.header) free(res_rust.header);
