@@ -15,6 +15,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netdb.h>
+#include <arpa/inet.h>
 
 //Tambahan untuk library zerro-copy
 #include <sys/sendfile.h>
@@ -34,13 +35,14 @@
 #include "../include/core/log.h"
 #include "../include/core/queue.h"
 
+#include "../include/handlers/fastcgi.h"
+#include "../include/handlers/multipart.h"
+
 #include "../include/protocols/common/http_utils.h"
 #include "../include/protocols/common/http_common.h"
 #include "../include/protocols/http1/http1_parser.h"
 #include "../include/protocols/http1/http1_response.h"
 
-#include "../include/handlers/fastcgi.h"
-#include "../include/handlers/multipart.h"
 
 #define BUFFER_SIZE 1024
 
@@ -174,13 +176,6 @@ void handle_get_request(int sock_client, RequestHeader *req) {
         return;
     }
 
-    // --- LOG RESOURCE DISINI ---
-    write_log("Thread Monitoring | Active: %d/%d | Request: %s | Method: %s", 
-          global_queue.active_workers, 
-          global_queue.total_workers, 
-          req->uri, 
-          req->method);
-
     // 2. Cek apakah ini file PHP
     if (strstr(req->uri, ".php")) {
         // Panggil fungsi FastCGI yang kita buat di fpm.c
@@ -188,13 +183,14 @@ void handle_get_request(int sock_client, RequestHeader *req) {
         FastCGI_Response res = fastcgi_request(
             config.php_server,
             config.php_port,
-            "",                     // directory (sesuaikan jika ada subfolder)
+            "",                     // directory
             req->uri,               // script_name
             req->method, 
             req->query_string ? req->query_string : "",
             "",                     // path_info
-            "",                     // post_data (GET biasanya kosong)
-            ""                      // content_type
+            "",                     // post_data
+            0,                      // post_data_len (TAMBAHKAN INI SEBAGAI ARGUMEN KE-9)
+            ""                      // content_type (SEKARANG JADI ARGUMEN KE-10)
         );
 
         if (res.body != NULL) {
@@ -235,8 +231,16 @@ void handle_get_request(int sock_client, RequestHeader *req) {
 
         // 2. Panggil Rust
         FastCGI_Response res_rust = fastcgi_request(
-            config.rust_server, config.rust_port, "", clean_path, 
-            req->method, req->query_string ? req->query_string : "", "", "", ""
+            config.rust_server, 
+            config.rust_port, 
+            "", 
+            clean_path, 
+            req->method, 
+            req->query_string ? req->query_string : "", 
+            "", 
+            "",  // post_data
+            0,   // post_data_len (TAMBAHKAN INI)
+            ""   // content_type (TAMBAHKAN INI)
         );
 
         if (res_rust.body != NULL) {
@@ -322,32 +326,65 @@ void handle_get_request(int sock_client, RequestHeader *req) {
 }
 
 void handle_post_request(int sock_client, RequestHeader *req) {
-    // Jika ada data multipart (Upload file atau Form)
-    if (req->parts_count > 0) {
-        bool upload_success = false;
-        
-        for (int i = 0; i < req->parts_count; i++) {
-            if (req->parts[i].filename) {
-                // Simpan file ke folder uploads
-                if (save_uploaded_file(&req->parts[i], "uploads")) {
-                    upload_success = true;
-                }
-            }
-        }
-
-        if (upload_success) {
-            send_mem_response(sock_client, 201, "Created", "<h1>File Berhasil Diupload!</h1>", req->is_keep_alive);
-        } else {
-            send_mem_response(sock_client, 200, "OK", "<h1>Form Data Diterima</h1>", req->is_keep_alive);
-        }
-    } 
-    // Jika hanya POST body biasa (Plain text / JSON)
-    else if (req->body_data) {
-        write_log("Data POST diterima: %s", (char*)req->body_data);
-        send_mem_response(sock_client, 200, "OK", "<h1>Data POST Diterima</h1>", req->is_keep_alive);
-    } else {
-        send_mem_response(sock_client, 400, "Bad Request", "<h1>Empty POST body</h1>", req->is_keep_alive);
+    // 1. WAJIB: Validasi Path dulu sebelum komunikasi ke backend
+    char *safe_file_path = sanitize_path(config.document_root, req->uri);
+    if (safe_file_path == NULL) {
+        send_mem_response(sock_client, 404, "Not Found", "<h1>404 Not Found</h1>", req->is_keep_alive);
+        return;
     }
+
+    // 2. Tentukan target IP & Port berdasarkan ekstensi
+    const char *t_ip;
+    int t_port;
+
+    if (strstr(req->uri, ".php")) {
+        t_ip = config.php_server;
+        t_port = config.php_port;
+    } else if (strstr(req->uri, config.rust_ext)) {
+        t_ip = config.rust_server;
+        t_port = config.rust_port;
+    } else {
+        // Jika bukan script, tolak POST (karena file statis nggak bisa di-POST)
+        send_mem_response(sock_client, 405, "Method Not Allowed", "<h1>POST only for scripts</h1>", req->is_keep_alive);
+        free(safe_file_path);
+        return;
+    }
+
+    // 3. Panggil Modul Unified Streaming (Hasil kerja keras kita tadi)
+    FastCGI_Response res = cgi_request_stream(
+        t_ip, 
+        t_port, 
+        sock_client,
+        req->method, 
+        req->uri, 
+        req->query_string, 
+        req->body_data, 
+        req->body_length, 
+        req->content_length, 
+        req->content_type
+    );
+
+    // 2. Kirim Balasan ke Browser jika ada respon
+    if (res.body) {
+        char header[512];
+        int h_len = snprintf(header, sizeof(header),
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: text/html\r\n"
+            "Content-Length: %zu\r\n"
+            "Server: Halmos-Core\r\n"
+            "Connection: %s\r\n\r\n",
+            strlen(res.body), req->is_keep_alive ? "keep-alive" : "close");
+        
+        send(sock_client, header, h_len, 0);
+        send(sock_client, res.body, strlen(res.body), 0);
+        
+        if(res.header) free(res.header);
+        free(res.body);
+    } else {
+        send_mem_response(sock_client, 504, "Gateway Timeout", "<h1>Backend Down</h1>", req->is_keep_alive);
+    }
+
+    free(safe_file_path);
 }
 
 void handle_method(int sock_client, RequestHeader req_header) {

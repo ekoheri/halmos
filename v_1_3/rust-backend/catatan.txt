@@ -104,3 +104,50 @@ sudo pkill nama_binary_anda
 # Atau paksa tutup port jika masih tersangkut
 sudo fuser -k 9001/tcp
 
+
+project_root/
+├── bin/                    # Biner aplikasi hasil kompilasi (halmos)
+├── build/                  # File objek temporary (*.o)
+├── include/                # File Header (.h)
+│   ├── core/
+│   │   ├── config.h
+│   │   ├── fs_handler.h
+│   │   ├── log.h
+│   │   ├── queue.h
+│   │   └── web_server.h
+│   ├── protocols/
+│   │   ├── common/
+│   │   │   ├── http_common.h
+│   │   │   └── http_utils.h
+│   │   ├── http1/
+│   │   │   ├── http1_parser.h
+│   │   │   └── http1_response.h
+│   │   └── http2/          # (Rencana Masa Depan)
+│   │       ├── http2_frame.h
+│   │       └── http2_hpack.h
+│   └── handlers/
+│       ├── fastcgi.h
+│       └── multipart.h
+├── src/                    # File Sumber (.c)
+│   ├── main.c              # Entry point & startup
+│   ├── core/               # Infrastruktur Dasar Mesin
+│   │   ├── config.c
+│   │   ├── fs_handler.c    # Sanitize path & File I/O
+│   │   ├── log.c
+│   │   ├── queue.c
+│   │   └── web_server.c    # Epoll & Thread Management
+│   ├── protocols/          # Logika Protokol Komunikasi
+│   │   ├── common/         # Berbagi logika antar versi HTTP
+│   │   │   ├── http_common.c # MIME types & Status codes
+│   │   │   └── http_utils.c  # String/Time utils (pindahan dari utils.c)
+│   │   ├── http1/
+│   │   │   ├── http1_parser.c   # (Rename dari http_parser.c)
+│   │   │   └── http1_response.c # (Rename dari http_response.c)
+│   │   └── http2/          # (Tempat development h2 nanti)
+│   └── handlers/           # Jembatan ke Backend/Data
+│       ├── fastcgi.c       # Komunikasi PHP/Rust
+│       └── multipart.c     # Parsing file upload
+├── config/                 # File konfigurasi (halmos.conf)
+├── logs/                   # File log server
+├── Makefile                # Instruksi kompilasi otomatis
+└── www/                    # Document Root (index.html, dll)

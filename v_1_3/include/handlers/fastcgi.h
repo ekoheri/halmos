@@ -34,14 +34,29 @@ typedef struct {
 } FastCGI_Response;
 
 FastCGI_Response fastcgi_request(
-    const char *target_ip,   // Parameter baru
-    int target_port,         // Parameter baru
+    const char *target_ip,
+    int target_port,
     const char *directory, 
     const char *script_name, 
     const char request_method[8],
     const char *query_string,
     const char *path_info,
     const char *post_data,
-    const char *content_type);
+    size_t post_data_len,     // Argumen ke-9
+    const char *content_type  // Argumen ke-10
+);
+
+FastCGI_Response cgi_request_stream(
+    const char *target_ip,
+    int target_port,
+    int sock_client,          // Ditambahkan supaya bisa recv() sisa body
+    const char *method,        // Diubah dari array[8] ke pointer biar fleksibel
+    const char *script_name,
+    const char *query_string,
+    void *post_data,          // Data awal dari parser
+    size_t post_data_len,     // Panjang data awal
+    size_t content_length,     // Total Content-Length dari Header HTTP
+    const char *content_type
+);
 
 #endif

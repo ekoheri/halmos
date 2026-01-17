@@ -31,12 +31,11 @@ typedef struct {
 } RequestHeader;
 
 // Prototipe Fungsi khusus HTTP/1
-void handle_method(int sock_client, RequestHeader req_header);
-void free_request_header(RequestHeader *req);
+// Ini di implementasikan di http1_parser.c
 bool parse_http_request(const char *buffer, size_t size, RequestHeader *req);
+void free_request_header(RequestHeader *req);
+void handle_method(int sock_client, RequestHeader req_header);
 
-// Prototipe Fungsi khusus HTTP/1
-bool parse_http_request(const char *buffer, size_t size, RequestHeader *req);
-void free_request_header(RequestHeader *req);
-void handle_method(int sock_client, RequestHeader req_header);
+// Ini di implementasikan di http1_manager.c
+int handle_http1_session(int sock_client);
 #endif

@@ -4,6 +4,12 @@
 #include "config.h"
 #include "queue.h"
 
+typedef enum {
+    PROTO_HTTP1,
+    PROTO_HTTP2,
+    PROTO_UNKNOWN
+} protocol_type_t;
+
 // Variabel Global (Extern agar bisa diakses main.c jika perlu)
 extern Config config;
 extern TaskQueue global_queue;
