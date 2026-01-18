@@ -14,6 +14,8 @@ typedef struct {
     //Security
     size_t max_body_size; // Misal dalam byte
     bool secure_application;
+    bool rate_limit_enabled;
+    int max_requests_per_sec;
     //Backend_PHP
     char php_server[256];
     int php_port;
@@ -21,6 +23,10 @@ typedef struct {
     char rust_ext[256];
     char rust_server[256];
     int rust_port;
+    //Backend_Python
+    char python_ext[256];
+    char python_server[256];
+    int python_port;
     //Performance    
     int request_buffer_size;
     int max_queue_size;

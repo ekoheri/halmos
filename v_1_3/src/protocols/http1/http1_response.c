@@ -24,22 +24,33 @@
  * hanya menyiapkan header/amplopnya saja.
  **********************************************************************/
 static void send_http1_headers(int client_fd, const HalmosResponse *res, bool keep_alive) {
-    char header[512];
+    // Perbesar ke 1024 supaya aman saat nambah banyak header security
+    char header[1024]; 
     const char *conn_status = keep_alive ? "keep-alive" : "close";
 
+    // Gunakan snprintf untuk mencegah buffer overflow
     int len = snprintf(header, sizeof(header),
         "HTTP/1.1 %d %s\r\n"
         "Content-Type: %s\r\n"
         "Content-Length: %zu\r\n"
         "Connection: %s\r\n"
         "Server: Halmos-Engine/1.0\r\n"
+        "X-Content-Type-Options: nosniff\r\n"
+        "X-Frame-Options: DENY\r\n"
+        "X-XSS-Protection: 1; mode=block\r\n"
+        "Referrer-Policy: no-referrer-when-downgrade\r\n"
+        "Cache-Control: no-cache, no-store, must-revalidate\r\n" // Opsi: Bagus untuk dynamic content
         "\r\n", 
         res->status_code, res->status_message, 
         res->mime_type, res->length, conn_status);
     
+    // Jika len >= sizeof(header), berarti ada data yang terpotong
+    if (len >= (int)sizeof(header)) {
+        write_log("[ERROR] Headers too long, truncated!");
+    }
+
     send(client_fd, header, len, 0);
 }
-
 /**********************************************************************
  * send_halmos_response()
  * ANALOGI :

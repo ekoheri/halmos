@@ -45,6 +45,8 @@ const char *get_mime_type(const char *file) {
     else if (strcmp(dot, ".png") == 0) return "image/png";
     else if (strcmp(dot, ".gif") == 0) return "image/gif";
     else if (strcmp(dot, ".ico") == 0) return "image/ico";
+    else if (strcmp(dot, ".rs") == 0) return "text/plain"; // Jangan dieksekusi
+    else if (strcmp(dot, ".py") == 0) return "text/plain"; // Jangan dieksekusi
     else return "text/html";  // Default MIME type
 } //end get_mime_type
 

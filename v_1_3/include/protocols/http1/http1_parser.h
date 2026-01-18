@@ -12,6 +12,7 @@ typedef struct {
 
 // Struktur RequestHeader ini sangat spesifik HTTP/1 (berbasis teks/string)
 typedef struct {
+    char client_ip[45];
     char method[16];
     char *directory;
     char *uri;

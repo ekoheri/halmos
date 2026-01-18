@@ -1,55 +1,100 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <time.h>
-#include <sys/stat.h>
 #include <string.h>
-#include <errno.h>
 #include <stdarg.h>
+#include <time.h>
+#include <pthread.h>
+#include <stdbool.h>
+#include "../../include/core/log.h"
 
-#include "../include/core/log.h"
-#include "../include/core/config.h"
+// 1. Inisialisasi Global Log Queue
+LogQueue global_log_queue = {
+    .head = 0,
+    .tail = 0,
+    .count = 0,
+    .mutex = PTHREAD_MUTEX_INITIALIZER,
+    .cond = PTHREAD_COND_INITIALIZER
+};
 
-extern Config config;
+// 2. Flag untuk kontrol Graceful Shutdown
+volatile bool log_keep_running = true;
 
-/***************************************
- * Fungsi ini berguna untuk menuliskan kejadian di server ke log
- * Log disimpan di folder /var/log/halmos
- * Anda bisa melihat per hari
-****************************************/
-
+/**
+ * WORKER (PRODUCER):
+ * Dipanggil oleh thread manapun untuk mencatat log ke antrean RAM.
+ */
 void write_log(const char *format, ...) {
-    time_t now = time(NULL);
-    struct tm *t = localtime(&now);
+    char temp_msg[MAX_LOG_MESSAGE];
+    
+    // Format pesan variadic
+    va_list args;
+    va_start(args, format);
+    vsnprintf(temp_msg, sizeof(temp_msg), format, args);
+    va_end(args);
 
-    // Format tanggal untuk nama file log
-    char log_filename[100];
-
-    // Simpan di dalam folder logs (/var/log/halmos/)
-    snprintf(log_filename, sizeof(log_filename), "%s%04d-%02d-%02d.log",
-         LOG_DIR, t->tm_year + 1900, t->tm_mon + 1, t->tm_mday); 
-
-    // Buka file log untuk menambahkan
-    FILE *log_file = fopen(log_filename, "a"); 
-    if (log_file != NULL) {
-        // Format timestamp dalam format yang sesuai
-        char timestamp[25];
-        strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", t);
+    pthread_mutex_lock(&global_log_queue.mutex);
+    
+    // Jika antrean belum penuh, masukkan pesan
+    if (global_log_queue.count < MAX_LOG_QUEUE) {
+        strncpy(global_log_queue.messages[global_log_queue.tail], temp_msg, MAX_LOG_MESSAGE - 1);
+        global_log_queue.messages[global_log_queue.tail][MAX_LOG_MESSAGE - 1] = '\0';
         
-        // Tulis timestamp ke file log
-        fprintf(log_file, "[%s] ", timestamp);
-
-        // Mengelola variadic arguments
-        va_list args;
-        va_start(args, format);
-
-        // Tulis pesan dengan format variadic ke file log
-        vfprintf(log_file, format, args); 
-        va_end(args);
-
-        // Tambahkan newline otomatis
-        fprintf(log_file, "\n"); 
-        fclose(log_file); // Tutup file
-    } else {
-        fprintf(stderr, "Failed to open log file: %s\n", strerror(errno));
+        global_log_queue.tail = (global_log_queue.tail + 1) % MAX_LOG_QUEUE;
+        global_log_queue.count++;
+        
+        // Bangunkan thread logger
+        pthread_cond_signal(&global_log_queue.cond);
     }
+    
+    pthread_mutex_unlock(&global_log_queue.mutex);
+}
+
+/**
+ * LOGGER THREAD (CONSUMER):
+ * Berjalan di background, bertugas memindahkan log dari RAM ke Disk.
+ */
+void* log_thread_routine(void* arg) {
+    while (1) {
+        pthread_mutex_lock(&global_log_queue.mutex);
+        
+        // Tunggu selama antrean kosong DAN server masih disuruh jalan
+        while (global_log_queue.count == 0 && log_keep_running) {
+            pthread_cond_wait(&global_log_queue.cond, &global_log_queue.mutex);
+        }
+
+        // Cek kondisi keluar: Berhenti hanya jika flag false DAN antrean sudah ludes
+        if (!log_keep_running && global_log_queue.count == 0) {
+            pthread_mutex_unlock(&global_log_queue.mutex);
+            break; 
+        }
+
+        // Ambil data dari antrean (Circular Buffer)
+        char current_msg[MAX_LOG_MESSAGE];
+        strncpy(current_msg, global_log_queue.messages[global_log_queue.head], MAX_LOG_MESSAGE - 1);
+        current_msg[MAX_LOG_MESSAGE - 1] = '\0';
+        
+        global_log_queue.head = (global_log_queue.head + 1) % MAX_LOG_QUEUE;
+        global_log_queue.count--;
+        
+        // BUKA KUNCI SEBELUM DISK I/O (Penting untuk performa!)
+        pthread_mutex_unlock(&global_log_queue.mutex);
+
+        // --- PROSES PENULISAN DISK ---
+        time_t now = time(NULL);
+        struct tm *t = localtime(&now);
+        char log_filename[128];
+        snprintf(log_filename, sizeof(log_filename), "%s%04d-%02d-%02d.log",
+                 LOG_DIR, t->tm_year + 1900, t->tm_mon + 1, t->tm_mday);
+
+        FILE *f = fopen(log_filename, "a");
+        if (f) {
+            char ts[25];
+            strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", t);
+            fprintf(f, "[%s] %s\n", ts, current_msg);
+            fclose(f);
+        }
+    }
+    
+    printf("[SYSTEM] Logger thread gracefully stopped.\n");
+    return NULL;
 }

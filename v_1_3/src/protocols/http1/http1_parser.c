@@ -37,9 +37,11 @@
 
 #include "../include/handlers/fastcgi.h"
 #include "../include/handlers/multipart.h"
+#include "../include/handlers/uwsgi_handler.h"
 
 #include "../include/protocols/common/http_utils.h"
 #include "../include/protocols/common/http_common.h"
+
 #include "../include/protocols/http1/http1_parser.h"
 #include "../include/protocols/http1/http1_response.h"
 
@@ -207,6 +209,7 @@ void free_request_header(RequestHeader *req) {
  * 2. Tentukan tujuan:
  *    - Kalau PHP  → kirim ke dapur PHP via FastCGI
  *    - Kalau Rust → kirim ke dapur Rust via FastCGI
+ *    - Kalau python → kirimke dapur via UWSGI
  *    - Kalau file biasa → ambil dari gudang
  *
  * Saat ambil file:
@@ -216,7 +219,7 @@ void free_request_header(RequestHeader *req) {
 void handle_get_request(int sock_client, RequestHeader *req) {
     char *safe_file_path = NULL;
     // 1. Cek apakah ini request untuk Rust (Bypass pengecekan fisik)
-    if (strstr(req->uri, config.rust_ext)) {
+    if (strstr(req->uri, config.rust_ext) || strstr(req->uri, config.python_ext)) {
         // 1.a.Kita buat path virtual secara manual tanpa realpath()
         char virtual_path[PATH_MAX];
         snprintf(virtual_path, sizeof(virtual_path), "%s%s", config.document_root, req->uri);
@@ -330,6 +333,47 @@ void handle_get_request(int sock_client, RequestHeader *req) {
         free(safe_file_path);
         return;
     }
+
+    // --- BLOK BARU: PYTHON via uWSGI ---
+    if (strstr(req->uri, config.python_ext)) {
+        // Panggil fungsi uwsgi_request_stream (Streaming mode)
+        // Kita masukkan sock_client agar bisa menangani POST jika nanti dikembangkan
+        UWSGI_Response res_py = uwsgi_request_stream(
+            config.python_server,   // Tambahkan python_server di config.h (misal "127.0.0.1")
+            config.python_port,     // Tambahkan python_port di config.h (misal 3031)
+            sock_client,
+            req->method, 
+            req->uri, 
+            req->query_string ? req->query_string : "",
+            NULL,                   // post_data (GET tidak punya body di parser)
+            0,                      // post_data_len
+            0,                      // content_length
+            ""                      // content_type
+        );
+
+        if (res_py.body != NULL) {
+            char header[1024];
+            int h_len = snprintf(header, sizeof(header),
+                "HTTP/1.1 200 OK\r\n"
+                "Content-Type: text/html\r\n"
+                "Content-Length: %zu\r\n"
+                "Server: Halmos-Core\r\n"
+                "Connection: %s\r\n\r\n",
+                res_py.body_len,
+                req->is_keep_alive ? "keep-alive" : "close");
+            
+            send(sock_client, header, h_len, 0);
+            send(sock_client, res_py.body, res_py.body_len, 0);
+
+            free_uwsgi_response(&res_py);
+        } else {
+            send_mem_response(sock_client, 504, "Gateway Timeout", "<h1>504 Gateway Timeout (Python)</h1>", req->is_keep_alive);
+        }
+        
+        free(safe_file_path);
+        return; 
+    }
+    
     // 4. Logika File Statis : Kalau file biasa → ambil dari gudang
     struct stat st;
     if (stat(safe_file_path, &st) != 0 || !S_ISREG(st.st_mode)) {
@@ -392,6 +436,7 @@ void handle_get_request(int sock_client, RequestHeader *req) {
  * 2. Pilih dapur pemroses:
  *      - PHP?
  *      - Rust?
+ *      - Python?
  * 3. Data dialirkan bertahap seperti selang air,
  *    tidak ditumpuk dulu agar hemat tenaga.
  * 4. Balasan dari dapur dikirim lagi ke tamu.

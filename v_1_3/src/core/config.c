@@ -100,6 +100,14 @@ void load_config(const char *filename) {
                 } else {
                     config.secure_application = false;
                 }
+            } else if (strcmp(key, "rate_limit_enabled") == 0) {
+                if (strcasecmp(value, "true") == 0) {
+                    config.rate_limit_enabled = true;
+                } else {
+                    config.rate_limit_enabled = false;
+                }
+            } else if (strcmp(key, "max_requests_per_sec") == 0) {
+                config.max_requests_per_sec = atoi(value);
             // backend PHP
             } else if (strcmp(key, "php_server") == 0) {
                 strncpy(config.php_server, value, sizeof(config.php_server));
@@ -112,6 +120,13 @@ void load_config(const char *filename) {
                 strncpy(config.rust_server, value, sizeof(config.rust_server));
             } else if (strcmp(key, "rust_port") == 0) {
                 config.rust_port = atoi(value);
+            // backend Python
+            } else if (strcmp(key, "python_ext") == 0) {
+                strncpy(config.python_ext, value, sizeof(config.python_ext));
+            } else if (strcmp(key, "python_server") == 0) {
+                strncpy(config.python_server, value, sizeof(config.python_server));
+            } else if (strcmp(key, "python_port") == 0) {
+                config.python_port = atoi(value);
             //Performance
             } else if (strcmp(key, "request_buffer_size") == 0) {
                 config.request_buffer_size = atoi(value);

@@ -17,7 +17,7 @@ extern TaskQueue global_queue;
 /**
  * Mengubah program menjadi proses latar belakang (Daemon).
  */
-void set_daemon();
+
 // Prototype Fungsi Utama
 void start_server();
 void run_server();

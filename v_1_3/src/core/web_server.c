@@ -28,30 +28,6 @@ struct epoll_event *events;
 int MAX_EVENTS;
 
 
-void set_daemon() {
-    pid_t pid = fork();
-    if (pid < 0) exit(EXIT_FAILURE);
-    if (pid > 0) exit(EXIT_SUCCESS); 
-
-    if (setsid() < 0) exit(EXIT_FAILURE);
-
-    signal(SIGHUP, SIG_IGN);
-    
-    pid = fork();
-    if (pid < 0) exit(EXIT_FAILURE);
-    if (pid > 0) exit(EXIT_SUCCESS); 
-
-    umask(0);
-    
-    int devnull = open("/dev/null", O_RDWR);
-    if (devnull != -1) {
-        dup2(devnull, STDIN_FILENO);
-        dup2(devnull, STDOUT_FILENO);
-        dup2(devnull, STDERR_FILENO);
-        if (devnull > 2) close(devnull);
-    }
-}
-
 /********************************************************************
  * set_nonblocking()
  * ---------------------------------------------------------------

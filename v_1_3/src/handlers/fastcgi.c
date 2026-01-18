@@ -7,10 +7,10 @@
 #include <arpa/inet.h>
 #include <errno.h> 
 
-#include "../include/protocols/common/http_utils.h"
-#include "../include/core/config.h"
-#include "../include/core/log.h"
-#include "../include/handlers/fastcgi.h"
+#include "../../include/protocols/common/http_utils.h"
+#include "../../include/core/config.h"
+#include "../../include/core/log.h"
+#include "../../include/handlers/fastcgi.h"
 
 extern Config config;
 

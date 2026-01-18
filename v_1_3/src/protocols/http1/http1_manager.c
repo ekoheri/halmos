@@ -15,6 +15,7 @@
 #include "../../../include/protocols/http1/http1_parser.h"
 #include "../../../include/protocols/http1/http1_response.h"
 #include "../../../include/handlers/multipart.h"
+#include "../../../include/security/rate_limit.h"
 
 // Objek Antrean Global (Pusat Kendali)
 TaskQueue global_queue;
@@ -196,6 +197,29 @@ int handle_http1_session(int sock_client) {
         inet_ntop(AF_INET, &addr.sin_addr, client_ip, INET_ADDRSTRLEN);
     }
 
+    // Salin ke struct agar bisa dipakai di modul lain (seperti PHP/Python)
+    strncpy(req_header.client_ip, client_ip, 45);
+
+    if (config.rate_limit_enabled) {
+        int rps_limit = config.max_requests_per_sec > 0 ? config.max_requests_per_sec : 20;
+        if (!is_request_allowed(req_header.client_ip, rps_limit)) {
+            write_log("[SECURITY] Rate limit exceeded for IP: %s\n", req_header.client_ip);
+            
+            char *msg = "<h1>429 Too Many Requests</h1><p>Santai Cuk, jangan ngebut-ngebut!</p>";
+            char response[512];
+            sprintf(response, 
+                "HTTP/1.1 429 Too Many Requests\r\n"
+                "Content-Type: text/html\r\n"
+                "Content-Length: %zu\r\n"
+                "Connection: close\r\n\r\n%s", 
+                strlen(msg), msg);
+                
+            send(sock_client, response, strlen(response), 0);
+            free_request_header(&req_header);
+            return 0; // Tendang!
+        }
+    }
+    
     // Proses Method
     handle_method(sock_client, req_header);
 
