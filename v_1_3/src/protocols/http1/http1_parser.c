@@ -19,9 +19,10 @@
 
 //Tambahan untuk library zerro-copy
 #include <sys/sendfile.h>
+#include <netinet/tcp.h> // Untuk TCP_NODELAY
 #include <fcntl.h>
 #include <errno.h>
-
+#include <poll.h>
 #include <sys/stat.h>  // Wajib untuk fungsi stat() dan makro S_ISREG
 #include <sys/types.h> // Mendukung definisi tipe data sistem
 
@@ -113,6 +114,7 @@ static void parse_request_line(char *line, RequestHeader *req) {
  * Hasilnya:
  * → formulir digital yang rapi siap diproses pelayan.
  ********************************************************************/
+
 bool parse_http_request(const char *raw_data, size_t total_received, RequestHeader *req) {
     // 1. Cari batas Header (\r\n\r\n)
     char *header_end = strstr(raw_data, "\r\n\r\n");
@@ -199,6 +201,15 @@ void free_request_header(RequestHeader *req) {
     }
 }
 
+// Fungsi pembantu: Cek apakah string berakhir dengan suffix tertentu
+// Lebih kencang dan akurat daripada strstr()
+int has_extension(const char *uri, const char *ext) {
+    size_t len_uri = strlen(uri);
+    size_t len_ext = strlen(ext);
+    if (len_uri < len_ext) return 0;
+    return (strcasecmp(uri + len_uri - len_ext, ext) == 0);
+}
+
 /********************************************************************
  * handle_get_request()
  * ANALOGI :
@@ -218,204 +229,154 @@ void free_request_header(RequestHeader *req) {
  ********************************************************************/
 void handle_get_request(int sock_client, RequestHeader *req) {
     char *safe_file_path = NULL;
-    // 1. Cek apakah ini request untuk Rust (Bypass pengecekan fisik)
-    if (strstr(req->uri, config.rust_ext) || strstr(req->uri, config.python_ext)) {
-        // 1.a.Kita buat path virtual secara manual tanpa realpath()
+
+    // 1. Sanitasi Path (Pisahkan antara Virtual Path vs Physical Path)
+    if (has_extension(req->uri, config.rust_ext) || has_extension(req->uri, config.python_ext)) {
         char virtual_path[PATH_MAX];
         snprintf(virtual_path, sizeof(virtual_path), "%s%s", config.document_root, req->uri);
-        
-        // Duplikasi string agar konsisten dengan return sanitize_path yang menggunakan malloc
         safe_file_path = strdup(virtual_path); 
     } else {
-        // 1.b. Jika bukan Rust, gunakan sanitasi ketat (realpath)
         safe_file_path = sanitize_path(config.document_root, req->uri);
     }
 
     if (safe_file_path == NULL) {
+        //printf("[DEBUG] 404: Path tidak valid atau tidak ditemukan\n");
         send_mem_response(sock_client, 404, "Not Found", "<h1>404 Not Found</h1>", req->is_keep_alive);
         return;
     }
 
-    // 2. Kalau PHP  → kirim ke dapur PHP via FastCGI
-    if (strstr(req->uri, ".php")) {
-        // 2.1. Panggil fungsi FastCGI yang dibuat di handlers/fastcgi.c
-        FastCGI_Response res = fastcgi_request(
-            config.php_server,
-            config.php_port,
-            "",                     // directory
-            req->uri,               // script_name
-            req->method, 
-            req->query_string ? req->query_string : "",
-            "",                     // path_info
-            "",                     // post_data
-            0,                      // post_data_len
-            ""                      // content_type
-        );
-        // 2.2 Hasil dari PHP kirim balik ke browser
+    // 2. Handler Dynamic: PHP (FastCGI)
+    if (has_extension(req->uri, ".php")) {
+        FastCGI_Response res = fastcgi_request(config.php_server, config.php_port, "", req->uri, 
+                                               req->method, req->query_string ? req->query_string : "",
+                                               "", "", 0, "");
         if (res.body != NULL) {
             char header[1024];
             int h_len = snprintf(header, sizeof(header),
-                "HTTP/1.1 200 OK\r\n"
-                "Content-Type: text/html\r\n"
-                "Content-Length: %zu\r\n"
-                "Server: Halmos-Core\r\n"
-                "Connection: keep-alive\r\n\r\n",
-                strlen(res.body));
-            
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: %zu\r\n"
+                "Server: Halmos-Core\r\nConnection: keep-alive\r\n\r\n", strlen(res.body));
             send(sock_client, header, h_len, 0);
             send(sock_client, res.body, strlen(res.body), 0);
-
-            // Bebaskan memori yang dialokasikan
             if (res.header) free(res.header);
             if (res.body) free(res.body);
         } else {
-            // kalau body kosong, maka kirimkan keterangan 504 gateway timeout
             send_mem_response(sock_client, 504, "Gateway Timeout", "<h1>504 Gateway Timeout</h1>", req->is_keep_alive);
         }
-        
-        free(safe_file_path);
-        return; 
+        free(safe_file_path); return; 
     }
 
-    // 3. Kalau Rust → kirim ke dapur Rust via FastCGI
-    if (strstr(req->uri, config.rust_ext)) {
-        // 3.1. Bersihkan path
-        char clean_path[PATH_MAX];
-        memset(clean_path, 0, sizeof(clean_path));
-        int j = 0;
-        for (int i = 0; req->uri[i] != '\0' && i < PATH_MAX - 1; i++) {
-            if (req->uri[i] == '/' && req->uri[i+1] == '/') continue;
-            clean_path[j++] = req->uri[i];
-        }
-        clean_path[j] = '\0';
-
-        // 3.2. Panggil Rust via FastCGI
-        FastCGI_Response res_rust = fastcgi_request(
-            config.rust_server, 
-            config.rust_port, 
-            "", 
-            clean_path, 
-            req->method, 
-            req->query_string ? req->query_string : "", 
-            "", 
-            "",  // post_data
-            0,   // post_data_len (TAMBAHKAN INI)
-            ""   // content_type (TAMBAHKAN INI)
-        );
-
-        // 3.3 Hasil dari Rust kirim balik ke browser
+    // 3. Handler Dynamic: Rust (FastCGI)
+    if (has_extension(req->uri, config.rust_ext)) {
+        FastCGI_Response res_rust = fastcgi_request(config.rust_server, config.rust_port, "", req->uri, 
+                                                    req->method, req->query_string ? req->query_string : "", 
+                                                    "", "", 0, "");
         if (res_rust.body != NULL) {
             char header[1024];
-            size_t body_len = strlen(res_rust.body);
-            
             int h_len = snprintf(header, sizeof(header),
-                "HTTP/1.1 200 OK\r\n"
-                "Content-Type: text/html\r\n"
-                "Content-Length: %zu\r\n"
-                "Server: Halmos-Core\r\n"
-                "Connection: %s\r\n\r\n", 
-                body_len, 
-                req->is_keep_alive ? "keep-alive" : "close");
-            
-            // Kirim Header (kop surat) ke browser
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: %zu\r\n"
+                "Server: Halmos-Core\r\nConnection: %s\r\n\r\n", 
+                strlen(res_rust.body), req->is_keep_alive ? "keep-alive" : "close");
             send(sock_client, header, h_len, 0);
-            
-            // Kirim Body hasil eksekusi Rust ke browser
-            send(sock_client, res_rust.body, body_len, 0);
-
-            // Bersihkan memori
+            send(sock_client, res_rust.body, strlen(res_rust.body), 0);
             if (res_rust.header) free(res_rust.header);
             if (res_rust.body) free(res_rust.body);
         } else {
-            // kalau body kosong, maka kirimkan keterangan 504 gateway timeout
             send_mem_response(sock_client, 504, "Gateway Timeout", "<h1>504 Gateway Timeout</h1>", req->is_keep_alive);
         }
-        free(safe_file_path);
-        return;
+        free(safe_file_path); return;
     }
 
-    // --- BLOK BARU: PYTHON via uWSGI ---
-    if (strstr(req->uri, config.python_ext)) {
-        // Panggil fungsi uwsgi_request_stream (Streaming mode)
-        // Kita masukkan sock_client agar bisa menangani POST jika nanti dikembangkan
-        UWSGI_Response res_py = uwsgi_request_stream(
-            config.python_server,   // Tambahkan python_server di config.h (misal "127.0.0.1")
-            config.python_port,     // Tambahkan python_port di config.h (misal 3031)
-            sock_client,
-            req->method, 
-            req->uri, 
-            req->query_string ? req->query_string : "",
-            NULL,                   // post_data (GET tidak punya body di parser)
-            0,                      // post_data_len
-            0,                      // content_length
-            ""                      // content_type
-        );
-
+    // 4. Handler Dynamic: Python (uWSGI)
+    if (has_extension(req->uri, config.python_ext)) {
+        UWSGI_Response res_py = uwsgi_request_stream(config.python_server, config.python_port, sock_client,
+                                                     req->method, req->uri, req->query_string ? req->query_string : "",
+                                                     NULL, 0, 0, "");
         if (res_py.body != NULL) {
             char header[1024];
             int h_len = snprintf(header, sizeof(header),
-                "HTTP/1.1 200 OK\r\n"
-                "Content-Type: text/html\r\n"
-                "Content-Length: %zu\r\n"
-                "Server: Halmos-Core\r\n"
-                "Connection: %s\r\n\r\n",
-                res_py.body_len,
-                req->is_keep_alive ? "keep-alive" : "close");
-            
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: %zu\r\n"
+                "Server: Halmos-Core\r\nConnection: %s\r\n\r\n",
+                res_py.body_len, req->is_keep_alive ? "keep-alive" : "close");
             send(sock_client, header, h_len, 0);
             send(sock_client, res_py.body, res_py.body_len, 0);
-
             free_uwsgi_response(&res_py);
         } else {
-            send_mem_response(sock_client, 504, "Gateway Timeout", "<h1>504 Gateway Timeout (Python)</h1>", req->is_keep_alive);
+            send_mem_response(sock_client, 504, "Gateway Timeout", "<h1>504 Gateway Timeout</h1>", req->is_keep_alive);
         }
-        
-        free(safe_file_path);
-        return; 
+        free(safe_file_path); return; 
     }
     
-    // 4. Logika File Statis : Kalau file biasa → ambil dari gudang
+    // 5. Logika File Statis (Optimized with TCP_CORK)
     struct stat st;
     if (stat(safe_file_path, &st) != 0 || !S_ISREG(st.st_mode)) {
+        //printf("[DEBUG] Error Stat: %s (File mungkin tidak ada)\n", safe_file_path);
         send_mem_response(sock_client, 404, "Not Found", "<h1>404 Not Found</h1>", req->is_keep_alive);
-        free(safe_file_path);
-        return;
+        free(safe_file_path); return;
     }
-
-    // Ambil MIME Type
-    const char *mime = get_mime_type(req->uri);
-    
-    // Siapkan Header
-    char header[1024];
-    int h_len = snprintf(header, sizeof(header),
-        "HTTP/1.1 200 OK\r\n"
-        "Content-Type: %s\r\n"
-        "Content-Length: %ld\r\n"
-        "Server: Halmos-Core\r\n"
-        "Connection: keep-alive\r\n\r\n",
-        mime, st.st_size);
-
-    send(sock_client, header, h_len, 0);
-
-    // Kirim File dengan Zero-Copy (Looping untuk Non-Blocking)
+    //printf("[DEBUG] Mengirim File: %s | Ukuran: %ld bytes\n", safe_file_path, st.st_size);
     int fd = open(safe_file_path, O_RDONLY);
     if (fd != -1) {
+        // A. Pasang CORK: Sumbat socket agar header & data file dikirim barengan
+        int state = 1;
+        setsockopt(sock_client, IPPROTO_TCP, TCP_CORK, &state, sizeof(state));
+
+        // B. Siapkan & Kirim Header
+        char header[1024];
+        int h_len = snprintf(header, sizeof(header),
+            "HTTP/1.1 200 OK\r\nContent-Type: %s\r\nContent-Length: %ld\r\n"
+            "Server: Halmos-Core\r\nConnection: %s\r\n\r\n",
+            get_mime_type(req->uri), st.st_size, req->is_keep_alive ? "keep-alive" : "close");
+        
+        send(sock_client, header, h_len, 0);
+
+        //ssize_t h_sent = send(sock_client, header, h_len, 0);
+        //printf("[DEBUG] Header terkirim: %zd/%d bytes\n", h_sent, h_len);
+
+        // C. Kirim File pakai Zero-Copy sendfile
         off_t offset = 0;
         size_t remaining = st.st_size;
+        
+        //size_t total_sent = 0;
+
         while (remaining > 0) {
             ssize_t sent = sendfile(sock_client, fd, &offset, remaining);
-            if (sent <= 0) {
-                if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                    // Berikan yield agar thread lain 
-                    // bisa jalan jika di satu core
-                    sched_yield();
-                    continue;
-                }
-                break; // Error atau koneksi terputus
+            
+            if (sent > 0) {
+                remaining -= (size_t)sent;
+                //total_sent += (size_t)sent;
+                continue;
             }
-            if (sent == 0) break; // Client menutup koneksi tengah jalan
-            remaining -= sent;
+
+            if (sent < 0) {
+                if (errno == EINTR) continue;
+                
+                // JIKA BUFFER PENUH (EAGAIN / EWOULDBLOCK)
+                if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    // Tunggu sampai socket siap (writable) selama maksimal 5 detik
+                    struct pollfd pfd;
+                    pfd.fd = sock_client;
+                    pfd.events = POLLOUT;
+                    
+                    int ret = poll(&pfd, 1, 5000); // timeout 5000ms
+                    if (ret > 0 && (pfd.revents & POLLOUT)) {
+                        continue; // Socket sudah lega, hajar lagi!
+                    } else {
+                        //printf("[DEBUG] Timeout/Error nunggu buffer lega\n");
+                        break; 
+                    }
+                }
+                
+                //printf("[DEBUG] Sendfile Error: %s\n", strerror(errno));
+                break;
+            }
+            if (sent == 0) break; // Client cabut
         }
+
+        // D. Cabut CORK: Paksa kernel kirim paket terakhir (Zero-Latency Finish)
+        // printf("[DEBUG] Total Body terkirim: %zu/%ld bytes\n", total_sent, st.st_size);
+        state = 0;
+        setsockopt(sock_client, IPPROTO_TCP, TCP_CORK, &state, sizeof(state));
+
         close(fd);
     }
     free(safe_file_path);

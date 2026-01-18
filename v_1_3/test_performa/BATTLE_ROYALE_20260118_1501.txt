@@ -1,0 +1,126 @@
+=================================================
+   BATTLE ROYALE: APACHE VS NGINX VS HALMOS
+   Tanggal: Sun 18 Jan 2026 03:01:59 PM WIB
+   Skenario: Bertahap (Variable Requests)
+=================================================
+
+[Testing APACHE | C=10 | N=5000]
+Requests per second:    1065.23 [#/sec] (mean)
+Time per request:       9.388 [ms] (mean)
+Time per request:       0.939 [ms] (mean, across all concurrent requests)
+Transfer rate:          1047241.76 [Kbytes/sec] received
+ 100%    583 (longest request)
+Peak RAM Usage: 290.89 MB
+-------------------------------------------------
+
+[Testing NGINX | C=10 | N=5000]
+Requests per second:    1674.86 [#/sec] (mean)
+Time per request:       5.971 [ms] (mean)
+Time per request:       0.597 [ms] (mean, across all concurrent requests)
+Transfer rate:          1646511.23 [Kbytes/sec] received
+ 100%     12 (longest request)
+Peak RAM Usage: 23.53 MB
+-------------------------------------------------
+
+[Testing HALMOS | C=10 | N=5000]
+Requests per second:    1729.50 [#/sec] (mean)
+Time per request:       5.782 [ms] (mean)
+Time per request:       0.578 [ms] (mean, across all concurrent requests)
+Transfer rate:          1700007.94 [Kbytes/sec] received
+ 100%     38 (longest request)
+Peak RAM Usage: 3.16 MB
+-------------------------------------------------
+
+[Testing APACHE | C=100 | N=10000]
+Requests per second:    1043.75 [#/sec] (mean)
+Time per request:       95.809 [ms] (mean)
+Time per request:       0.958 [ms] (mean, across all concurrent requests)
+Transfer rate:          1026118.47 [Kbytes/sec] received
+ 100%    184 (longest request)
+Peak RAM Usage: 1449.33 MB
+-------------------------------------------------
+
+[Testing NGINX | C=100 | N=10000]
+Requests per second:    1511.71 [#/sec] (mean)
+Time per request:       66.150 [ms] (mean)
+Time per request:       0.662 [ms] (mean, across all concurrent requests)
+Transfer rate:          1486117.91 [Kbytes/sec] received
+ 100%    109 (longest request)
+Peak RAM Usage: 23.53 MB
+-------------------------------------------------
+
+[Testing HALMOS | C=100 | N=10000]
+!!! ALERT: ADA FAILED REQUESTS !!!
+Failed requests:        4
+Requests per second:    1202.25 [#/sec] (mean)
+Time per request:       83.177 [ms] (mean)
+Time per request:       0.832 [ms] (mean, across all concurrent requests)
+Transfer rate:          1181278.41 [Kbytes/sec] received
+ 100%    108 (longest request)
+Peak RAM Usage: 3.43 MB
+-------------------------------------------------
+
+[Testing APACHE | C=500 | N=20000]
+Requests per second:    713.30 [#/sec] (mean)
+Time per request:       700.970 [ms] (mean)
+Time per request:       1.402 [ms] (mean, across all concurrent requests)
+Transfer rate:          701250.25 [Kbytes/sec] received
+ 100%  28014 (longest request)
+Peak RAM Usage: 1947.26 MB
+-------------------------------------------------
+
+[Testing NGINX | C=500 | N=20000]
+Requests per second:    1250.47 [#/sec] (mean)
+Time per request:       399.848 [ms] (mean)
+Time per request:       0.800 [ms] (mean, across all concurrent requests)
+Transfer rate:          1229307.23 [Kbytes/sec] received
+ 100%    637 (longest request)
+Peak RAM Usage: 28.89 MB
+-------------------------------------------------
+
+[Testing HALMOS | C=500 | N=20000]
+!!! ALERT: ADA FAILED REQUESTS !!!
+Failed requests:        2
+Requests per second:    1199.65 [#/sec] (mean)
+Time per request:       416.787 [ms] (mean)
+Time per request:       0.834 [ms] (mean, across all concurrent requests)
+Transfer rate:          1179076.55 [Kbytes/sec] received
+ 100%    543 (longest request)
+Peak RAM Usage: 3.57 MB
+-------------------------------------------------
+
+[Testing APACHE | C=1000 | N=20000]
+!!! ALERT: ADA FAILED REQUESTS !!!
+Failed requests:        161
+Requests per second:    295.05 [#/sec] (mean)
+Time per request:       3389.248 [ms] (mean)
+Time per request:       3.389 [ms] (mean, across all concurrent requests)
+Transfer rate:          287746.87 [Kbytes/sec] received
+ 100%  67745 (longest request)
+Peak RAM Usage: 1915.00 MB
+-------------------------------------------------
+
+[Testing NGINX | C=1000 | N=20000]
+!!! ALERT: ADA FAILED REQUESTS !!!
+Failed requests:        20000
+Requests per second:    1210.62 [#/sec] (mean)
+Time per request:       826.021 [ms] (mean)
+Time per request:       0.826 [ms] (mean, across all concurrent requests)
+Transfer rate:          1175256.20 [Kbytes/sec] received
+ 100%   1181 (longest request)
+Peak RAM Usage: 34.99 MB
+-------------------------------------------------
+
+[Testing HALMOS | C=1000 | N=20000]
+!!! ALERT: ADA FAILED REQUESTS !!!
+Failed requests:        1
+Requests per second:    1220.35 [#/sec] (mean)
+Time per request:       819.434 [ms] (mean)
+Time per request:       0.819 [ms] (mean, across all concurrent requests)
+Transfer rate:          1199482.93 [Kbytes/sec] received
+ 100%    864 (longest request)
+Peak RAM Usage: 3.42 MB
+-------------------------------------------------
+
+=================================================
+=================================================

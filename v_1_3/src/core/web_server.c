@@ -11,6 +11,8 @@
 #include <errno.h>
 #include <sys/stat.h>
 #include <signal.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
 
 // Header internal Anda
 #include "../include/core/web_server.h"
@@ -26,6 +28,13 @@ int sock_server;
 int epoll_fd;
 struct epoll_event *events;
 int MAX_EVENTS;
+
+// Tambahkan TCP Fast Open
+int qlen = 5;
+// Gunakan IPPROTO_TCP sebagai pengganti SOL_TCP
+#ifndef TCP_FASTOPEN
+#define TCP_FASTOPEN 23
+#endif
 
 
 /********************************************************************
@@ -183,8 +192,20 @@ void* worker_routine(void* arg) {
  * resepsionis selalu sadar kalau ada tamu baru.
  ********************************************************************/
 void start_server() {
-    // --- LOGIKA ADAPTIVE MAX_EVENTS ---
     struct rlimit rl;
+    // Cek limit maksimal yang diizinkan kernel
+    if (getrlimit(RLIMIT_NOFILE, &rl) == 0) {
+        write_log("[SYSTEM] Limit FD saat ini: Soft=%ld, Hard=%ld\n", (long)rl.rlim_cur, (long)rl.rlim_max);
+        
+        // Coba set ke limit maksimal yang dibolehkan OS (biasanya 65535 atau lebih)
+        rl.rlim_cur = rl.rlim_max; 
+        if (setrlimit(RLIMIT_NOFILE, &rl) == -1) {
+            write_log("[ERROR] Gagal menaikkan ulimit");
+        } else {
+            write_log("[SYSTEM] Berhasil menaikkan ulimit ke: %ld\n", (long)rl.rlim_cur);
+        }
+    }
+    // --- LOGIKA ADAPTIVE MAX_EVENTS ---
     if (getrlimit(RLIMIT_NOFILE, &rl) == 0) {
         // Ambil 10% dari soft limit sebagai jumlah event yang diproses per batch
         // Contoh: Jika limit 1024, MAX_EVENTS jadi ~102.
@@ -221,10 +242,27 @@ void start_server() {
         exit(EXIT_FAILURE);
     }
 
-    if (listen(sock_server, 128) < 0) {
+    /*if (listen(sock_server, 128) < 0) {
+        perror("Listen failed");
+        exit(EXIT_FAILURE);
+    }*/
+
+    // 1. Naikkan Backlog secara drastis!
+    // Gunakan SOMAXCONN (biasanya 4096) atau angka besar seperti 1024
+    if (listen(sock_server, 4096) < 0) { 
         perror("Listen failed");
         exit(EXIT_FAILURE);
     }
+
+    // 2. Tambahkan TCP Fast Open (Opsional tapi bikin kencang)
+    // Ini mempercepat handshake TCP
+    if (setsockopt(sock_server, IPPROTO_TCP, TCP_FASTOPEN, &qlen, sizeof(qlen)) < 0) {
+        write_log("TCP Fast Open not supported or failed");
+    }
+
+    // 3. Optimasi Buffer Kernel (PENTING buat transfer file gede)
+    int send_buf = 1024 * 1024; // 1MB buffer
+    setsockopt(sock_server, SOL_SOCKET, SO_SNDBUF, &send_buf, sizeof(send_buf));
 
     epoll_fd = epoll_create1(0);
     struct epoll_event ev;
@@ -260,19 +298,37 @@ void run_server() {
         
         for (int i = 0; i < num_fds; i++) {
             if (events[i].data.fd == sock_server) {
-                // KONEKSI BARU
-                struct sockaddr_in client_addr;
-                socklen_t addr_len = sizeof(client_addr);
-                int sock_client = accept(sock_server, (struct sockaddr *)&client_addr, &addr_len);
-                
-                if (sock_client < 0) continue;
+                // LOOP ACCEPT: Ambil semua tamu yang antre sampai ludes
+                while (1) {
+                    struct sockaddr_in client_addr;
+                    socklen_t addr_len = sizeof(client_addr);
+                    int sock_client = accept(sock_server, (struct sockaddr *)&client_addr, &addr_len);
+                    
+                    if (sock_client < 0) {
+                        // Jika errno EAGAIN atau EWOULDBLOCK, artinya antrean tamu sudah habis
+                        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                            break; 
+                        }
+                        // Jika interupsi signal, coba lagi
+                        if (errno == EINTR) continue;
+                        
+                        perror("Accept failed");
+                        break;
+                    }
 
-                set_nonblocking(sock_client);
-                struct epoll_event ev_client;
-                ev_client.data.fd = sock_client;
-                ev_client.events = EPOLLIN | EPOLLET | EPOLLONESHOT; 
-                epoll_ctl(epoll_fd, EPOLL_CTL_ADD, sock_client, &ev_client);
-                
+                    // Set tamu jadi non-blocking agar tidak bikin thread pool macet
+                    set_nonblocking(sock_client);
+
+                    struct epoll_event ev_client;
+                    ev_client.data.fd = sock_client;
+                    // Pakai EPOLLET (Edge Triggered) + EPOLLONESHOT (Biar gak rebutan thread)
+                    ev_client.events = EPOLLIN | EPOLLET | EPOLLONESHOT; 
+                    
+                    if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, sock_client, &ev_client) == -1) {
+                        perror("epoll_ctl: client_socket");
+                        close(sock_client);
+                    }
+                }
             } else {
                 // REQUEST MASUK DARI CLIENT EXISTING
                 int client_fd = events[i].data.fd;
