@@ -8,11 +8,35 @@
 #include "http_common.h" 
 #include "fs_handler.h"
 #include "log.h"
+#include "config.h"
 
 typedef struct {
     const char *ext;
     const char *type;
 } MimeMap;
+
+extern Config config;
+
+/************************************
+ * Fungsi untuk membaca daftar virtual host
+*************************************/
+const char* get_active_root(const char *incoming_host) {
+    // 1. Bersihkan incoming_host dari port jika ada (misal: localhost:8080 -> localhost)
+    char clean_host[256];
+    strncpy(clean_host, incoming_host, sizeof(clean_host));
+    char *port_ptr = strchr(clean_host, ':');
+    if (port_ptr) *port_ptr = '\0';
+
+    // 2. Cari di daftar VHost
+    for (int i = 0; i < config.vhost_count; i++) {
+        if (strcmp(config.vhosts[i].host, clean_host) == 0) {
+            return config.vhosts[i].root;
+        }
+    }
+
+    // 3. Kalau nggak ada yang cocok, balik ke default_root dari [Storage]
+    return config.document_root;
+}
 
 char *sanitize_path(const char *root, const char *uri) {
     char full_path[PATH_MAX];
@@ -41,25 +65,6 @@ char *sanitize_path(const char *root, const char *uri) {
 
     return strdup(resolved_path);
 }
-
-/*const char *get_mime_type(const char *file) {
-    // Cari extension dari file
-    const char *dot = strrchr(file, '.');
-
-    // Jika tidak ditemukan extension atau MIME type yang cocok,
-    // kembalikan "text/html" sebagai default
-    if (!dot) return "text/html";
-    else if (strcmp(dot, ".html") == 0) return "text/html";
-    else if (strcmp(dot, ".css") == 0) return "text/css";
-    else if (strcmp(dot, ".js") == 0) return "application/js";
-    else if (strcmp(dot, ".jpg") == 0) return "image/jpeg";
-    else if (strcmp(dot, ".png") == 0) return "image/png";
-    else if (strcmp(dot, ".gif") == 0) return "image/gif";
-    else if (strcmp(dot, ".ico") == 0) return "image/ico";
-    else if (strcmp(dot, ".rs") == 0) return "text/plain"; // Jangan dieksekusi
-    else if (strcmp(dot, ".py") == 0) return "text/plain"; // Jangan dieksekusi
-    else return "text/html";  // Default MIME type
-} //end get_mime_type*/
 
 // WAJIB URUT ABJAD buat Binary Search
 static MimeMap mime_types[] = {

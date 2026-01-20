@@ -6,6 +6,8 @@
 
 #include "http_common.h"
 
+const char* get_active_root(const char *incoming_host);
+
 char *sanitize_path(const char *root, const char *uri);
 
 const char *get_mime_type(const char *file);

@@ -72,11 +72,11 @@ void handle_dynamic_request(int sock_client, RequestHeader *req) {
         }
     } else {
         // Gabungan GET & POST untuk FastCGI (PHP/Rust)
-        FastCGI_Response res = cgi_request_stream(target_ip, target_port, sock_client,
-                                                  req->method, req->uri, req->query_string, 
-                                                  req->body_data, req->body_length, 
-                                                  req->content_length, req->content_type, 
-                                                  req->cookie_data);
+        FastCGI_Response res = cgi_request_stream(req,
+            sock_client, target_ip, target_port, 
+            req->body_data, req->body_length, 
+            req->content_length);
+
         if (res.body) {
             char http_header[2048]; 
             int status_code = 200;

@@ -80,6 +80,15 @@ void load_config(const char *filename) {
             value = trim(value);
 
             // Menangani key pada config
+            // --- LOGIKA KHUSUS VIRTUAL HOSTS ---
+            if (strcmp(section, "VirtualHosts") == 0) {
+                if (config.vhost_count < 32) { // Batasi sesuai ukuran array
+                    strncpy(config.vhosts[config.vhost_count].host, key, 256);
+                    strncpy(config.vhosts[config.vhost_count].root, value, 1024);
+                    config.vhost_count++;
+                }
+                continue; // Lanjut ke baris berikutnya, jangan masuk ke else if di bawah
+            }
             //network
             if (strcmp(key, "server_name") == 0) {
                 strncpy(config.server_name, value, sizeof(config.server_name));

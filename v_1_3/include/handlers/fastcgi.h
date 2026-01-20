@@ -3,6 +3,8 @@
 
 #include <stddef.h>
 
+#include "http1_handler.h"
+
 #define FCGI_VERSION_1 1
 #define FCGI_BEGIN_REQUEST 1
 #define FCGI_PARAMS 4
@@ -43,17 +45,13 @@ typedef struct {
 void send_begin_request(int sockfd, int request_id, int keep_conn);
 
 FastCGI_Response cgi_request_stream(
+    RequestHeader *req,
+    int sock_client,
     const char *target_ip,
     int target_port,
-    int sock_client,
-    const char *method,
-    const char *script_name,
-    const char *query_string,
-    void *post_data,
-    size_t post_data_len,
-    size_t content_length,
-    const char *content_type,
-    const char *cookie_data
+    void *post_data,          
+    size_t post_data_len,     
+    size_t content_length
 );
 
 #endif

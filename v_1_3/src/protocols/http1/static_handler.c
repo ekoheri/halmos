@@ -18,11 +18,17 @@
 #include "fs_handler.h"
 #include "config.h"
 #include "http_utils.h"
+#include "log.h"
 
 extern Config config;
 
+
 void handle_static_request(int sock_client, RequestHeader *req) {
-    char *safe_path = sanitize_path(config.document_root, req->uri);
+    const char *active_root = get_active_root(req->host);
+    char *safe_path = sanitize_path(active_root, req->uri);
+
+    write_log("[DEBUG] Full Path: %s", safe_path);
+
     if (!safe_path) {
         //printf("[DEBUG] Error Stat: %s (File mungkin tidak ada)\n", safe_file_path);
         send_mem_response(sock_client, 404, "Not Found", "<h1>404 Not Found</h1>", req->is_keep_alive);

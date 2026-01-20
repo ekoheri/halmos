@@ -2,6 +2,7 @@
 #define HTTP1_PARSER_H
 
 #include "http_common.h" // Butuh MultipartPart & HalmosResponse
+#include "http1_parser.h"
 
 // Info WebSocket biasanya melalui proses 'Upgrade' di HTTP/1.1
 typedef struct {
@@ -16,6 +17,7 @@ typedef struct {
     char method[16];
     char *directory;
     char *uri;
+    char *host;
     char http_version[16];
     char *query_string;
     char *path_info;

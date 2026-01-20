@@ -149,6 +149,11 @@ bool parse_http_request(const char *raw_data, size_t total_received, RequestHead
             
             // Simpan isinya (misal: "user=eko; session=123")
             req->cookie_data = strdup(val); 
+        } else if (strncasecmp(line, "Host:", 5) == 0) {
+            char *host_val = line + 5;
+            while (*host_val == ' ') host_val++; // Trim spasi depan
+            req->host = strdup(host_val);  // Simpan ke struct
+            write_log("[DEBUG] Parser dapet Host: '%s'", req->host); // <--- CEK INI DI TERMINAL
         }
     }//end while
     free(header_tmp);
@@ -194,6 +199,7 @@ bool parse_http_request(const char *raw_data, size_t total_received, RequestHead
  ********************************************************************/
 void free_request_header(RequestHeader *req) {
     if (req->uri) free(req->uri);
+    if (req->host) free(req->host);
     if (req->query_string) free(req->query_string);
     if (req->content_type) free(req->content_type);
     if (req->body_data) free(req->body_data);
@@ -282,7 +288,10 @@ void send_directory_listing(int sock_client, const char *path, const char *uri) 
  * hanya menunjuk petugas yang tepat.
  ********************************************************************/
 void handle_method(int sock_client, RequestHeader req_header) {
-    // 1. Pastikan URI selalu diawali / (Perbaikan Parser)
+    // 1. Tentukan Root-nya dulu!
+    const char *active_root = get_active_root(req_header.host);
+
+    // 2. Perbaikan URI (tetap seperti kodemu)
     if (req_header.uri[0] != '/') {
         char temp[1024];
         snprintf(temp, sizeof(temp), "/%s", req_header.uri);
@@ -290,12 +299,15 @@ void handle_method(int sock_client, RequestHeader req_header) {
     }
     
     char full_path[1024];
-    // Pastikan tidak ada double slash saat gabung root + uri
-    if (config.document_root[strlen(config.document_root)-1] == '/' && req_header.uri[0] == '/') {
-        snprintf(full_path, sizeof(full_path), "%s%s", config.document_root, req_header.uri + 1);
+    // PAKAI active_root, JANGAN config.document_root
+    if (active_root[strlen(active_root)-1] == '/' && req_header.uri[0] == '/') {
+        snprintf(full_path, sizeof(full_path), "%s%s", active_root, req_header.uri + 1);
     } else {
-        snprintf(full_path, sizeof(full_path), "%s%s", config.document_root, req_header.uri);
+        snprintf(full_path, sizeof(full_path), "%s%s", active_root, req_header.uri);
     }
+
+    // DEBUG sekarang jadi akurat
+    write_log("[DEBUG] URI: %s | Active Root: %s | Full Path: %s", req_header.uri, active_root, full_path);
 
     struct stat st;
     if (stat(full_path, &st) == 0) {

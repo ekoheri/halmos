@@ -3,6 +3,11 @@
 
 #include <stdbool.h>
 
+typedef struct {
+    char host[256];
+    char root[1024];
+} VHostEntry;
+
 // Struktur data untuk konfigurasi
 typedef struct {
     //Network
@@ -31,6 +36,9 @@ typedef struct {
     //Performance    
     int request_buffer_size;
     int max_queue_size;
+    //Virtual Host
+    VHostEntry vhosts[32];    // Bisa nampung 32 domain
+    int vhost_count;
 } Config;
 
 // Deklarasikan variabel global untuk menyimpan konfigurasi

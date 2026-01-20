@@ -12,6 +12,8 @@
 #include "config.h"
 #include "log.h"
 #include "fastcgi.h"
+#include "fs_handler.h"
+#include "http1_handler.h"
 
 extern Config config;
 
@@ -206,17 +208,14 @@ FastCGI_Response fcgi_response(int sockfd) {
 static _Thread_local int cached_fpm_sock = -1;
 
 FastCGI_Response cgi_request_stream(
+    RequestHeader *req,
+    int sock_client, 
     const char *target_ip,
     int target_port,
-    int sock_client,          
-    const char *method,        
-    const char *script_name,
-    const char *query_string,
     void *post_data,          
     size_t post_data_len,     
-    size_t content_length,     
-    const char *content_type,
-    const char *cookie_data) {
+    size_t content_length
+    ) {
     
     FastCGI_Response res = {NULL, NULL};
     int request_id = 1;
@@ -261,11 +260,8 @@ FastCGI_Response cgi_request_stream(
         if (written > 0) p_len += written; \
         else write_log("[FCGI] Warning: Buffer full, skipped %s", name);
     
-    char script_filename[1024];
-    snprintf(script_filename, sizeof(script_filename), "%s/%s", config.document_root, script_name);
-
-    char cl_str[20];
-    snprintf(cl_str, sizeof(cl_str), "%zu", content_length);
+    // char script_filename[1024];
+    // snprintf(script_filename, sizeof(script_filename), "%s/%s", config.document_root, script_name);
 
     struct sockaddr_in addr;
     socklen_t addr_size = sizeof(struct sockaddr_in);
@@ -274,12 +270,35 @@ FastCGI_Response cgi_request_stream(
         inet_ntop(AF_INET, &addr.sin_addr, client_ip, INET_ADDRSTRLEN);
     }
 
+    const char *active_root = get_active_root(req->host);
+
+    // SCRIPT_FILENAME dinamis & aman dari double slash
+    char script_filename[1024];
+    if (active_root[strlen(active_root)-1] == '/' && req->uri[0] == '/') {
+        snprintf(script_filename, sizeof(script_filename), "%s%s", active_root, req->uri + 1);
+    } else {
+        snprintf(script_filename, sizeof(script_filename), "%s%s", active_root, req->uri);
+    }
+
+    // Cast content_length buat ilangin warning
+    char cl_str[20];
+    snprintf(cl_str, sizeof(cl_str), "%zu", (size_t)req->content_length);
+
+    // SERVER_NAME: Ambil host murni (tanpa port)
+    char server_name[256];
+    strncpy(server_name, req->host ? req->host : config.server_name, sizeof(server_name)-1);
+    char *port_ptr = strchr(server_name, ':');
+    if (port_ptr) *port_ptr = '\0';
+
+    char port_str[10];
+    snprintf(port_str, sizeof(port_str), "%d", config.server_port);
+
     PUSH_PARAM("SCRIPT_FILENAME", script_filename);
-    PUSH_PARAM("REQUEST_METHOD", method);
-    PUSH_PARAM("QUERY_STRING", query_string ? query_string : "");
+    PUSH_PARAM("REQUEST_METHOD", req->method);
+    PUSH_PARAM("QUERY_STRING", req->query_string ? req->query_string : "");
     
-    const char *sanitized_ct = trim_header_value(content_type);
-    if (strcmp(method, "POST") == 0) {
+    const char *sanitized_ct = trim_header_value(req->content_type);
+    if (strcmp(req->method, "POST") == 0) {
         PUSH_PARAM("CONTENT_LENGTH", cl_str);
         PUSH_PARAM("CONTENT_TYPE", (sanitized_ct && strlen(sanitized_ct) > 0) ? sanitized_ct : "application/x-www-form-urlencoded");
     } else {
@@ -288,21 +307,16 @@ FastCGI_Response cgi_request_stream(
     }
 
     PUSH_PARAM("SERVER_SOFTWARE", "Halmos-Core/1.3");
-    PUSH_PARAM("SERVER_NAME", config.server_name);
-    char port_str[10];
-    snprintf(port_str, sizeof(port_str), "%d", config.server_port);
+    PUSH_PARAM("SERVER_NAME", server_name);
     PUSH_PARAM("SERVER_PORT", port_str);
-    PUSH_PARAM("DOCUMENT_ROOT", config.document_root);
-    PUSH_PARAM("REQUEST_URI", script_name);
-    PUSH_PARAM("SCRIPT_NAME", script_name);
+    PUSH_PARAM("DOCUMENT_ROOT", active_root);
+    PUSH_PARAM("REQUEST_URI", req->uri);
+    PUSH_PARAM("SCRIPT_NAME", req->uri);
     PUSH_PARAM("SERVER_PROTOCOL", "HTTP/1.1");
     PUSH_PARAM("GATEWAY_INTERFACE", "CGI/1.1");
     PUSH_PARAM("REMOTE_ADDR", client_ip);
     PUSH_PARAM("REDIRECT_STATUS", "200");
-
-    if (cookie_data) {
-        PUSH_PARAM("HTTP_COOKIE", cookie_data);
-    }
+    PUSH_PARAM("HTTP_COOKIE", req->cookie_data ? req->cookie_data : "");
 
     send_params(fpm_sock, request_id, params_buf, p_len);
 
