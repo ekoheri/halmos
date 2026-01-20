@@ -7,10 +7,10 @@
 #include <arpa/inet.h>
 #include <errno.h> 
 
-#include "../../include/protocols/common/http_utils.h"
-#include "../../include/core/config.h"
-#include "../../include/core/log.h"
-#include "../../include/handlers/fastcgi.h"
+#include "http_utils.h"
+#include "config.h"
+#include "log.h"
+#include "fastcgi.h"
 
 extern Config config;
 
@@ -47,27 +47,50 @@ const char* trim_header_value(const char* s) {
  *
  * Kalau amplop sudah kepenuhan → dia menolak (return 0).
  ***********************************************************************/
+
 int add_pair(unsigned char* dest, const char *name, const char *value, int current_offset, int max_len) {
-    int name_len = strlen(name);
-    char clean_value[1024]; 
+    int name_len = (int)strlen(name);
     const char* val_ptr = value ? value : "";
-    size_t actual_len = strlen(val_ptr);
-    if (actual_len > sizeof(clean_value) - 1) actual_len = sizeof(clean_value) - 1;
-    memcpy(clean_value, val_ptr, actual_len);
-    clean_value[actual_len] = '\0';
-    trim_whitespace(clean_value);
-    int value_len = strlen(clean_value);
+    int value_len = (int)strlen(val_ptr);
 
-    if (current_offset + 2 + name_len + value_len > max_len) return 0;
+    // Hitung butuh berapa byte buat nyimpen 'length'
+    int name_len_bytes = (name_len > 127) ? 4 : 1;
+    int value_len_bytes = (value_len > 127) ? 4 : 1;
 
-    int offset = 0;
-    dest[offset++] = (unsigned char)name_len;
-    dest[offset++] = (unsigned char)value_len;
+    // Cek apakah buffer params_buf masih muat
+    if (current_offset + name_len_bytes + value_len_bytes + name_len + value_len > max_len) {
+        return 0; // Gak muat, Cuk!
+    }
+
+    int offset = current_offset;
+
+    // --- Tulis Name Length ---
+    if (name_len > 127) {
+        dest[offset++] = (unsigned char)((name_len >> 24) | 0x80);
+        dest[offset++] = (unsigned char)((name_len >> 16) & 0xFF);
+        dest[offset++] = (unsigned char)((name_len >> 8) & 0xFF);
+        dest[offset++] = (unsigned char)(name_len & 0xFF);
+    } else {
+        dest[offset++] = (unsigned char)name_len;
+    }
+
+    // --- Tulis Value Length ---
+    if (value_len > 127) {
+        dest[offset++] = (unsigned char)((value_len >> 24) | 0x80);
+        dest[offset++] = (unsigned char)((value_len >> 16) & 0xFF);
+        dest[offset++] = (unsigned char)((value_len >> 8) & 0xFF);
+        dest[offset++] = (unsigned char)(value_len & 0xFF);
+    } else {
+        dest[offset++] = (unsigned char)value_len;
+    }
+
+    // --- Tulis Datanya ---
     memcpy(dest + offset, name, name_len);
     offset += name_len;
-    memcpy(dest + offset, clean_value, value_len);
+    memcpy(dest + offset, val_ptr, value_len);
     offset += value_len;
-    return offset;
+
+    return (offset - current_offset); // Balikin jumlah byte yang kepake
 }
 
 /***********************************************************************
@@ -204,84 +227,6 @@ void send_stdin(int sockfd, int request_id, const void *post_data, int post_data
 }
 
 /***********************************************************************
- * send_generic_fcgi_payload()
- * ANALOGI BESAR :
- * Fungsi ini seperti PETUGAS LOKET YANG MENYIAPKAN
- * SELURUH BERKAS sebelum dikirim ke ruang PHP-FPM.
- *
- * Tugasnya:
- * 1. Membunyikan bel mulai (send_begin_request)
- * 2. Menyusun map berisi:
- *    - SCRIPT_FILENAME
- *    - REQUEST_METHOD
- *    - QUERY_STRING
- *    - dll
- * 3. Mengirim formulir params
- * 4. Mengirim lampiran body (send_stdin)
- *
- * Ibaratnya:
- * → menyiapkan paket lengkap sebelum dilempar ke backend.
- ***********************************************************************/
-void send_generic_fcgi_payload(int sockfd,
-    const char *directory,
-    const char *script_name,
-    const char request_method[8],
-    const char *query_string,
-    const char *path_info,
-    const char *post_data,
-    size_t post_data_len,
-    const char *content_type) {
-    
-    const char *document_root = config.document_root;
-    int request_id = 1;
-
-    send_begin_request(sockfd, request_id);
-
-    unsigned char params[BUFFER_SIZE];
-    int params_len = 0;
-
-    char script_filename[BUFFER_SIZE];
-    snprintf(script_filename, sizeof(script_filename), "%s/%s/%s", document_root, directory, script_name);
-
-    char clean_filename[BUFFER_SIZE];
-    int j = 0;
-    for (int i = 0; script_filename[i] != '\0' && j < BUFFER_SIZE - 1; i++) {
-        if (script_filename[i] == '/' && script_filename[i+1] == '/') continue;
-        clean_filename[j++] = script_filename[i];
-    }
-    clean_filename[j] = '\0';
-
-    char request_uri[BUFFER_SIZE];
-    if(query_string && strlen(query_string) > 0) 
-        snprintf(request_uri, sizeof(request_uri), "%s?%s", script_name, query_string);
-    else 
-        snprintf(request_uri, sizeof(request_uri), "%s", script_name);
-
-    params_len += add_pair(params + params_len, "SCRIPT_FILENAME", clean_filename, params_len, BUFFER_SIZE);
-    params_len += add_pair(params + params_len, "SCRIPT_NAME", script_name, params_len, BUFFER_SIZE);
-    params_len += add_pair(params + params_len, "REQUEST_METHOD", request_method, params_len, BUFFER_SIZE);
-    params_len += add_pair(params + params_len, "DOCUMENT_ROOT", document_root, params_len, BUFFER_SIZE);
-    params_len += add_pair(params + params_len, "QUERY_STRING", query_string ? query_string : "", params_len, BUFFER_SIZE);
-    params_len += add_pair(params + params_len, "REQUEST_URI", request_uri, params_len, BUFFER_SIZE);
-    params_len += add_pair(params + params_len, "SERVER_PROTOCOL", "HTTP/1.1", params_len, BUFFER_SIZE);
-    params_len += add_pair(params + params_len, "GATEWAY_INTERFACE", "CGI/1.1", params_len, BUFFER_SIZE);
-    params_len += add_pair(params + params_len, "REDIRECT_STATUS", "200", params_len, BUFFER_SIZE);
-
-    if(post_data_len > 0) {
-        char post_len_str[16];
-        snprintf(post_len_str, sizeof(post_len_str), "%zu", post_data_len);
-        printf("[DEBUG PARAMS] --- CONTENT METADATA ---\n");
-        printf("[DEBUG PARAMS] CONTENT_LENGTH promised to PHP: %s\n", post_len_str);
-        printf("[DEBUG PARAMS] CONTENT_TYPE: %s\n", content_type);
-        params_len += add_pair(params + params_len, "CONTENT_LENGTH", post_len_str, params_len, BUFFER_SIZE);
-        params_len += add_pair(params + params_len, "CONTENT_TYPE", trim_header_value(content_type), params_len, BUFFER_SIZE);
-    }
-
-    send_params(sockfd, request_id, params, params_len);
-    send_stdin(sockfd, request_id, post_data, (int)post_data_len);
-}
-
-/***********************************************************************
  * fcgi_response()
  * ANALOGI :
  * Ini adalah PETUGAS PENERIMA BALASAN dari PHP-FPM.
@@ -343,52 +288,6 @@ FastCGI_Response fcgi_response(int sockfd) {
 }
 
 /***********************************************************************
- * fastcgi_request()
- * ANALOGI :
- * Ini seperti KURIR ANTAR GEDUNG yang:
- *
- * 1. Membuka koneksi ke kantor PHP-FPM
- * 2. Mengantar paket (send_generic_fcgi_payload)
- * 3. Menunggu balasan (fcgi_response)
- * 4. Pulang membawa hasil
- *
- * Jika kantor tujuan tutup → pulang tangan kosong.
- ***********************************************************************/
-FastCGI_Response fastcgi_request(
-    const char *target_ip,
-    int target_port,
-    const char *directory,
-    const char *script_name,
-    const char request_method[8],
-    const char *query_string,
-    const char *path_info,
-    const char *post_data,
-    size_t post_data_len, 
-    const char *content_type) {
-    
-    int sockfd;
-    struct sockaddr_in server_addr;
-    sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (sockfd < 0) return (FastCGI_Response){NULL, NULL};
-
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(target_port);
-    inet_pton(AF_INET, target_ip, &server_addr.sin_addr);
-
-    if (connect(sockfd, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
-        close(sockfd);
-        return (FastCGI_Response){NULL, NULL};
-    }
-
-    send_generic_fcgi_payload(sockfd, directory, script_name, request_method, 
-                             query_string, path_info, post_data, post_data_len, content_type);
-    
-    FastCGI_Response response_fpm = fcgi_response(sockfd);
-    close(sockfd);
-    return response_fpm;
-}
-
-/***********************************************************************
  * cgi_request_stream
  * ANALOGI BESAR – FUNGSI PALING CANGGIH :
  *
@@ -422,7 +321,8 @@ FastCGI_Response cgi_request_stream(
     void *post_data,          
     size_t post_data_len,     
     size_t content_length,     
-    const char *content_type) {
+    const char *content_type,
+    const char *cookie_data) {
     
     FastCGI_Response res = {NULL, NULL};
     int request_id = 1;
@@ -442,9 +342,18 @@ FastCGI_Response cgi_request_stream(
 
     // 2. Kirim BEGIN_REQUEST & PARAMS
     send_begin_request(fpm_sock, request_id);
-    
-    unsigned char params_buf[BUFFER_SIZE];
+
+    // --- PERBAIKAN DI SINI ---
+    // Gunakan buffer yang lebih besar (16KB) untuk menampung params (header)
+    unsigned char params_buf[16384]; 
     int p_len = 0;
+    int written = 0;
+    
+    // Helper macro lokal biar gak ngetik ulang check return value
+    #define PUSH_PARAM(name, val) \
+        written = add_pair(params_buf, name, val, p_len, sizeof(params_buf)); \
+        if (written > 0) p_len += written; \
+        else write_log("[FCGI] Warning: Buffer full, skipped %s", name);
     
     // 3. Sesuaikan path file
     char script_filename[1024];
@@ -458,16 +367,48 @@ FastCGI_Response cgi_request_stream(
     const char *clean_ct = content_type ? content_type : "";
     while(*clean_ct == ' ') clean_ct++; 
 
-    // 6. Isi Parameter
-    p_len += add_pair(params_buf + p_len, "SCRIPT_FILENAME", script_filename, p_len, BUFFER_SIZE);
-    p_len += add_pair(params_buf + p_len, "REQUEST_METHOD", method, p_len, BUFFER_SIZE);
-    p_len += add_pair(params_buf + p_len, "CONTENT_LENGTH", cl_str, p_len, BUFFER_SIZE);
-    p_len += add_pair(params_buf + p_len, "CONTENT_TYPE", clean_ct, p_len, BUFFER_SIZE);
-    p_len += add_pair(params_buf + p_len, "QUERY_STRING", query_string ? query_string : "", p_len, BUFFER_SIZE);
-    p_len += add_pair(params_buf + p_len, "REQUEST_URI", script_name, p_len, BUFFER_SIZE);
-    p_len += add_pair(params_buf + p_len, "SERVER_PROTOCOL", "HTTP/1.1", p_len, BUFFER_SIZE);
-    p_len += add_pair(params_buf + p_len, "GATEWAY_INTERFACE", "CGI/1.1", p_len, BUFFER_SIZE);
-    p_len += add_pair(params_buf + p_len, "REDIRECT_STATUS", "200", p_len, BUFFER_SIZE);
+    // 6. Siapkan variabel buat nampung IP browser yang mengakses
+    struct sockaddr_in addr;
+    socklen_t addr_size = sizeof(struct sockaddr_in);
+    char client_ip[INET_ADDRSTRLEN] = "0.0.0.0"; // Default kalau gagal
+
+    // 7. Tanya ke Kernel: "Woi, socket ini punya siapa?"
+    if (getpeername(sock_client, (struct sockaddr *)&addr, &addr_size) == 0) {
+        // Convert format binary ke string (misal: 192.168.1.1)
+        inet_ntop(AF_INET, &addr.sin_addr, client_ip, INET_ADDRSTRLEN);
+    }
+
+    // 6. Isi Semua Parameter (Pakai Macro yang tadi kita buat)
+    PUSH_PARAM("SCRIPT_FILENAME", script_filename);
+    PUSH_PARAM("REQUEST_METHOD", method);
+    PUSH_PARAM("CONTENT_LENGTH", cl_str);
+    PUSH_PARAM("CONTENT_TYPE", content_type ? content_type : "");
+    PUSH_PARAM("QUERY_STRING", query_string ? query_string : "");
+    // --- KHUSUS POST HARUS JELAS ---
+    const char *sanitized_ct = trim_header_value(content_type);
+    if (strcmp(method, "POST") == 0) {
+        PUSH_PARAM("CONTENT_LENGTH", cl_str);
+        // Kalau content_type dari browser kosong, kasih default form
+        if (sanitized_ct && strlen(sanitized_ct) > 0) {
+        PUSH_PARAM("CONTENT_TYPE", sanitized_ct);
+        } else {
+            PUSH_PARAM("CONTENT_TYPE", "application/x-www-form-urlencoded");
+        }
+    } else {
+        // Kalau GET, biasanya length 0
+        PUSH_PARAM("CONTENT_LENGTH", "0");
+        PUSH_PARAM("CONTENT_TYPE", "");
+    }
+    PUSH_PARAM("REQUEST_URI", script_name);
+    PUSH_PARAM("SERVER_PROTOCOL", "HTTP/1.1");
+    PUSH_PARAM("GATEWAY_INTERFACE", "CGI/1.1");
+    PUSH_PARAM("REMOTE_ADDR", client_ip);
+    PUSH_PARAM("REDIRECT_STATUS", "200");
+
+    // Masukkan Cookie jika ada
+    if (cookie_data) {
+        PUSH_PARAM("HTTP_COOKIE", cookie_data);
+    }
 
     send_params(fpm_sock, request_id, params_buf, p_len);
 
@@ -485,10 +426,16 @@ FastCGI_Response cgi_request_stream(
         char stream_buffer[16384]; 
         while (total_streamed < content_length) {
             ssize_t n = recv(sock_client, stream_buffer, sizeof(stream_buffer), 0);
-            if (n <= 0) break; 
-            
-            send_stdin(fpm_sock, request_id, stream_buffer, (int)n);
-            total_streamed += n;
+            if (n > 0) {
+                send_stdin(fpm_sock, request_id, stream_buffer, (int)n);
+                total_streamed += n;
+            } else if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                // Tunggu bentar data dateng, jangan langsung break
+                usleep(100); 
+                continue; 
+            } else {
+                break; 
+            }
         }
     }
 

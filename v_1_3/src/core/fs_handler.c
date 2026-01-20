@@ -5,27 +5,33 @@
 #include <limits.h>
 #include <sys/stat.h>
 
-#include "../include/protocols/common/http_common.h" 
-#include "../include/core/fs_handler.h"
-#include "../include/core/log.h"
+#include "http_common.h" 
+#include "fs_handler.h"
+#include "log.h"
 
 char *sanitize_path(const char *root, const char *uri) {
     char full_path[PATH_MAX];
     char resolved_path[PATH_MAX];
 
-    // 1. Gabungkan root dan uri mentah
-    snprintf(full_path, sizeof(full_path), "%s/%s", root, uri);
-
-    // 2. Gunakan realpath() untuk menyelesaikan ".." dan "."
-    // realpath akan mengubah "/var/www/html/../etc/passwd" menjadi "/etc/passwd"
-    if (realpath(full_path, resolved_path) == NULL) {
-        return NULL; // Path tidak valid atau file tidak ada
+    // Gabungkan dengan cerdas: cek apakah uri sudah punya slash
+    if (uri[0] == '/') {
+        snprintf(full_path, sizeof(full_path), "%s%s", root, uri);
+    } else {
+        snprintf(full_path, sizeof(full_path), "%s/%s", root, uri);
     }
 
-    // 3. KUNCI KEAMANAN: Pastikan resolved_path masih dimulai dengan root
-    // Jika tidak, berarti user mencoba melompat keluar dari folder web
-    if (strncmp(root, resolved_path, strlen(root)) != 0) {
-        return NULL; // Upaya bypass terdeteksi!
+    if (realpath(full_path, resolved_path) == NULL) {
+        // printf("[DEBUG] realpath gagal untuk: %s\n", full_path);
+        return NULL;
+    }
+
+    // Gunakan realpath juga untuk si ROOT agar perbandingannya 'apple-to-apple'
+    char resolved_root[PATH_MAX];
+    if (realpath(root, resolved_root) == NULL) return NULL;
+    
+    size_t root_len = strlen(resolved_root);
+    if (strncmp(resolved_root, resolved_path, root_len) != 0) {
+        return NULL;
     }
 
     return strdup(resolved_path);

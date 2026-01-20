@@ -4,7 +4,7 @@
 #include <stdlib.h>
 #include <stdbool.h>
 
-#include "../include/core/config.h"
+#include "config.h"
 
 // Inisialisasi variabel global config
 Config config = {0};
@@ -108,6 +108,8 @@ void load_config(const char *filename) {
                 }
             } else if (strcmp(key, "max_requests_per_sec") == 0) {
                 config.max_requests_per_sec = atoi(value);
+            } else if (strcmp(key, "keep_alive_timeout") == 0) {
+                config.keep_alive_timeout = atoi(value);
             // backend PHP
             } else if (strcmp(key, "php_server") == 0) {
                 strncpy(config.php_server, value, sizeof(config.php_server));

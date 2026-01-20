@@ -4,7 +4,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-#include "../protocols/common/http_common.h"
+#include "http_common.h"
 
 char *sanitize_path(const char *root, const char *uri);
 

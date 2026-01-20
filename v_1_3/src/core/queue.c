@@ -3,9 +3,9 @@
 #include <pthread.h>
 #include <unistd.h>
 
-#include "../include/core/queue.h"
-#include "../include/core/config.h"
-#include "../include/core/log.h"
+#include "queue.h"
+#include "config.h"
+#include "log.h"
 
 extern Config config;
 

@@ -31,6 +31,8 @@ typedef struct {
     pthread_cond_t cond;
 } TaskQueue;
 
+extern TaskQueue global_queue;
+
 // --- PROTOTIPE FUNGSI ---
 void init_queue(TaskQueue *q, int min_limit, int max_limit);
 void *worker_routine(void *arg);

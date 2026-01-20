@@ -5,9 +5,9 @@
 #include <sys/socket.h>
 
 /* Gunakan header wrapper yang sudah mencakup common dan http1 */
-#include "../include/protocols/common/http_common.h"
-#include "../include/protocols/http1/http1_response.h"
-#include "../include/core/log.h"
+#include "http_common.h"
+#include "http1_response.h"
+#include "log.h"
 
 /**********************************************************************
  * send_http1_headers()

@@ -7,7 +7,7 @@
 #include <arpa/inet.h>
 #include <stdint.h>
 
-#include "../../include/handlers/uwsgi_handler.h"
+#include "uwsgi_handler.h"
 
 #define UWSGI_BUFFER_SIZE 16384
 

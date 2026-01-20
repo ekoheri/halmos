@@ -1,5 +1,8 @@
 CC = gcc
-CFLAGS = -Wall -Iinclude -pthread
+# MODIFIKASI DI SINI: Kita cari semua sub-folder di dalam include secara otomatis
+INCLUDE_DIRS = $(shell find include -type d)
+# Tambahkan awalan -I ke setiap folder yang ditemukan
+CFLAGS = -Wall $(addprefix -I,$(INCLUDE_DIRS)) -pthread
 LDFLAGS = -pthread -lm -lbrotlienc -lbrotlidec -lbrotlicommon -lpng
 
 # Direktori

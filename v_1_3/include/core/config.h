@@ -16,6 +16,7 @@ typedef struct {
     bool secure_application;
     bool rate_limit_enabled;
     int max_requests_per_sec;
+    int keep_alive_timeout;
     //Backend_PHP
     char php_server[256];
     int php_port;

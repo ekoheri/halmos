@@ -1,7 +1,7 @@
 #ifndef HTTP1_PARSER_H
 #define HTTP1_PARSER_H
 
-#include "../common/http_common.h" // Butuh MultipartPart & HalmosResponse
+#include "http_common.h" // Butuh MultipartPart & HalmosResponse
 
 // Info WebSocket biasanya melalui proses 'Upgrade' di HTTP/1.1
 typedef struct {
@@ -29,6 +29,7 @@ typedef struct {
     WebSocketInfo ws; // Modularitas terkumpul di sini
     MultipartPart *parts;
     int parts_count;
+    char *cookie_data;
 } RequestHeader;
 
 // Prototipe Fungsi khusus HTTP/1
@@ -39,4 +40,5 @@ void handle_method(int sock_client, RequestHeader req_header);
 
 // Ini di implementasikan di http1_manager.c
 int handle_http1_session(int sock_client);
+
 #endif

@@ -1,9 +1,9 @@
 #ifndef MULTIPART_H
 #define MULTIPART_H
 
-#include "../protocols/common/http_common.h"
-#include "../protocols/http1/http1_parser.h"
-#include "../core/fs_handler.h"
+#include "http_common.h"
+#include "http1_parser.h"
+#include "fs_handler.h"
 
 /**
  * Memproses body request dan memecahnya menjadi bagian-bagian (parts).

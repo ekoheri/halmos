@@ -5,7 +5,8 @@
 #include <ctype.h>
 #include <sys/time.h>
 #include <time.h>
-#include "../include/protocols/common/http_utils.h"
+
+#include "http_utils.h"
 
 // Fungsi untuk men-dekode URL
 // Contoh : ?nama=Eko+hHeri
@@ -72,4 +73,14 @@ char *get_time_string() {
     snprintf(buf + strlen(buf), 64 - strlen(buf), ".%03d GMT", millis);
 
     return buf;
-} 
+}
+
+// Fungsi pembantu: Cek apakah string berakhir dengan suffix tertentu
+// Lebih kencang dan akurat daripada strstr()
+int has_extension(const char *uri, const char *ext) {
+    size_t len_uri = strlen(uri);
+    size_t len_ext = strlen(ext);
+    if (len_uri < len_ext) return 0;
+    return (strcasecmp(uri + len_uri - len_ext, ext) == 0);
+}
+

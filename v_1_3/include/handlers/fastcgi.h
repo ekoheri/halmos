@@ -42,8 +42,8 @@ FastCGI_Response fastcgi_request(
     const char *query_string,
     const char *path_info,
     const char *post_data,
-    size_t post_data_len,     // Argumen ke-9
-    const char *content_type  // Argumen ke-10
+    size_t post_data_len,
+    const char *content_type
 );
 
 FastCGI_Response cgi_request_stream(
@@ -56,7 +56,8 @@ FastCGI_Response cgi_request_stream(
     void *post_data,          // Data awal dari parser
     size_t post_data_len,     // Panjang data awal
     size_t content_length,     // Total Content-Length dari Header HTTP
-    const char *content_type
+    const char *content_type,
+    const char *cookie_data
 );
 
 #endif

@@ -5,7 +5,7 @@
 #include <time.h>
 #include <pthread.h>
 #include <stdbool.h>
-#include "../../include/core/log.h"
+#include "log.h"
 
 // 1. Inisialisasi Global Log Queue
 LogQueue global_log_queue = {

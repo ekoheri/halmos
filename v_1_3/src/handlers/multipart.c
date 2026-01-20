@@ -2,9 +2,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "../include/handlers/multipart.h"
-#include "../include/protocols/common/http_utils.h"
-#include "../include/core/log.h"
+#include "multipart.h"
+#include "http_utils.h"
+#include "log.h"
 
 /**********************************************
  * Ini hanya fungsi cadangan saja untuk menangani upload file besar

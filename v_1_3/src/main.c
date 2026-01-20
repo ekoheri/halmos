@@ -6,11 +6,11 @@
 #include <sys/stat.h>
 #include <pthread.h>
 
-#include "../include/core/web_server.h"
-#include "../include/security/rate_limit.h"
-#include "../include/core/config.h"
-#include "../include/core/log.h"
-#include "../include/core/queue.h"
+#include "web_server.h"
+#include "rate_limit.h"
+#include "config.h"
+#include "log.h"
+#include "queue.h"
 
 // Inisialisasi variabel global dari web_server
 Config config;
@@ -118,30 +118,6 @@ void setup_signals() {
     signal(SIGPIPE, SIG_IGN);  // Abaikan koneksi putus tiba-tiba
     signal(SIGTERM, stop_server);
     signal(SIGINT, stop_server);
-}
-
-void set_daemon() {
-    pid_t pid = fork();
-    if (pid < 0) exit(EXIT_FAILURE);
-    if (pid > 0) exit(EXIT_SUCCESS); 
-
-    if (setsid() < 0) exit(EXIT_FAILURE);
-
-    signal(SIGHUP, SIG_IGN);
-    
-    pid = fork();
-    if (pid < 0) exit(EXIT_FAILURE);
-    if (pid > 0) exit(EXIT_SUCCESS); 
-
-    umask(0);
-    
-    int devnull = open("/dev/null", O_RDWR);
-    if (devnull != -1) {
-        dup2(devnull, STDIN_FILENO);
-        dup2(devnull, STDOUT_FILENO);
-        dup2(devnull, STDERR_FILENO);
-        if (devnull > 2) close(devnull);
-    }
 }
 
 void* janitor_thread(void* arg) {

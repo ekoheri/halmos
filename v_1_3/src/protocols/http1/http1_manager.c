@@ -7,15 +7,17 @@
 #include <arpa/inet.h>
 #include <poll.h>
 #include <errno.h>
+#include <sys/time.h>    // Wajib buat struct timeval
+#include <sys/socket.h>  // Wajib buat setsockopt
 
 // Pastikan urutan include benar
-#include "../../../include/core/config.h"  // Di sini variabel 'config' sudah ada (extern)
-#include "../../../include/core/log.h"     // Di sini variabel 'global_queue' sudah ada (extern)
-#include "../../../include/core/queue.h"     // Di sini variabel 'global_queue' sudah ada (extern)
-#include "../../../include/protocols/http1/http1_parser.h"
-#include "../../../include/protocols/http1/http1_response.h"
-#include "../../../include/handlers/multipart.h"
-#include "../../../include/security/rate_limit.h"
+#include "config.h"  // Di sini variabel 'config' sudah ada (extern)
+#include "log.h"     // Di sini variabel 'global_queue' sudah ada (extern)
+#include "queue.h"     // Di sini variabel 'global_queue' sudah ada (extern)
+#include "http1_parser.h"
+#include "http1_response.h"
+#include "multipart.h"
+#include "rate_limit.h"
 
 // Objek Antrean Global (Pusat Kendali)
 TaskQueue global_queue;
@@ -39,205 +41,153 @@ TaskQueue global_queue;
  * Jika ada masalah di salah satu tahap,
  * petugas langsung menolak dengan surat balasan resmi.
  ***********************************************************************/
+
 int handle_http1_session(int sock_client) {
-     /**************************************************************
-    * 1. Alokasi buffer
-     * ANALOGI :
-     * Petugas menyiapkan MAP KOSONG untuk menampung surat dari tamu.
-     * Ukuran map mengikuti aturan kantor (config.request_buffer_size).
-     * Kalau map tidak bisa disiapkan → tamu langsung ditolak.
-     **************************************************************/
-    int buf_size = config.request_buffer_size > 0 ? config.request_buffer_size : 4096;
-    char *buffer = (char *)malloc(buf_size);
-    if (!buffer) return 0; 
+    int keep_alive_status = 1;
 
     /**************************************************************
-     * 2. Menerima data pertama
-     * ANALOGI :
-     * Petugas membuka pintu dan menerima halaman pertama surat.
-     * Kalau tamu langsung pergi atau surat kosong,
-     * maka loket ditutup kembali.
+     * A. LOOPING SESSION (KEEP-ALIVE)
+     * Selama browser minta 'keep-alive', loket tetap terbuka.
      **************************************************************/
-    ssize_t received = recv(sock_client, buffer, buf_size - 1, 0);
-    if (received <= 0) { 
-        free(buffer); 
-        close(sock_client); 
-        return 0; 
-    }
-    buffer[received] = '\0';
-
-    /**************************************************************
-     * 3. Parsing HTTP
-     * ANALOGI :
-     * Surat diberikan ke BAGIAN ADMIN untuk dibaca:
-     * - siapa pengirim?
-     * - mau layanan apa?
-     * - ada lampiran berapa halaman?
-     *
-     * Ini dilakukan oleh modul parse_http_request.
-     **************************************************************/
-    RequestHeader req_header; 
-    memset(&req_header, 0, sizeof(RequestHeader));
-    
-    bool success = parse_http_request(buffer, (size_t)received, &req_header);
-
-    
-    /**************************************************************
-     * 4. Validasi permintaan
-     * ANALOGI :
-     * Jika formulir tidak sesuai format:
-     * → petugas mengembalikan surat “400 Bad Request”
-     *    seperti loket yang bilang:
-     *    “Maaf formulir Anda salah isi.”
-     **************************************************************/
-    if (!success || !req_header.is_valid) {
-        // Memanggil fungsi response (nanti ada di http_response.c)
-        send_mem_response(sock_client, 400, "Bad Request", "<h1>400 Bad Request</h1>", false);
+    while (keep_alive_status) {
         
-        // Pembersihan sesuai kebutuhan
-        free_request_header(&req_header); 
-        close(sock_client);
-        return 0; 
-    }
+        // 1. Alokasi buffer untuk Header
+        int buf_size = config.request_buffer_size > 0 ? config.request_buffer_size : 4096;
+        char *buffer = (char *)malloc(buf_size);
+        if (!buffer) break; 
 
-     /**************************************************************
-     * 5. Membaca sisa body
-     * ANALOGI :
-     * Kalau tamu membawa berkas tebal:
-     * petugas tidak bisa terima sekali,
-     * harus dicicil halaman demi halaman.
-     *
-     * Juga ada aturan:
-     * - tidak boleh lebih besar dari batas kantor
-     * - kalau kelamaan kirim → dianggap kabur (timeout)
-     **************************************************************/
-    if (req_header.content_length > 0 && req_header.body_length < (size_t)req_header.content_length) {
-        // tidak boleh lebih besar dari batas yang ditetapkan yaitu 50MB
-        size_t max_allowed = config.max_body_size > 0 ? config.max_body_size : (10 * 1024 * 1024);
-        if ((size_t)req_header.content_length > max_allowed) {
-            send_mem_response(sock_client, 413, "Payload Too Large", "<h1>413 Payload Too Large</h1>", false);
+        // 2. Menerima data (Recv akan timeout sesuai tv_sec)
+        ssize_t received = recv(sock_client, buffer, buf_size - 1, 0);
+        if (received <= 0) { 
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                write_log("[DEBUG] Connection timeout for socket %d", sock_client);
+            }
+            free(buffer); 
+            break; 
+        }
+        buffer[received] = '\0';
+
+        // 3. Parsing HTTP Header
+        RequestHeader req_header; 
+        memset(&req_header, 0, sizeof(RequestHeader));
+        
+        if (!parse_http_request(buffer, (size_t)received, &req_header) || !req_header.is_valid) {
+            send_mem_response(sock_client, 400, "Bad Request", "<h1>400 Bad Request</h1>", false);
             free(buffer);
-            free_request_header(&req_header);
-            close(sock_client);
-            return 0;
+            free_request_header(&req_header); 
+            break; 
         }
 
-        void *new_body = realloc(req_header.body_data, req_header.content_length + 1);
-        if (!new_body) { 
-            write_log("Out of memory during body realloc");
-            free(buffer);
-            free_request_header(&req_header);
-            close(sock_client);
-            return 0; 
-        }
-        req_header.body_data = new_body;
-
-        char *ptr = (char *)req_header.body_data + req_header.body_length;
-        size_t total_needed = req_header.content_length - req_header.body_length;
-
-        int retry_count = 0;
-        const int MAX_RETRY = 5000;
-
-        while (total_needed > 0 && retry_count < MAX_RETRY) {
-            ssize_t n = recv(sock_client, ptr, total_needed, 0);
-            if (n > 0) {
-                ptr += n;
-                total_needed -= n;
-                req_header.body_length += n;
-                retry_count = 0;
-            } else if (n == 0) {
-                break;
+        /**************************************************************
+         * 4. Membaca sisa Body (Jika ada Content-Length)
+         **************************************************************/
+        bool body_error = false;
+        if (req_header.content_length > 0 && req_header.body_length < (size_t)req_header.content_length) {
+            size_t max_allowed = config.max_body_size > 0 ? config.max_body_size : (10 * 1024 * 1024);
+            
+            if ((size_t)req_header.content_length > max_allowed) {
+                send_mem_response(sock_client, 413, "Payload Too Large", "<h1>413 Payload Too Large</h1>", false);
+                body_error = true;
             } else {
-                if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                    struct pollfd pfd;
-                    pfd.fd = sock_client;
-                    pfd.events = POLLIN;
-                    // Tunggu maksimal 100ms, tapi bangun seketika data datang
-                    int poll_res = poll(&pfd, 1, 100); 
-                    if (poll_res <= 0) retry_count++; 
-                    continue;
+                void *new_body = realloc(req_header.body_data, req_header.content_length + 1);
+                if (!new_body) { 
+                    write_log("Out of memory during body realloc");
+                    body_error = true;
+                } else {
+                    req_header.body_data = new_body;
+                    char *ptr = (char *)req_header.body_data + req_header.body_length;
+                    size_t total_needed = req_header.content_length - req_header.body_length;
+
+                    int retry_count = 0;
+                    const int MAX_RETRY = 100; // Cukup 10 detik (100 * 100ms)
+
+                    while (total_needed > 0 && retry_count < MAX_RETRY) {
+                        ssize_t n = recv(sock_client, ptr, total_needed, 0);
+                        if (n > 0) {
+                            ptr += n;
+                            total_needed -= n;
+                            req_header.body_length += n;
+                            retry_count = 0;
+                        } else if (n == 0) {
+                            break;
+                        } else {
+                            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                                struct pollfd pfd = {.fd = sock_client, .events = POLLIN};
+                                if (poll(&pfd, 1, 100) <= 0) retry_count++; 
+                                continue;
+                            }
+                            break;
+                        }
+                    }
+
+                    if (retry_count >= MAX_RETRY) {
+                        write_log("Timeout: Client failed to send full body");
+                        send_mem_response(sock_client, 408, "Request Timeout", "<h1>408 Request Timeout</h1>", false);
+                        body_error = true;
+                    }
                 }
-                break;
             }
         }
-        // kalau kelamaan kirim → dianggap kabur (timeout)
-        if (retry_count >= MAX_RETRY) {
-            write_log("Timeout: Client failed to send full body");
-            send_mem_response(sock_client, 408, "Request Timeout", "<h1>408 Request Timeout</h1>", false);
+
+        // Jika terjadi error saat tarik body, kita stop session ini
+        if (body_error) {
             free(buffer);
             free_request_header(&req_header);
-            close(sock_client);
-            return 0;
+            break;
         }
 
-        ((char*)req_header.body_data)[req_header.body_length] = '\0';
-
-        // khusus menangani post data multipart
-        // Kalau tamu (browser )membawa berkas tebal,
-        // misal gambar besar, PDF, dll.
-        // Petugas tidak bisa terima sekali,
-        // harus dicicil halaman demi halaman (chunk).
-        if (req_header.content_type && strstr(req_header.content_type, "multipart/form-data")) {
-            parse_multipart_body(&req_header);
+        // Tambahkan null terminator pada body
+        if (req_header.body_data) {
+            ((char*)req_header.body_data)[req_header.body_length] = '\0';
+            if (req_header.content_type && strstr(req_header.content_type, "multipart/form-data")) {
+                parse_multipart_body(&req_header);
+            }
         }
-    }
 
-    free(buffer); 
-
-    // Ambil status sebelum struct dibebaskan
-    int keep_alive_status = req_header.is_keep_alive;
-
-    // Logika ambil IP
-    struct sockaddr_in addr;
-    socklen_t addr_len = sizeof(addr);
-    char client_ip[INET_ADDRSTRLEN] = "0.0.0.0";
-
-    // Fungsi getpeername mengambil info dari socket yang sedang aktif
-    if (getpeername(sock_client, (struct sockaddr *)&addr, &addr_len) == 0) {
-        inet_ntop(AF_INET, &addr.sin_addr, client_ip, INET_ADDRSTRLEN);
-    }
-
-    // Salin ke struct agar bisa dipakai di modul lain (seperti PHP/Python)
-    strncpy(req_header.client_ip, client_ip, 45);
-
-    if (config.rate_limit_enabled) {
-        int rps_limit = config.max_requests_per_sec > 0 ? config.max_requests_per_sec : 20;
-        if (!is_request_allowed(req_header.client_ip, rps_limit)) {
-            write_log("[SECURITY] Rate limit exceeded for IP: %s\n", req_header.client_ip);
-            
-            char *msg = "<h1>429 Too Many Requests</h1><p>Santai Cuk, jangan ngebut-ngebut!</p>";
-            char response[512];
-            sprintf(response, 
-                "HTTP/1.1 429 Too Many Requests\r\n"
-                "Content-Type: text/html\r\n"
-                "Content-Length: %zu\r\n"
-                "Connection: close\r\n\r\n%s", 
-                strlen(msg), msg);
-                
-            send(sock_client, response, strlen(response), 0);
-            free_request_header(&req_header);
-            return 0; // Tendang!
+        /**************************************************************
+         * 5. Identitas & Keamanan (Rate Limit)
+         **************************************************************/
+        struct sockaddr_in addr;
+        socklen_t addr_len = sizeof(addr);
+        if (getpeername(sock_client, (struct sockaddr *)&addr, &addr_len) == 0) {
+            inet_ntop(AF_INET, &addr.sin_addr, req_header.client_ip, 45);
         }
+
+        if (config.rate_limit_enabled) {
+            int rps_limit = config.max_requests_per_sec > 0 ? config.max_requests_per_sec : 20;
+            if (!is_request_allowed(req_header.client_ip, rps_limit)) {
+                send_mem_response(sock_client, 429, "Too Many Requests", "<h1>429 Santai Cuk!</h1>", false);
+                free(buffer);
+                free_request_header(&req_header);
+                break; 
+            }
+        }
+
+        /**************************************************************
+         * 6. EKSEKUSI METHOD (Static/Dynamic)
+         **************************************************************/
+        handle_method(sock_client, req_header);
+
+        // Update status keep-alive untuk putaran loop berikutnya
+        keep_alive_status = req_header.is_keep_alive;
+
+        write_log("Thread Monitoring | Request: %s | Method: %s | Connection: %s",
+              req_header.uri, req_header.method, keep_alive_status ? "Keep-Alive" : "Close");
+
+        /**************************************************************
+         * 7. CLEANUP PER-REQUEST
+         **************************************************************/
+        free(buffer);
+        free_request_header(&req_header);
+
+        // Jika client minta tutup, ya kita break
+        if (!keep_alive_status) break;
     }
-    
-    // Proses Method
-    handle_method(sock_client, req_header);
 
-    // Tambahkan Log Monitoring
-    write_log("Thread Monitoring | Active: %d/%d | Request: %s | Method: %s | Connection: %s",
-          global_queue.active_workers, 
-          global_queue.total_workers,
-          req_header.uri,
-          req_header.method,
-          keep_alive_status ? "Keep-Alive" : "Close");
-
-    free_request_header(&req_header);
-    
-    // Logika Hybrid: Jika bukan keep-alive, tutup socket di sini
-    // Tapi karena browser mayoritas keep-alive, maka ini di-remark
-    /*if (!keep_alive_status) {
-        close(sock_client);
-    }*/
-
-    return keep_alive_status;
+    /**************************************************************
+     * D. PINTU KELUAR TUNGGAL
+     * Socket ditutup sekali di sini setelah loop selesai.
+     **************************************************************/
+    close(sock_client);
+    return 0;
 }

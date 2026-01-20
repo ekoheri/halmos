@@ -24,4 +24,6 @@ void trim_whitespace(char *str);
  */
 char *get_time_string();
 
+int has_extension(const char *uri, const char *ext);
+
 #endif

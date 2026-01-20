@@ -3,7 +3,7 @@
 
 #include <stddef.h>
 #include <stdbool.h>
-#include "../common/http_common.h" // Butuh HalmosResponse
+#include "http_common.h" // Butuh HalmosResponse
 #include "http1_parser.h"          // Butuh RequestHeader
 
 /**
