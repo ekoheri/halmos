@@ -64,7 +64,7 @@ void start_server() {
     ev.events = EPOLLIN; // Level Triggered untuk listen socket
     epoll_ctl(epoll_fd, EPOLL_CTL_ADD, sock_server, &ev);
 
-    write_log("Halmos Server berjalan di %s:%d", config.server_name, config.server_port);
+    write_log("[INFO] Halmos Server listening on %s:%d", config.server_name, config.server_port);
 }
 
 /**
@@ -142,7 +142,8 @@ void run_server() {
                     ev_client.data.fd = sock_client;
                     // EPOLLONESHOT = Begitu resepsionis minta satu pelayan (worker thread) 
                     // buat ngurus meja nomor 5, resepsionis bakal "tutup mata" 
-                    // terhadap meja nomor 5 itu. Dia nggak bakal manggil pelayan lain buat meja yang sama 
+                    // terhadap meja nomor 5 itu. 
+                    // Dia nggak bakal manggil pelayan lain buat meja yang sama 
                     // sampai pelayan pertama bilang "Selesai!".
                     ev_client.events = EPOLLIN | EPOLLET | EPOLLONESHOT; 
                     

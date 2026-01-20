@@ -20,14 +20,14 @@ void setup_event_system() {
     struct rlimit rl;
     // Cek limit maksimal yang diizinkan kernel
     if (getrlimit(RLIMIT_NOFILE, &rl) == 0) {
-        write_log("[SYSTEM] Limit FD saat ini: Soft=%ld, Hard=%ld\n", (long)rl.rlim_cur, (long)rl.rlim_max);
+        write_log("[SYSTEM] Current File Descriptor limits:: Soft=%ld, Hard=%ld\n", (long)rl.rlim_cur, (long)rl.rlim_max);
         
         // Coba set ke limit maksimal yang dibolehkan OS (biasanya 65535 atau lebih)
         rl.rlim_cur = rl.rlim_max; 
         if (setrlimit(RLIMIT_NOFILE, &rl) == -1) {
             write_log("[ERROR] Gagal menaikkan ulimit");
         } else {
-            write_log("[SYSTEM] Berhasil menaikkan ulimit ke: %ld\n", (long)rl.rlim_cur);
+            write_log("[SYSTEM] Resource limit adjusted: ulimit set to: %ld", (long)rl.rlim_cur);
         }
     }
     // --- LOGIKA ADAPTIVE MAX_EVENTS ---

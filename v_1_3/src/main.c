@@ -18,7 +18,6 @@ TaskQueue global_queue;
 
 // --- PROTOTYPE FUNGSI INTERNAL ---
 void setup_signals();
-void set_daemon();
 void init_dynamic_worker_pool();
 void* janitor_thread(void* arg);
 void init_background_services();

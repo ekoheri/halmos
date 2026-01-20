@@ -9,6 +9,11 @@
 #include "fs_handler.h"
 #include "log.h"
 
+typedef struct {
+    const char *ext;
+    const char *type;
+} MimeMap;
+
 char *sanitize_path(const char *root, const char *uri) {
     char full_path[PATH_MAX];
     char resolved_path[PATH_MAX];
@@ -37,7 +42,7 @@ char *sanitize_path(const char *root, const char *uri) {
     return strdup(resolved_path);
 }
 
-const char *get_mime_type(const char *file) {
+/*const char *get_mime_type(const char *file) {
     // Cari extension dari file
     const char *dot = strrchr(file, '.');
 
@@ -54,7 +59,37 @@ const char *get_mime_type(const char *file) {
     else if (strcmp(dot, ".rs") == 0) return "text/plain"; // Jangan dieksekusi
     else if (strcmp(dot, ".py") == 0) return "text/plain"; // Jangan dieksekusi
     else return "text/html";  // Default MIME type
-} //end get_mime_type
+} //end get_mime_type*/
+
+// WAJIB URUT ABJAD buat Binary Search
+static MimeMap mime_types[] = {
+    {".css",  "text/css"},
+    {".gif",  "image/gif"},
+    {".html", "text/html"},
+    {".ico",  "image/x-icon"},
+    {".js",   "text/javascript"}, 
+    {".jpg",  "image/jpeg"},
+    {".png",  "image/png"},
+    {".txt",  "text/plain"}
+};
+
+const char *get_mime_type(const char *file) {
+    const char *dot = strrchr(file, '.');
+    if (!dot) return "text/html";
+
+    // Pake Binary Search (bsearch) bawaan C
+    // Kecepatannya O(log n), jauh lebih kenceng dari else-if
+    int low = 0, high = sizeof(mime_types) / sizeof(MimeMap) - 1;
+    while (low <= high) {
+        int mid = (low + high) / 2;
+        int res = strcmp(dot, mime_types[mid].ext);
+        if (res == 0) return mime_types[mid].type;
+        if (res < 0) high = mid - 1;
+        else low = mid + 1;
+    }
+
+    return "application/octet-stream"; // Default buat file gak dikenal
+}
 
 // Fungsi untuk menyimpan file yang di-upload dari browser
 // Fungsi ini di dunia pemrograman web nyata, nyaris tidak digunakan
