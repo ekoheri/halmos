@@ -85,7 +85,21 @@ void* worker_routine(void* arg) {
                 close(sock_client);
             }
         } else {
-            // Jika Connection: close: Langsung tutup
+            /*
+            PAKSA SHUTDOWN SEBELUM CLOSE Ini kunci biar ab nggak timeout!
+            Gara-gara lupa gak shutdown, apacche bechmark (ab) jadi ngadat!
+
+            Kenapa shutdown itu Penting?
+            Kalau lo cuma pakai close(), kamu cuma nutup pintu 
+            dari sisi lo, tapi kernel nggak selalu langsung kirim paket FIN (selesai) 
+            ke arah ab atau browser kalau masih ada data di buffer.
+            */
+            shutdown(sock_client, SHUT_WR); 
+            
+            // Buang sisa data junk dari client kalau ada
+            char junk[1024];
+            while(recv(sock_client, junk, sizeof(junk), 0) > 0);
+            
             close(sock_client);
         }
 

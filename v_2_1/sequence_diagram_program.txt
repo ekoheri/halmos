@@ -1,0 +1,32 @@
+Figure 1. Halmos: The Sequence Diagram of the Adaptive Execution Pipeline
+------------------------------------------------------------------------------------------------------------------------------
+halmos_tcp_server.c  halmos_event_loop.c     halmos_queue.c     halmos_thread_pool.c      HTTP PROTOCOL           BACKEND 
+  (the Doorman)      (The Receptionist)   (the Manager Order)      (Commis Chef)        (the Master Chef)    (PHP/Rust/Python)
+      |                     |                      |                      |                    |   +------------------+  |
+(1) LISTEN-TFO (Novelty 1)  |                      |                      |                    |<--|      HTTP/1      |  |
+(2) ACCEPT LOOP             |                      |                      |                    |   +------------------+  |
+      |                     |                      |                      |                    |   | http1_bridge.c   |  |
+      | (3) PASS TO EPOLL   |                      |                      |                    |   | http1_manager.c  |  |
+   U  |-------------------->|                      |                      |                    |   | http1_parser.c   |  |
+   S  |                     |                      |                      |                    |   | http1_response.c |  |
+   E  |          (4) WAIT & BATCH (Novelty 2)      |                      |                    |   | http_multipart.c |  |
+   R  |          (Adaptive 10% : OS Batching)      |                      |                    |   +------------------+  |
+      |                     |                      |                      |                    |            |            |
+   S  |                     | (5) ENQUEUE TASK     |                      |                    |   +------------------+  |
+   P  |                     |--------------------->|                      |                    |   | halmos_fcgi.c    |  |
+   A  |                     |                      |                      |                    |   +------------------+  |
+   C  |                     |        (6) ADJUST WORKERS (Novelty 3)       |                    |            |            |
+   E  |                     |        (Adaptive Thread Up/Downscaling)     |                    |   +------------------+  |
+      |                     |                      |                      |                    |<--|      HTTP/2      |  |
+      |                     |                      |--- (7) DEQUEUE ----->|                    |   +------------------+  |
+      |                     |                      |                      |---(8) EXECUTE()--->|   |    ..........    |  |
+      |                     |                      |                      |                    |   +------------------+  |
+      |                     |                      |                      |          (9) PARSE & ROUTE                   |
+      +---------------------+----------------------+----------------------+--------------------+                         |
+K  S  |               (Novelty 4)                                                    [ IF STATIC RESOURCE ]              |
+E  P  | <-------------Zero-Copy Direct Path (TCP Socket<-Kernel Buffer<-Disk)-----------(10) ZERO-COPY                   |
+R  A  |                                                                              [ ELSE IF DYNAMIC RESOURCE]         |
+N  C  |                                                                                 (11)  FastCGI Request ---------> |                             
+E  E  |                                                                                        |                         |                              
+L     | <-------------Splice-Copy (TCP Sokcet<-Kernel Buffer<-TCP Socket)--------------------- |<----- Data Stream ----- |
+      |                                                                                        |                         |

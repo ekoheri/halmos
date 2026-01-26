@@ -1,0 +1,116 @@
+=================================================
+   EXPERIMENTAL COMPARISON: APACHE VS NGINX VS HALMOS
+   Execution Date : Fri 23 Jan 2026 11:06:40 AM WIB
+   Test Scenario  : Incremental Concurrency Load
+=================================================
+
+[Profiling APACHE_HTTPD | C=10 | N=5000]
+Requests per second:    1033.12 [#/sec] (mean)
+Time per request:       9.679 [ms] (mean)
+Time per request:       0.968 [ms] (mean, across all concurrent requests)
+Transfer rate:          1015671.56 [Kbytes/sec] received
+ 100%    509 (longest request)
+Peak RAM Utilization: 137.34 MB
+-------------------------------------------------
+
+[Profiling NGINX_STABLE | C=10 | N=5000]
+Requests per second:    1741.62 [#/sec] (mean)
+Time per request:       5.742 [ms] (mean)
+Time per request:       0.574 [ms] (mean, across all concurrent requests)
+Transfer rate:          1712139.02 [Kbytes/sec] received
+ 100%     22 (longest request)
+Peak RAM Utilization: 18.65 MB
+-------------------------------------------------
+
+[Profiling HALMOS_CORE | C=10 | N=5000]
+Peak RAM Utilization: 1.27 MB
+-------------------------------------------------
+
+[Profiling APACHE_HTTPD | C=100 | N=10000]
+Requests per second:    1280.09 [#/sec] (mean)
+Time per request:       78.120 [ms] (mean)
+Time per request:       0.781 [ms] (mean, across all concurrent requests)
+Transfer rate:          1258469.20 [Kbytes/sec] received
+ 100%     96 (longest request)
+Peak RAM Utilization: 254.21 MB
+-------------------------------------------------
+
+[Profiling NGINX_STABLE | C=100 | N=10000]
+Requests per second:    1572.14 [#/sec] (mean)
+Time per request:       63.608 [ms] (mean)
+Time per request:       0.636 [ms] (mean, across all concurrent requests)
+Transfer rate:          1545526.02 [Kbytes/sec] received
+ 100%     86 (longest request)
+Peak RAM Utilization: 18.65 MB
+-------------------------------------------------
+
+[Profiling HALMOS_CORE | C=100 | N=10000]
+!!! CRITICAL ALERT: FAILED REQUESTS DETECTED !!!
+Failed requests:        5
+Requests per second:    1180.21 [#/sec] (mean)
+Time per request:       84.731 [ms] (mean)
+Time per request:       0.847 [ms] (mean, across all concurrent requests)
+Transfer rate:          1159503.37 [Kbytes/sec] received
+ 100%    120 (longest request)
+Peak RAM Utilization: 2.60 MB
+-------------------------------------------------
+
+[Profiling APACHE_HTTPD | C=500 | N=20000]
+Requests per second:    707.66 [#/sec] (mean)
+Time per request:       706.552 [ms] (mean)
+Time per request:       1.413 [ms] (mean, across all concurrent requests)
+Transfer rate:          695709.69 [Kbytes/sec] received
+ 100%  28241 (longest request)
+Peak RAM Utilization: 1978.80 MB
+-------------------------------------------------
+
+[Profiling NGINX_STABLE | C=500 | N=20000]
+Peak RAM Utilization: 23.23 MB
+-------------------------------------------------
+
+[Profiling HALMOS_CORE | C=500 | N=20000]
+!!! CRITICAL ALERT: FAILED REQUESTS DETECTED !!!
+Failed requests:        3
+Requests per second:    1096.64 [#/sec] (mean)
+Time per request:       455.939 [ms] (mean)
+Time per request:       0.912 [ms] (mean, across all concurrent requests)
+Transfer rate:          1077774.72 [Kbytes/sec] received
+ 100%   1473 (longest request)
+Peak RAM Utilization: 3.59 MB
+-------------------------------------------------
+
+[Profiling APACHE_HTTPD | C=1000 | N=20000]
+!!! CRITICAL ALERT: FAILED REQUESTS DETECTED !!!
+Failed requests:        149
+Requests per second:    286.51 [#/sec] (mean)
+Time per request:       3490.323 [ms] (mean)
+Time per request:       3.490 [ms] (mean, across all concurrent requests)
+Transfer rate:          280367.38 [Kbytes/sec] received
+ 100%  69777 (longest request)
+Peak RAM Utilization: 1980.01 MB
+-------------------------------------------------
+
+[Profiling NGINX_STABLE | C=1000 | N=20000]
+!!! CRITICAL ALERT: FAILED REQUESTS DETECTED !!!
+Failed requests:        20000
+Requests per second:    1201.84 [#/sec] (mean)
+Time per request:       832.057 [ms] (mean)
+Time per request:       0.832 [ms] (mean, across all concurrent requests)
+Transfer rate:          1167202.53 [Kbytes/sec] received
+ 100%   1151 (longest request)
+Peak RAM Utilization: 29.88 MB
+-------------------------------------------------
+
+[Profiling HALMOS_CORE | C=1000 | N=20000]
+!!! CRITICAL ALERT: FAILED REQUESTS DETECTED !!!
+Failed requests:        5
+Requests per second:    1187.96 [#/sec] (mean)
+Time per request:       841.777 [ms] (mean)
+Time per request:       0.842 [ms] (mean, across all concurrent requests)
+Transfer rate:          1167411.93 [Kbytes/sec] received
+ 100%    963 (longest request)
+Peak RAM Utilization: 7.75 MB
+-------------------------------------------------
+
+=================================================
+=================================================

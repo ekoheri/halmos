@@ -1,0 +1,32 @@
+halmos-v_2_1/
+├── bin/                         # Tempat file eksekusi setelah di-compile
+├── config/                      # Tempat SOP pengaturan sistem
+├── html/                        # Gudang file statis (html,css,js, dll) dan program PHP
+├── rust_backend/                # Gudang program Rust
+├── python_backend/              # Gudang program Python
+├── src/
+│   ├── core/                    # "Otak & Jantung" Server
+│   │   ├── halmos_adaptive.c    <-- Logika ulimit, Scaling, & Max Events
+│   │   ├── halmos_adaptive.h
+│   │   ├── halmos_network.c     <-- Socket API (Kurir)
+│   │   ├── halmos_network.h
+│   │   ├── halmos_queue.c       <-- Manager Antrean (Task Queue)
+│   │   ├── halmos_queue.h
+│   │   ├── halmos_thread_pool.c <-- Thread Pool (Koki)
+│   │   ├── halmos_thread_pool.h
+│   │   ├── halmos_event_loop.c  <-- Mesin Epoll (Resepsionis)
+│   │   └── halmos_event_loop.h
+│   ├── protocol/               # "Resep & Cara Masak"
+│   │   ├── http1/
+│   │   │   ├── http1_handler.c  <-- Buffer Stack & Logic
+│   │   │   └── http1_handler.h
+│   │   └── common/
+│   │       ├── parser.c
+│   │       └── response.c
+│   ├── utils/                  # "Alat Bantu"
+│   │   ├── halmos_log.c        <-- Program untuk menulis logbook
+│   │   ├── halmos_log.h
+│   │   ├── halmos_config.c     <-- Program untuk membaca konfigurasi
+│   │   └── halmos_config.h
+│   └── main.c                  # "Tombol ON" (Titik Masuk Utama)
+└── Makefile                    # Resep Kompilasi Otomatis

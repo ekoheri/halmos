@@ -1,0 +1,19 @@
+Contoh Setup di Sisi Python
+Anda tidak perlu menulis kode socket di Python. Cukup gunakan aplikasi Flask/Django sederhana dan jalankan dengan binary uWSGI:
+
+Bash
+
+# Instalasi uwsgi
+pip install uwsgi
+
+# Menjalankan aplikasi dengan protokol uwsgi di port 3031
+uwsgi --socket 127.0.0.1:9002 --wsgi-file app.py --callable app
+
+uwsgi --socket 127.0.0.1:9002 --wsgi-file app.py --callable app --processes 4 --threads 2
+
+Keuntungan untuk Server Anda:
+Isolation: Jika skrip Python crash atau memakan banyak memori, web server Anda tetap aman.
+
+Scalability: Anda bisa menjalankan banyak proses uWSGI (worker) dan server Anda tinggal melakukan load balancing ke socket-socket tersebut.
+
+Consistency: Logika kodenya akan sangat mirip dengan implementasi FastCGI yang sudah Anda buat, hanya berbeda di format packing datanya saja.

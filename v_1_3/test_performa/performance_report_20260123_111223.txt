@@ -1,0 +1,78 @@
+=================================================================
+ PERFORMANCE EVALUATION: HALMOS-CORE VS NGINX VS APACHE 
+=================================================================
+Workload Profile  : Diffie-Hellman Ephemeral (DHE) 2048-bit
+Test Timestamp    : Fri 23 Jan 2026 11:12:23 AM WIB
+-----------------------------------------------------------------
+TARGET: APACHE_HTTPD | TOTAL_REQ (n): 10 | CONCURRENCY (c): 5
+Failed requests:        0
+Requests per second:    18.97 [#/sec] (mean)
+Time per request:       263.575 [ms] (mean)
+Time per request:       52.715 [ms] (mean, across all concurrent requests)
+  99%    237
+Peak RAM Utilization: 13.09 MB
+-----------------------------------------------------------------
+TARGET: APACHE_HTTPD | TOTAL_REQ (n): 50 | CONCURRENCY (c): 25
+Failed requests:        0
+Requests per second:    32.77 [#/sec] (mean)
+Time per request:       762.809 [ms] (mean)
+Time per request:       30.512 [ms] (mean, across all concurrent requests)
+  99%    888
+Peak RAM Utilization: 13.09 MB
+-----------------------------------------------------------------
+TARGET: APACHE_HTTPD | TOTAL_REQ (n): 100 | CONCURRENCY (c): 50
+Failed requests:        0
+Requests per second:    39.05 [#/sec] (mean)
+Time per request:       1280.550 [ms] (mean)
+Time per request:       25.611 [ms] (mean, across all concurrent requests)
+  99%   1376
+Peak RAM Utilization: 13.09 MB
+-----------------------------------------------------------------
+TARGET: NGINX_STABLE | TOTAL_REQ (n): 10 | CONCURRENCY (c): 5
+Failed requests:        0
+Requests per second:    33.60 [#/sec] (mean)
+Time per request:       148.795 [ms] (mean)
+Time per request:       29.759 [ms] (mean, across all concurrent requests)
+  99%    139
+Peak RAM Utilization: 4.66 MB
+-----------------------------------------------------------------
+TARGET: NGINX_STABLE | TOTAL_REQ (n): 50 | CONCURRENCY (c): 25
+Failed requests:        0
+Requests per second:    40.63 [#/sec] (mean)
+Time per request:       615.333 [ms] (mean)
+Time per request:       24.613 [ms] (mean, across all concurrent requests)
+  99%    751
+Peak RAM Utilization: 4.66 MB
+-----------------------------------------------------------------
+TARGET: NGINX_STABLE | TOTAL_REQ (n): 100 | CONCURRENCY (c): 50
+Failed requests:        0
+Requests per second:    39.61 [#/sec] (mean)
+Time per request:       1262.217 [ms] (mean)
+Time per request:       25.244 [ms] (mean, across all concurrent requests)
+  99%   1421
+Peak RAM Utilization: 4.66 MB
+-----------------------------------------------------------------
+TARGET: HALMOS_ENGINE | TOTAL_REQ (n): 10 | CONCURRENCY (c): 5
+Failed requests:        0
+Requests per second:    1.65 [#/sec] (mean)
+Time per request:       3026.506 [ms] (mean)
+Time per request:       605.301 [ms] (mean, across all concurrent requests)
+  99%   5008
+Peak RAM Utilization: 5.63 MB
+-----------------------------------------------------------------
+TARGET: HALMOS_ENGINE | TOTAL_REQ (n): 50 | CONCURRENCY (c): 25
+Failed requests:        42
+Requests per second:    2.17 [#/sec] (mean)
+Time per request:       11542.426 [ms] (mean)
+Time per request:       461.697 [ms] (mean, across all concurrent requests)
+  99%  22293
+Peak RAM Utilization: 5.68 MB
+-----------------------------------------------------------------
+TARGET: HALMOS_ENGINE | TOTAL_REQ (n): 100 | CONCURRENCY (c): 50
+Failed requests:        92
+Requests per second:    3.32 [#/sec] (mean)
+Time per request:       15045.374 [ms] (mean)
+Time per request:       300.907 [ms] (mean, across all concurrent requests)
+  99%  29897
+Peak RAM Utilization: 5.82 MB
+-----------------------------------------------------------------

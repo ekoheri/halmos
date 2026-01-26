@@ -1,3 +1,14 @@
+#include "halmos_http1_manager.h"
+#include "halmos_global.h"
+#include "halmos_http1_header.h"
+#include "halmos_http1_parser.h"
+#include "halmos_http1_response.h"
+#include "halmos_multipart.h"
+#include "halmos_http_utils.h"
+#include "halmos_security.h"
+#include "halmos_config.h"  // Di sini variabel 'config' sudah ada (extern)
+#include "halmos_log.h"     // Di sini variabel 'global_queue' sudah ada (extern)
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -10,40 +21,21 @@
 #include <sys/time.h>    // Wajib buat struct timeval
 #include <sys/socket.h>  // Wajib buat setsockopt
 
-// Pastikan urutan include benar
-#include "config.h"  // Di sini variabel 'config' sudah ada (extern)
-#include "log.h"     // Di sini variabel 'global_queue' sudah ada (extern)
-#include "queue.h"     // Di sini variabel 'global_queue' sudah ada (extern)
-#include "http1_parser.h"
-#include "http1_response.h"
-#include "multipart.h"
-#include "rate_limit.h"
-
 // Objek Antrean Global (Pusat Kendali)
 TaskQueue global_queue;
 
-/***********************************************************************
- * handle_http1_session()
- * ANALOGI BESAR FUNGSI INI :
- * Fungsi ini adalah seperti PETUGAS FRONT OFFICE di sebuah kantor
- * yang menerima tamu dari pintu masuk sampai diarahkan ke layanan
- * yang sesuai.
- *
- * Tugas utamanya:
- * 1. Menerima surat dari tamu (recv)
- * 2. Membaca dan memeriksa formulir (parsing HTTP)
- * 3. Mengecek apakah berkas lengkap atau rusak
- * 4. Jika ada lampiran besar → ditunggu sampai selesai
- * 5. Jika formulir multipart → kirim ke bagian pembongkar berkas
- * 6. Menyerahkan pekerjaan ke pelayan sesuai metode (GET/POST)
- * 7. Mencatat aktivitas di buku tamu (log)
- *
- * Jika ada masalah di salah satu tahap,
- * petugas langsung menolak dengan surat balasan resmi.
- ***********************************************************************/
+Config config;
 
 int handle_http1_session(int sock_client) {
     int keep_alive_status = 1;
+
+    // --- OPTIMASI 1: Alokasi Sekali Saja (Reuse) ---
+    int buf_size = config.request_buffer_size > 0 ? config.request_buffer_size : 4096;
+    char *buffer = (char *)malloc(buf_size);
+    if (!buffer) {
+        close(sock_client);
+        return -1;
+    }
 
     /**************************************************************
      * A. LOOPING SESSION (KEEP-ALIVE)
@@ -51,18 +43,15 @@ int handle_http1_session(int sock_client) {
      **************************************************************/
     while (keep_alive_status) {
         
-        // 1. Alokasi buffer untuk Header
-        int buf_size = config.request_buffer_size > 0 ? config.request_buffer_size : 4096;
-        char *buffer = (char *)malloc(buf_size);
-        if (!buffer) break; 
+        // Bersihkan buffer untuk penggunaan ulang (jangan pakai memset besar, cukup nol-kan awal)
+        buffer[0] = '\0';
 
         // 2. Menerima data (Recv akan timeout sesuai tv_sec)
         ssize_t received = recv(sock_client, buffer, buf_size - 1, 0);
         if (received <= 0) { 
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                write_log("[DEBUG] Connection timeout for socket %d", sock_client);
+                //printf("[DEBUG] Connection timeout for socket %d", sock_client);
             }
-            free(buffer); 
             break; 
         }
         buffer[received] = '\0';
@@ -73,7 +62,6 @@ int handle_http1_session(int sock_client) {
         
         if (!parse_http_request(buffer, (size_t)received, &req_header) || !req_header.is_valid) {
             send_mem_response(sock_client, 400, "Bad Request", "<h1>400 Bad Request</h1>", false);
-            free(buffer);
             free_request_header(&req_header); 
             break; 
         }
@@ -82,7 +70,8 @@ int handle_http1_session(int sock_client) {
          * 4. Membaca sisa Body (Jika ada Content-Length)
          **************************************************************/
         bool body_error = false;
-        if (req_header.content_length > 0 && req_header.body_length < (size_t)req_header.content_length) {
+        //if (req_header.content_length > 0 && req_header.body_length < (size_t)req_header.content_length) {
+        if (req_header.content_length > 0) {
             size_t max_allowed = config.max_body_size > 0 ? config.max_body_size : (10 * 1024 * 1024);
             
             if ((size_t)req_header.content_length > max_allowed) {
@@ -91,7 +80,7 @@ int handle_http1_session(int sock_client) {
             } else {
                 void *new_body = realloc(req_header.body_data, req_header.content_length + 1);
                 if (!new_body) { 
-                    write_log("Out of memory during body realloc");
+                    //printf("Out of memory during body realloc");
                     body_error = true;
                 } else {
                     req_header.body_data = new_body;
@@ -121,7 +110,8 @@ int handle_http1_session(int sock_client) {
                     }
 
                     if (retry_count >= MAX_RETRY) {
-                        write_log("Timeout: Client failed to send full body");
+                        //printf("Timeout: Client failed to send full body");
+
                         send_mem_response(sock_client, 408, "Request Timeout", "<h1>408 Request Timeout</h1>", false);
                         body_error = true;
                     }
@@ -131,7 +121,6 @@ int handle_http1_session(int sock_client) {
 
         // Jika terjadi error saat tarik body, kita stop session ini
         if (body_error) {
-            free(buffer);
             free_request_header(&req_header);
             break;
         }
@@ -157,27 +146,25 @@ int handle_http1_session(int sock_client) {
             int rps_limit = config.max_requests_per_sec > 0 ? config.max_requests_per_sec : 20;
             if (!is_request_allowed(req_header.client_ip, rps_limit)) {
                 send_mem_response(sock_client, 429, "Too Many Requests", "<h1>429 Santai Cuk!</h1>", false);
-                free(buffer);
                 free_request_header(&req_header);
                 break; 
             }
         }
 
         /**************************************************************
-         * 6. EKSEKUSI METHOD (Static/Dynamic)
+         * 6. EKSEKUSI RESPONSE (Static/Dynamic/Directory listing)
          **************************************************************/
-        handle_method(sock_client, req_header);
+        process_request_routing(sock_client, &req_header);
 
         // Update status keep-alive untuk putaran loop berikutnya
         keep_alive_status = req_header.is_keep_alive;
 
-        write_log("Thread Monitoring | Request: %s | Method: %s | Connection: %s",
-              req_header.uri, req_header.method, keep_alive_status ? "Keep-Alive" : "Close");
+        //write_log("Thread Monitoring | Request: %s | Method: %s | Connection: %s",
+        //      req_header.uri, req_header.method, keep_alive_status ? "Keep-Alive" : "Close");
 
         /**************************************************************
          * 7. CLEANUP PER-REQUEST
          **************************************************************/
-        free(buffer);
         free_request_header(&req_header);
 
         // Jika client minta tutup, ya kita break
@@ -188,6 +175,19 @@ int handle_http1_session(int sock_client) {
      * D. PINTU KELUAR TUNGGAL
      * Socket ditutup sekali di sini setelah loop selesai.
      **************************************************************/
+
+    // --- OPTIMASI 4: Clean Exit ---
+    if (buffer) {
+        free(buffer);
+        buffer = NULL; 
+    }
+    
+    // Gunakan shutdown sebelum close agar 'ab' tidak bingung
+    shutdown(sock_client, SHUT_WR);
+    char junk[1024];
+    while(recv(sock_client, junk, sizeof(junk), MSG_DONTWAIT) > 0);
+    
     close(sock_client);
     return 0;
 }
+

@@ -1,0 +1,235 @@
+// Kita menggunakan teknik Connection Pooling atau Keep-Alive ke Backend.
+// Jadi ketika koneksi socket ke backend sudah pernah dibuat, maka koneksi itu tidak ditutup.
+// Kenapa? supaya jika butuh koneksi lagi, tinggal manggil daru thread yang ada
+// dan tidak perlu membuat koneksi baru!
+
+static _Thread_local int cached_cgi_sock = -1;
+
+int cgi_request_stream(
+    RequestHeader *req,
+    int sock_client, 
+    const char *target_ip,
+    int target_port,
+    void *post_data,          
+    size_t post_data_len,     
+    size_t content_length
+    ) {
+    
+    FastCGI_Response res = {NULL, NULL};
+    int request_id = 1;
+
+    // 1. Ambil socket dari cache atau buat baru
+    int cgi_sock = cached_cgi_sock;
+    
+    // Validasi apakah socket masih hidup
+    if (cgi_sock != -1) {
+        int error = 0;
+        socklen_t len = sizeof(error);
+        if (getsockopt(cgi_sock, SOL_SOCKET, SO_ERROR, &error, &len) < 0 || error != 0) {
+            close(cgi_sock);
+            cgi_sock = -1;
+        }
+    }
+
+    if (cgi_sock == -1) {
+        cgi_sock = socket(AF_INET, SOCK_STREAM, 0);
+        struct sockaddr_in fpm_addr;
+        memset(&fpm_addr, 0, sizeof(fpm_addr));
+        fpm_addr.sin_family = AF_INET;
+        fpm_addr.sin_port = htons(target_port);
+        inet_pton(AF_INET, target_ip, &fpm_addr.sin_addr);
+
+        if (connect(cgi_sock, (struct sockaddr *)&fpm_addr, sizeof(fpm_addr)) < 0) {
+            close(cgi_sock);
+            return res; 
+        }
+        cached_cgi_sock = cgi_sock; // Simpan ke cache
+    }
+
+    // 2. Kirim BEGIN_REQUEST dengan KEEP_CONN (flag=1)
+    send_begin_request(cgi_sock, request_id, 1);
+
+    // 3. Isi parameter request
+    unsigned char params_buf[16384]; 
+    int p_len = 0;
+    int written = 0;
+    
+    #define PUSH_PARAM(name, val) \
+        written = add_pair(params_buf, name, val, p_len, sizeof(params_buf)); \
+        if (written > 0) p_len += written; \
+        else write_log("[FCGI] Warning: Buffer full, skipped %s", name);
+    
+    // char script_filename[1024];
+    // snprintf(script_filename, sizeof(script_filename), "%s/%s", config.document_root, script_name);
+
+    struct sockaddr_in addr;
+    socklen_t addr_size = sizeof(struct sockaddr_in);
+    char client_ip[INET_ADDRSTRLEN] = "0.0.0.0";
+    if (getpeername(sock_client, (struct sockaddr *)&addr, &addr_size) == 0) {
+        inet_ntop(AF_INET, &addr.sin_addr, client_ip, INET_ADDRSTRLEN);
+    }
+
+    const char *active_root = get_active_root(req->host);
+
+    // SCRIPT_FILENAME dinamis & aman dari double slash
+    char script_filename[1024];
+    if (active_root[strlen(active_root)-1] == '/' && req->uri[0] == '/') {
+        snprintf(script_filename, sizeof(script_filename), "%s%s", active_root, req->uri + 1);
+    } else {
+        snprintf(script_filename, sizeof(script_filename), "%s%s", active_root, req->uri);
+    }
+
+    // Cast content_length buat ilangin warning
+    char cl_str[20];
+    snprintf(cl_str, sizeof(cl_str), "%zu", (size_t)req->content_length);
+
+    // SERVER_NAME: Ambil host murni (tanpa port)
+    char server_name[256];
+    strncpy(server_name, req->host ? req->host : config.server_name, sizeof(server_name)-1);
+    char *port_ptr = strchr(server_name, ':');
+    if (port_ptr) *port_ptr = '\0';
+
+    char port_str[10];
+    snprintf(port_str, sizeof(port_str), "%d", config.server_port);
+
+    PUSH_PARAM("SCRIPT_FILENAME", script_filename);
+    PUSH_PARAM("REQUEST_METHOD", req->method);
+    PUSH_PARAM("QUERY_STRING", req->query_string ? req->query_string : "");
+    
+    const char *sanitized_ct = trim_header_value(req->content_type);
+    if (strcmp(req->method, "POST") == 0) {
+        PUSH_PARAM("CONTENT_LENGTH", cl_str);
+        PUSH_PARAM("CONTENT_TYPE", (sanitized_ct && strlen(sanitized_ct) > 0) ? sanitized_ct : "application/x-www-form-urlencoded");
+    } else {
+        PUSH_PARAM("CONTENT_LENGTH", "0");
+        PUSH_PARAM("CONTENT_TYPE", "");
+    }
+
+    PUSH_PARAM("SERVER_SOFTWARE", "Halmos-Core/1.3");
+    PUSH_PARAM("SERVER_NAME", server_name);
+    PUSH_PARAM("SERVER_PORT", port_str);
+    PUSH_PARAM("DOCUMENT_ROOT", active_root);
+    PUSH_PARAM("REQUEST_URI", req->uri);
+    PUSH_PARAM("SCRIPT_NAME", req->uri);
+    PUSH_PARAM("SERVER_PROTOCOL", "HTTP/1.1");
+    PUSH_PARAM("GATEWAY_INTERFACE", "CGI/1.1");
+    PUSH_PARAM("REMOTE_ADDR", client_ip);
+    PUSH_PARAM("REDIRECT_STATUS", "200");
+    PUSH_PARAM("HTTP_COOKIE", req->cookie_data ? req->cookie_data : "");
+
+    // 4. Kirim parameter ke backend
+    send_params(cgi_sock, request_id, params_buf, p_len);
+
+    // 5. Kirim streamning body ke backend. Ini untuk multipart
+    size_t total_streamed = 0;
+    if (post_data_len > 0 && post_data != NULL) {
+        send_stdin(cgi_sock, request_id, post_data, (int)post_data_len);
+        total_streamed += post_data_len;
+    }
+
+    if (sock_client != -1 && total_streamed < content_length) {
+        char stream_buffer[16384]; 
+        while (total_streamed < content_length) {
+            ssize_t n = recv(sock_client, stream_buffer, sizeof(stream_buffer), 0);
+            if (n > 0) {
+                send_stdin(cgi_sock, request_id, stream_buffer, (int)n);
+                total_streamed += n;
+            } else if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                usleep(100); 
+                continue; 
+            } else {
+                break; 
+            }
+        }
+    }
+
+    send_stdin(cgi_sock, request_id, NULL, 0);
+
+    /* 6. Terima Balasan ini program lama
+    res = fcgi_response(cgi_sock);
+    
+
+    // JANGAN DI-CLOSE! Cukup reset cache kalau error.
+    if (res.body == NULL && res.header == NULL) {
+        close(cgi_sock);
+        cached_cgi_sock = -1;
+    }
+
+    return res;
+    */
+
+    /* Ini program baru pakai splice */
+    int pipe_fds[2];
+    if (pipe(pipe_fds) < 0) return -1;
+
+    unsigned char h_buf[8];
+    int header_sent = 0;
+    char header_buffer[8192]; // Buffer buat nampung header PHP
+    int header_pos = 0;
+
+    while (recv(cgi_sock, h_buf, 8, MSG_WAITALL) == 8) {
+        FCGI_Header *h = (FCGI_Header *)h_buf;
+        int clen = (h->contentLengthB1 << 8) | h->contentLengthB0;
+        int plen = h->paddingLength;
+
+        if (h->type == FCGI_STDOUT && clen > 0) {
+            if (!header_sent) {
+                // 1. Baca data ke RAM dulu buat nyari penutup header (\r\n\r\n)
+                int to_read = (clen < (int)sizeof(header_buffer) - header_pos - 1) ? clen : (sizeof(header_buffer) - header_pos - 1);
+                recv(cgi_sock, header_buffer + header_pos, to_read, MSG_WAITALL);
+                header_pos += to_read;
+                header_buffer[header_pos] = '\0';
+
+                char *delim = strstr(header_buffer, "\r\n\r\n");
+                if (delim) {
+                    // 2. HEADER KETEMU! Sekarang kita tentukan status code
+                    int status_code = 200;
+                    const char *status_msg = "OK";
+
+                    if (strstr(header_buffer, "Location:")) {
+                        status_code = 302;
+                        status_msg = "Found";
+                    } else if (strstr(header_buffer, "Status:")) {
+                        // Optional: Lu bisa parse angka setelah "Status:" kalau mau teliti
+                    }
+
+                    // 3. Kirim Status Line & Header dasar
+                    char response_start[1024];
+                    int start_len = snprintf(response_start, sizeof(response_start),
+                        "HTTP/1.1 %d %s\r\n"
+                        "Server: Halmos-Core\r\n"
+                        "Connection: %s\r\n",
+                        status_code, status_msg, req->is_keep_alive ? "keep-alive" : "close");
+                    
+                    send(sock_client, response_start, start_len, 0);
+
+                    // 4. Kirim seluruh header dari PHP + penutupnya (\r\n\r\n)
+                    send(sock_client, header_buffer, header_pos, 0);
+                    
+                    header_sent = 1;
+
+                    // Kalau ada sisa clen yang belum kebaca (jarang terjadi di paket pertama)
+                    int remain_in_packet = clen - to_read;
+                    if (remain_in_packet > 0) {
+                        splice(cgi_sock, NULL, pipe_fds[1], NULL, remain_in_packet, SPLICE_F_MOVE | SPLICE_F_MORE);
+                        splice(pipe_fds[0], NULL, sock_client, NULL, remain_in_packet, SPLICE_F_MOVE | SPLICE_F_MORE);
+                    }
+                }
+            } else {
+                // 5. HEADER SUDAH TERKIRIM, SISANYA LANGSUNG JALUR TOL!
+                splice(cgi_sock, NULL, pipe_fds[1], NULL, clen, SPLICE_F_MOVE | SPLICE_F_MORE);
+                splice(pipe_fds[0], NULL, sock_client, NULL, clen, SPLICE_F_MOVE | SPLICE_F_MORE);
+            }
+        }
+
+        if (plen > 0) {
+            unsigned char pad[8];
+            recv(cgi_sock, pad, plen, MSG_WAITALL);
+        }
+        if (h->type == FCGI_END_REQUEST) break;
+    }
+
+    close(pipe_fds[0]);
+    close(pipe_fds[1]);
+    return 0;
+}

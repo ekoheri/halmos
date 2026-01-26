@@ -1,0 +1,46 @@
+Cara Kerja Halmos
+
+1. Doorman (TCP Server/Socket)
+
+Tugasnya berdiri di pintu depan (Port 8080). Dia sangat sigap. Begitu ada pelanggan (koneksi TCP) datang, dia tidak tanya mau makan apa, dia cuma membukakan pintu dan memastikan pelanggan tersebut masuk ke dalam gedung. Dia tidak mau menghambat barisan di luar.
+
+2. Resepsionis Adaptif (Event Loop & Adaptive Resource)
+
+Nah, ini bagian yang paling keren dari halmos. Sebelum restoran dibuka, si Resepsionis melakukan Inpeksi Gedung (`allocate_loop_resource`).
+
+   * Cek Kapasitas Gedung: Dia mengecek ke pemerintah (OS) berapa maksimal tamu yang boleh masuk ke gedung ini (RLIMIT_NOFILE).
+   * Self-Adjustment: Dia tidak mau kewalahan. Dia menghitung: "Oke, kalau gedung ini muat 10.000 orang, saya akan menyiapkan meja kerja saya untuk menangani 10% dari itu (batching) sekaligus."
+   * Optimalisasi: Dia menjaga agar fokusnya tetap tajam, minimal menangani 64 laporan sekaligus, tapi maksimal 1024 (max_event_loop). Dia tahu kalau terlalu banyak, dia bakal pusing sendiri.
+
+Saat jam kerja, dia menggunakan teknik "Sekali Buka Mata, Seribu Data" (epoll_wait). Begitu dia merasakan ada sinyal di pintu (`sock_server`), dia langsung lari dan menguras habis semua antrean di depan pintu sampai bersih (`Accept Loop`). Dia bukan resepsionis biasa yang menyapa satu-satu; dia adalah mesin pelayan semua tamu!
+
+3. Manajer Antrean (Task Queue)
+
+Dia berdiri di antara Resepsionis dan Dapur dengan memegang papan klip raksasa. Dialah pengatur ritme kerja seluruh restoran.
+
+Di balik layar, ada Manajer Antrean yang memegang papan klip raksasa berisi nota pesanan. Dia adalah pengatur strategi yang sangat peduli pada efisiensi. Jika dia melihat tumpukan nota mulai menggunung hingga melewati batas aman, dia akan berteriak memanggil bantuan: "Tambah koki! Kirim 4 orang sekaligus!" (Upscaling). 
+
+Namun, koki-koki ini punya aturan kerja yang unik. Jika suasana mulai sepi, mereka tidak langsung pulang. Mereka akan duduk siaga sambil memantau keadaan; jika restoran sangat ramai, mereka rela menunggu hingga 5 menit, namun jika benar-benar sepi, dalam 30 detik mereka akan langsung mencopot celemek dan pamit pulang (Downscaling) agar pemilik restoran tidak boros membayar gaji (menghemat RAM dan CPU).
+
+4. Kuli Masak / Asisten Chef (Worker Threads)
+
+Mereka adalah pasukan otot di dapur. Mereka tidak tahu apa-apa tentang pintu depan. Mereka hanya tahu: "Kalau Manajer Antrean kasih nota, saya kerjakan."
+
+Oneshot Rule: Begitu seorang kuli mengambil nota Meja 5, si Resepsionis di depan akan mencoret Meja 5 dari radarnya. Si kuli memegang kendali penuh. Ini menjamin tidak ada dua koki yang berebut memasak untuk meja yang sama.
+
+5. Master Chef (HTTP Parser/Handler)
+
+Inilah bagian yang paling ajaib. Ketika seorang koki membawa nota ke Master Chef, si Chef tidak perlu repot-repot pergi ke gudang untuk mengambil bahan, memasaknya, lalu membungkusnya ke dalam piring (proses menyalin data yang melelahkan). Sebagai pakar teknologi Zero-Copy, Master Chef cukup memberikan "Surat Izin Jalan" kepada penjaga gudang (Sistem Operasi yang menangangi Disk I/O). 
+
+Dia memerintahkan isi gudang untuk dilemparkan saja dari gudang (kernel buffer) menuju meja pelanggan (TCP socket) tanpa harus mampir ke tangan siapa pun. Itulah sebabnya restoran Halmos bisa menyajikan makanan seberat 10 GB hanya dalam hitungan detik—karena datanya meluncur bebas tanpa hambatan!.
+
+Kesimpulan: 
+
+Kenapa Halmos Cepat?
+Dengan alur kerja di atas, Halmos bukan hanya sebuah program, melainkan ekosistem yang cerdas karena tiga pilar utamanya:
+
+1. Efisiensi I/O: Resepsionis tidak pernah menunggu satu pelanggan; dia bekerja dalam paket besar (batch) dan langsung "menguras" antrean kernel.
+
+2. Elastisitas Sumber Daya: Manajer Antrean memastikan jumlah koki selalu pas. Tidak ada pemborosan tenaga (boros RAM) saat sepi, dan tidak ada pelanggan terbengkalai saat ramai.
+
+3. Jalur Bebas Hambatan (Zero-Copy): Dengan memangkas proses "bungkus-memperbungkus" makanan, data bisa langsung melesat dari gudang ke meja pelanggan. Inilah yang memungkinkan transfer rate mencapai 1.2 GB/s.

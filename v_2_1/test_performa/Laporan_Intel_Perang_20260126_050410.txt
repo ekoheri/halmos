@@ -1,0 +1,53 @@
+=================================================================
+        MILITARY GRADE BENCHMARK: DHE 2048-BIT EXCHANGE          
+=================================================================
+Laptop Status: Siaga Tempur (Optimized Limits)
+-----------------------------------------------------------------
+MISI: REGU_SQUAD | TARGET: HALMOS_ENGINE | REQ: 120 | CONC: 12
+Failed requests:        0
+Requests per second:    38.50 [#/sec] (mean)
+Time per request:       311.661 [ms] (mean)
+Time per request:       25.972 [ms] (mean, across all concurrent requests)
+  99%    536
+Peak RAM Utilization: 2.09 MB
+-----------------------------------------------------------------
+MISI: REGU_SQUAD | TARGET: NGINX_STABLE | REQ: 120 | CONC: 12
+Failed requests:        0
+Requests per second:    41.54 [#/sec] (mean)
+Time per request:       288.878 [ms] (mean)
+Time per request:       24.073 [ms] (mean, across all concurrent requests)
+  99%    393
+Peak RAM Utilization: 3.49 MB
+-----------------------------------------------------------------
+MISI: REGU_SQUAD | TARGET: APACHE_HTTPD | REQ: 120 | CONC: 12
+Failed requests:        0
+Requests per second:    41.43 [#/sec] (mean)
+Time per request:       289.671 [ms] (mean)
+Time per request:       24.139 [ms] (mean, across all concurrent requests)
+  99%    401
+Peak RAM Utilization: 18.44 MB
+-----------------------------------------------------------------
+MISI: KOMPI_COMPANY | TARGET: HALMOS_ENGINE | REQ: 1000 | CONC: 100
+Failed requests:        0
+Requests per second:    45.05 [#/sec] (mean)
+Time per request:       2219.714 [ms] (mean)
+Time per request:       22.197 [ms] (mean, across all concurrent requests)
+  99%   2509
+Peak RAM Utilization: 2.09 MB
+-----------------------------------------------------------------
+MISI: KOMPI_COMPANY | TARGET: NGINX_STABLE | REQ: 1000 | CONC: 100
+Failed requests:        0
+Requests per second:    45.34 [#/sec] (mean)
+Time per request:       2205.487 [ms] (mean)
+Time per request:       22.055 [ms] (mean, across all concurrent requests)
+  99%   2872
+Peak RAM Utilization: 3.49 MB
+-----------------------------------------------------------------
+MISI: KOMPI_COMPANY | TARGET: APACHE_HTTPD | REQ: 1000 | CONC: 100
+Failed requests:        0
+Requests per second:    46.19 [#/sec] (mean)
+Time per request:       2164.827 [ms] (mean)
+Time per request:       21.648 [ms] (mean, across all concurrent requests)
+  99%   2862
+Peak RAM Utilization: 18.44 MB
+-----------------------------------------------------------------
