@@ -1,0 +1,14 @@
+Source: halmos
+Section: utils
+Priority: optional
+Maintainer: Eko Heri Susanto<ekoheri@gmail.com>
+Build-Depends: debhelper-compat (= 12), gcc, libc6-dev
+Standards-Version: 4.5.0
+Homepage: https://github.com/ekoheri/halmos
+
+Package: halmos
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}, python3, python3-flup, spawn-fcgi, php-fpm
+Description: Halmos Savage Server is a high-performance web server.
+ A lightweight web server written in C with support for FastCGI, 
+ Python, and Rust backends for research purposes.

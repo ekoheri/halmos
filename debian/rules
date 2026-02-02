@@ -1,0 +1,19 @@
+#!/usr/bin/make -f
+
+# Mengaktifkan debhelper (DH) untuk menangani proses build otomatis
+%:
+	dh $@
+
+# Tahap Kompilasi: dh_auto_build akan otomatis memanggil 'make'
+override_dh_auto_build:
+	dh_auto_build
+
+# Tahap Instalasi: dh_auto_install akan memanggil 'make install' 
+# dan secara otomatis mengisi variabel $(DESTDIR) ke folder bayangan debian
+override_dh_auto_install:
+	dh_auto_install 
+
+	#!/usr/bin/make -f
+
+# Tambahkan ini untuk melewati proses dwz yang error
+override_dh_dwz:

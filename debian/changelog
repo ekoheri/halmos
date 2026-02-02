@@ -1,0 +1,7 @@
+halmos (2.0.0) stable; urgency=low
+
+  * Initial release of Halmos Savage Server v2.0.0.
+  * Professional directory structure implemented.
+  * Added support for Python and Rust backends.
+
+ -- Eko Heri Susanto <ekoheri@gmail.com>  Mon, 02 Feb 2026 10:00:00 +0700

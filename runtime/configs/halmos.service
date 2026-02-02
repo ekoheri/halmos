@@ -1,0 +1,16 @@
+[Unit]
+Description=Halmos Web Server Engine
+After=network.target
+
+[Service]
+User=root
+Group=root
+# Gunakan path absolut yang baru
+ExecStart=/usr/bin/halmos
+WorkingDirectory=/var/www/halmos
+Restart=always
+RestartSec=5s
+KillSignal=SIGINT
+
+[Install]
+WantedBy=multi-user.target
