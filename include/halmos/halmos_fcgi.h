@@ -20,9 +20,6 @@
 #define FCGI_RESPONDER 1
 #define FCGI_KEEP_CONN 1
 
-/* Pool Configuration */
-#define MAX_HALMOS_FCGI_POOL 64 
-
 /* --- Data Structures --- */
 
 typedef struct {
@@ -47,7 +44,9 @@ typedef struct {
 
 /* Global Pool Manager */
 typedef struct {
-    HalmosFCGI_Conn connections[MAX_HALMOS_FCGI_POOL];
+    //HalmosFCGI_Conn connections[MAX_HALMOS_FCGI_POOL];
+    HalmosFCGI_Conn *connections;
+    int pool_size;
     int current_idle_count;
     pthread_mutex_t lock;
     char target_ip[16];
@@ -97,18 +96,13 @@ void halmos_fcgi_pool_init(void);
  * Mengambil koneksi aktif dari pool (Thread-Safe).
  * Jika pool kosong, fungsi ini akan membuka socket baru ke backend.
  */
-int halmos_fcgi_conn_acquire(const char *target, int port);
+//int halmos_fcgi_conn_acquire(const char *target, int port);
 
 /**
  * Mengembalikan koneksi ke pool agar bisa digunakan kembali.
  * Jika pool sudah penuh (MAX_HALMOS_FCGI_POOL), socket akan ditutup.
  */
-void halmos_fcgi_conn_release(int sockfd);
-
-/**
- * Membersihkan seluruh pool saat shutdown.
- */
-void halmos_fcgi_pool_destroy(void);
+//void halmos_fcgi_conn_release(int sockfd);
 
 /* --- Request Handling --- */
 
@@ -141,5 +135,8 @@ int halmos_fcgi_request_stream(
     size_t content_length
 );
 
+/**
+ * Membersihkan seluruh pool saat shutdown.
+ */
 void halmos_fcgi_pool_destroy(void);
 #endif

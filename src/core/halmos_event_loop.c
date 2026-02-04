@@ -21,23 +21,22 @@
 #include <signal.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <signal.h>
 
-//Variable Global
-Config config;
+// Pemilik variable global
 int epoll_fd;
 struct epoll_event *events;
-int max_event_loop;
 
 //Variable Local
 int sock_server;
 
-void allocate_loop_resource();
+volatile sig_atomic_t server_running = 1;
 
 void start_event_loop() {
     // menghitung berapa jumah core untuk 
-    // patokan berap jumlah event pool yang cocok
-    allocate_loop_resource();
-    
+    // patokan berapa jumlah event pool yang cocok
+    events = malloc(sizeof(struct epoll_event) * g_event_batch_size);
+
     sock_server = create_server_socket(config.server_name, config.server_port);
     if (sock_server < 0) {
         exit(EXIT_FAILURE);
@@ -49,12 +48,12 @@ void start_event_loop() {
     ev.events = EPOLLIN; // Level Triggered untuk listen socket
     epoll_ctl(epoll_fd, EPOLL_CTL_ADD, sock_server, &ev);
 
-    write_log("[INFO: halmos_event_loop.c] Halmos Server listening on %s:%d", config.server_name, config.server_port);
+    write_log("Halmos Server listening on %s:%d", config.server_name, config.server_port);
 }
 
 void run_event_loop() {
-    while (1) {
-        int num_fds = epoll_wait(epoll_fd, events, max_event_loop, -1);
+    while (server_running) {
+        int num_fds = epoll_wait(epoll_fd, events, g_event_batch_size, 500); // awalnya -1
         
         for (int i = 0; i < num_fds; i++) {
             if (events[i].data.fd == sock_server) {
@@ -72,14 +71,15 @@ void run_event_loop() {
                         // Jika interupsi signal, coba lagi
                         if (errno == EINTR) continue;
                         
-                        perror("Accept failed");
+                        write_log_error("Accept failed");
                         break;
                     }
 
-                    // --- PANGGIL WNTO SLOW LORIS ---
-                    //if(config.anti_slow_loris_enabled){
-                    //    anti_slow_loris(sock_client);
-                    //}
+                    // --- PANGGIL ANTI SLOW LORIS ---
+                    // Jika di konfigurasi diset true
+                    if(config.anti_slow_loris_enabled == true){
+                        anti_slow_loris(sock_client);
+                    }
                     // -------------------------
 
                     // Set tamu jadi non-blocking agar tidak bikin thread pool macet
@@ -120,29 +120,15 @@ void run_event_loop() {
             }
         }
     }
+
+    close(sock_server);
+    close(epoll_fd);
+    free(events);
+
+    write_log("Server Halmos is stopped. Cleanup complete."); 
 }
 
-void stop_event_loop() {
-    exit(0);
-}
-
-/********************************************************************
- * adaptive_resource_setup()
- * ISI : Sama persis logika ulimit & 10% MAX_EVENTS Boss.
- ********************************************************************/
-void allocate_loop_resource() {
-    struct rlimit rl;
-    if (getrlimit(RLIMIT_NOFILE, &rl) == 0) {
-        // Naikkkan ke Hard Limit
-        rl.rlim_cur = rl.rlim_max; 
-        setrlimit(RLIMIT_NOFILE, &rl);
-        
-        // Adaptive: Ambil 10% untuk batching
-        max_event_loop = (int)(rl.rlim_cur / 10);
-        if (max_event_loop < 64)   max_event_loop = 64;
-        if (max_event_loop > 1024) max_event_loop = 1024;
-        
-        write_log("[ADAPTIVE] Max Events set to: %d", max_event_loop);
-    }
-    events = malloc(sizeof(struct epoll_event) * max_event_loop);
+void stop_event_loop(int sig) {
+    (void)sig;
+    server_running = 0;
 }

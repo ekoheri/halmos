@@ -5,6 +5,13 @@
 #include "halmos_config.h"
 #include "halmos_queue.h"
 
+// --- Penampung Hasil Adaptive ---
+extern int g_event_batch_size;  // Untuk epoll_wait
+extern int g_fcgi_pool_size;    // Untuk FastCGI connection pool
+extern int g_worker_max;        // Untuk Thread Worker max
+extern int g_worker_min;        // Untuk Thread Worker min
+extern int g_queue_capacity;    // Untuk Task Queue limit
+
 // Deklarasikan variabel global untuk :
 // 1. menyimpan konfigurasi
 extern Config config;

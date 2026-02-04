@@ -58,7 +58,6 @@ bool parse_http_request(const char *raw_data, size_t total_received, RequestHead
             char *host_val = line + 5;
             while (*host_val == ' ') host_val++; // Trim spasi depan
             req->host = strdup(host_val);  // Simpan ke struct
-            write_log("[DEBUG http1_parcer.c] Incoming connection from: '%s'", req->host); // <--- CEK INI DI TERMINAL
         }
     }//end while
     free(header_tmp);
@@ -86,6 +85,17 @@ bool parse_http_request(const char *raw_data, size_t total_received, RequestHead
         parse_multipart_body(req);
     }
 
+    // 6. Final Summary Log (Satu baris cukup!)
+    if (req->is_valid) {
+        write_log("[REQUEST] %s %s | Host: %s | Body: %ld bytes | Keep-Alive: %s",
+                  req->method, 
+                  req->uri, 
+                  req->host ? req->host : "unknown", 
+                  req->content_length,
+                  req->is_keep_alive ? "YES" : "NO");
+    } else {
+        write_log("[REQUEST] Malformed request detected from: %s", req->host ? req->host : "unknown");
+    }
     return req->is_valid;
 }
 
