@@ -1,5 +1,6 @@
 #include "halmos_queue.h"
 #include "halmos_global.h"
+#include "halmos_adaptive.h"
 #include "halmos_config.h"
 #include "halmos_log.h"
 #include "halmos_thread_pool.h"
@@ -14,9 +15,11 @@
 #include <sys/sysinfo.h>  // Untuk sysinfo (RAM)
 #include <unistd.h>       // Untuk sysconf (CPU Cores)
 
-Config config;
+//Pemilik variable global global_queue
+TaskQueue global_queue;
 
-int get_adaptive_timeout(TaskQueue *q);
+//static int get_adaptive_capacity(void);
+static int get_adaptive_timeout(TaskQueue *q);
 
 /********************************************************************
  * init_queue() -> [Dapur Restoran Halmos]
@@ -46,54 +49,14 @@ sebuah mekanisme yang memberikan stabilitas lebih tinggi dibandingkan
 konfigurasi statis pada server konvensional.
 */
 void start_thread_worker() {
-    long num_cores = sysconf(_SC_NPROCESSORS_ONLN);
-    struct rlimit rl;
-    struct sysinfo si;
-    
-    // --- PILAR 1: Batasan Izin (FD) ---
-    int fd_based_max = 1000; // Default aman
-    if (getrlimit(RLIMIT_NOFILE, &rl) == 0) {
-        fd_based_max = (int)(rl.rlim_cur / 10);
-    }
+    // Inisialisasi antrean tugas
+    init_queue(&global_queue, g_worker_min, g_worker_max, g_queue_capacity);
 
-    // --- PILAR 2: Batasan Fisik (RAM) ---
-    int ram_based_max = 1000;
-    if (sysinfo(&si) == 0) {
-        int buf_size = config.request_buffer_size > 0 ? config.request_buffer_size : 4096;
-        // Gunakan jatah 10% dari RAM bebas (freeram) agar lebih akurat
-        ram_based_max = (int)((si.freeram * 0.10) / buf_size);
-    }
-
-    // --- EKSEKUSI: Ambil Nilai Terendah (The Bottleneck) ---
-    int dynamic_thread_max = (fd_based_max < ram_based_max) ? fd_based_max : ram_based_max;
-
-    // --- GUARDRAIL (Batas Keamanan CPU i3) ---
-    if (dynamic_thread_max > 10000) dynamic_thread_max = 10000; // Jangan lebih dari 10k thread
-    int dynamic_thread_min = (int)num_cores * 4;
-
-    // --- STRATEGI ANTREAN ADAPTIF ---
-    // Kita set ruang tunggu sebesar 50% dari sisa kapasitas izin sistem (FD)
-    // Jika ulimit 50.000 dan worker 5.000, maka antrean bisa menampung 
-    // sekitar 22.500 permintaan yang sedang menunggu diproses.
-    int adaptive_queue_size = (int)((rl.rlim_cur - dynamic_thread_max) * 0.5);
-
-    // Guardrail: Minimal 1000, Maksimal 65535 (Limit standar port TCP)
-    if (adaptive_queue_size < 1000) adaptive_queue_size = 1000;
-    if (adaptive_queue_size > 65535) adaptive_queue_size = 65535;
-
-        // Inisialisasi antrean tugas
-    init_queue(&global_queue, dynamic_thread_min, dynamic_thread_max, adaptive_queue_size);
-
-    for (int i = 0; i < dynamic_thread_min; i++) { // Bikin sesuai minimal aja
+    for (int i = 0; i < g_worker_min; i++) { // Bikin sesuai minimal aja
         pthread_t worker_tid;
         pthread_create(&worker_tid, NULL, worker_thread_pool, &global_queue);
         pthread_detach(worker_tid);
     }
-
-
-    write_log("Halmos Engine: Adaptive CPU Scaling active.");
-    write_log("Cores Detected: %ld. Pool: %d to %d workers. Queue: %d", 
-          num_cores, dynamic_thread_min, dynamic_thread_max, adaptive_queue_size);
 }
 
 /********************************************************************
@@ -222,10 +185,6 @@ int dequeue(TaskQueue *q, struct timeval *arrival) {
     return sock;
 }
 
-/********************************************************************
- * get_adaptive_timeout() -> [Aturan Nganggur Koki]
- * Logika Adaptive Timeout milik Boss berdasarkan Core CPU.
- ********************************************************************/
 int get_adaptive_timeout(TaskQueue *q) {
     // 1. Ambil jumlah CPU Core yang aktif secara otomatis
     long n_cores = sysconf(_SC_NPROCESSORS_ONLN);

@@ -1,6 +1,5 @@
 #include "halmos_thread_pool.h"
 #include "halmos_global.h"
-// #include "halmos_queue.h"
 #include "halmos_http_bridge.h" // Departemen HTTP/1 milik Boss
 #include "halmos_log.h"
 
@@ -8,11 +7,6 @@
 #include <sys/epoll.h>
 #include <sys/socket.h>
 #include <unistd.h>
-
-
-int epoll_fd;
-
-TaskQueue global_queue;
 
 void mark_worker_idle(TaskQueue *q);
 /********************************************************************

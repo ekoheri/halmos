@@ -13,20 +13,23 @@
 #include <errno.h>
 
 #include "halmos_fcgi.h"
+#include "halmos_global.h"
 #include "halmos_http_utils.h"
 #include "halmos_log.h"
 
 #include <sys/time.h> // untuk timeval
+#include <sys/sysinfo.h> // untuk info CPU dan RAM
 #include <fcntl.h> // Untuk splice
-#include <unistd.h>
+#include <sys/resource.h> // Untuk rlimit (FD)
+
 
 HalmosFCGI_Pool fcgi_pool;
 
-int halmos_fcgi_conn_acquire(const char *target, int port);
-void halmos_fcgi_conn_release(int sockfd);
-int add_fcgi_pair(unsigned char* dest, const char *name, const char *value, int offset, int max_len);
-int halmos_fcgi_splice_response(int fpm_fd, int sock_client, RequestHeader *req);
-void halmos_fcgi_send_stdin(int sockfd, int request_id, const void *data, int data_len);
+static int halmos_fcgi_conn_acquire(const char *target, int port);
+static void halmos_fcgi_conn_release(int sockfd);
+static int add_fcgi_pair(unsigned char* dest, const char *name, const char *value, int offset, int max_len);
+static int halmos_fcgi_splice_response(int fpm_fd, int sock_client, RequestHeader *req);
+static void halmos_fcgi_send_stdin(int sockfd, int request_id, const void *data, int data_len);
 
 /*
  * Metode yang digunakan adalah Pre-allocation streaming pool
@@ -35,23 +38,36 @@ void halmos_fcgi_send_stdin(int sockfd, int request_id, const void *data, int da
 */
 
 void halmos_fcgi_pool_init(void) {
+    // Panggil fungsi adaptive
+    fcgi_pool.pool_size = g_fcgi_pool_size;
+
+    // Alokasi memori secara dinamis
+    fcgi_pool.connections = malloc(sizeof(HalmosFCGI_Conn) * fcgi_pool.pool_size);
+    
+    if (!fcgi_pool.connections) {
+        write_log_error("[ERROR : halmos_fcgi.c] FATAL: Failed to allocate memory for %d pool connections!", fcgi_pool.pool_size);
+        exit(EXIT_FAILURE);
+    }
+
     pthread_mutex_init(&fcgi_pool.lock, NULL);
-    for (int i = 0; i < MAX_HALMOS_FCGI_POOL; i++) {
+    for (int i = 0; i < fcgi_pool.pool_size; i++) {
         fcgi_pool.connections[i].sockfd = -1;
         fcgi_pool.connections[i].in_use = false;
         fcgi_pool.connections[i].target_port = 0;
+        fcgi_pool.connections[i].is_unix = false; // Bersihkan flag
+        memset(fcgi_pool.connections[i].target_path, 0, sizeof(fcgi_pool.connections[i].target_path));
     }
-    write_log("[FCGI] Multi-backend pool initialized.");
 }
 
 void halmos_fcgi_pool_destroy(void) {
     pthread_mutex_lock(&fcgi_pool.lock);
-    for (int i = 0; i < MAX_HALMOS_FCGI_POOL; i++) {
+    for (int i = 0; i < fcgi_pool.pool_size; i++) {
         if (fcgi_pool.connections[i].sockfd != -1) {
             close(fcgi_pool.connections[i].sockfd);
             fcgi_pool.connections[i].sockfd = -1;
         }
     }
+    free(fcgi_pool.connections); // BUANG MEMORI POINTER-NYA
     pthread_mutex_unlock(&fcgi_pool.lock);
     pthread_mutex_destroy(&fcgi_pool.lock);
 }
@@ -250,7 +266,8 @@ int halmos_fcgi_splice_response(int fpm_fd, int sock_client, RequestHeader *req)
     unsigned char h_buf[8];
     int pipe_fds[2];
     if (pipe(pipe_fds) < 0) {
-        fprintf(stderr, "[DEBUG] Pipe failed: %s\n", strerror(errno));
+        //fprintf(stderr, "[DEBUG] Pipe failed: %s\n", strerror(errno));
+        write_log_error("[ERROR : halmos_fcgi.c] Pipe failed: %s", strerror(errno));
         return -1;
     }
 
@@ -319,7 +336,8 @@ int halmos_fcgi_splice_response(int fpm_fd, int sock_client, RequestHeader *req)
                         // LOG PENTING: Jika data STDOUT masuk tapi \r\n\r\n belum ketemu
                         // Ini bisa jadi penyebab 502 kalau PHP kirim headernya kepotong-potong
                         if ((size_t)header_pos >= sizeof(header_buffer) - 1) {
-                            fprintf(stderr, "[DEBUG] Header buffer full but no delimiter found!\n");
+                            //fprintf(stderr, "[DEBUG] Header buffer full but no delimiter found!\n");
+                            write_log_error("[ERROR : halmos_fcgi.c] Header buffer full but no delimiter found!");
                         }
                     }
                 }
@@ -334,7 +352,7 @@ int halmos_fcgi_splice_response(int fpm_fd, int sock_client, RequestHeader *req)
             char *err = malloc(clen + 1);
             recv(fpm_fd, err, clen, MSG_WAITALL);
             err[clen] = '\0';
-            printf("\033[1;31m[PHP_STDERR]\033[0m %s\n", err);
+            write_log_error("[ERROR : halmos_fcgi.c] BACKEND_STDERR %s", err);
             free(err);
         }
         else if (h->type == FCGI_END_REQUEST) {
@@ -366,7 +384,8 @@ int halmos_fcgi_splice_response(int fpm_fd, int sock_client, RequestHeader *req)
 
     // CEK LOG AKHIR: Kenapa keluar dari loop?
     if (!success) {
-        fprintf(stderr, "[DEBUG] Loop finished without FCGI_END_REQUEST. success=%d, header_sent=%d\n", success, header_sent);
+        //fprintf(stderr, "[DEBUG] Loop finished without FCGI_END_REQUEST. success=%d, header_sent=%d\n", success, header_sent);
+        write_log_error("[ERROR : halmos_fcgi.c] Loop finished without FCGI_END_REQUEST. success=%d, header_sent=%d", success, header_sent);
     }
 
     close(pipe_fds[0]);
@@ -421,7 +440,7 @@ int halmos_fcgi_conn_acquire(const char *target, int port) {
     pthread_mutex_lock(&fcgi_pool.lock);
 
     // 1. CARI KONEKSI YANG COCOK DI POOL (REUSE)
-    for (int i = 0; i < MAX_HALMOS_FCGI_POOL; i++) {
+    for (int i = 0; i < fcgi_pool.pool_size; i++) {
         if (fcgi_pool.connections[i].sockfd != -1 && !fcgi_pool.connections[i].in_use) {
             
             bool match = false;
@@ -463,7 +482,7 @@ int halmos_fcgi_conn_acquire(const char *target, int port) {
 
         if (connect(new_sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
             close(new_sock);
-            write_log("[ERROR] Gagal konek ke Unix Socket: %s", target);
+            write_log_error("[ERROR halmos_fcgi.c] Failed to connect to Unix socket : %s", target);
             return -1;
         }
     } else {
@@ -484,7 +503,9 @@ int halmos_fcgi_conn_acquire(const char *target, int port) {
         if (connect(new_sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
             close(new_sock);
             //write_log("[ERROR] Gagal konek ke TCP Backend: %s:%d", target, port);
-            fprintf(stderr, "\033[1;31m[FCGI_ERROR]\033[0m Failed to connect to PHP-FPM (%s:%d): %s\n", 
+            //fprintf(stderr, "\033[1;31m[FCGI_ERROR]\033[0m Failed to connect to PHP-FPM (%s:%d): %s\n", 
+            //    target, port, strerror(errno));
+            write_log_error("[ERROR halmos_fcgi.c] Failed to connect to Backend FastCGI (%s:%d): %s", 
                 target, port, strerror(errno));
             return -1;
         }
@@ -493,7 +514,7 @@ int halmos_fcgi_conn_acquire(const char *target, int port) {
     // 3. SIMPAN KE SLOT KOSONG DI POOL
     pthread_mutex_lock(&fcgi_pool.lock);
     //int assigned_slot = -1;
-    for (int i = 0; i < MAX_HALMOS_FCGI_POOL; i++) {
+    for (int i = 0; i < fcgi_pool.pool_size; i++) {
         if (fcgi_pool.connections[i].sockfd == -1) {
             fcgi_pool.connections[i].sockfd = new_sock;
             fcgi_pool.connections[i].in_use = true;
@@ -517,7 +538,7 @@ void halmos_fcgi_conn_release(int sockfd) {
     if (sockfd < 0) return;
 
     pthread_mutex_lock(&fcgi_pool.lock);
-    for (int i = 0; i < MAX_HALMOS_FCGI_POOL; i++) {
+    for (int i = 0; i < fcgi_pool.pool_size; i++) {
         if (fcgi_pool.connections[i].sockfd == sockfd) {
             fcgi_pool.connections[i].in_use = false;
             pthread_mutex_unlock(&fcgi_pool.lock);

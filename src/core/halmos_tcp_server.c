@@ -19,16 +19,14 @@ int qlen = 5;
 #define TCP_FASTOPEN 23
 #endif
 
-Config config;
-
 void set_nonblocking(int sock) {
     int flags = fcntl(sock, F_GETFL, 0);
     if (flags == -1) {
-        write_log("Error : fcntl F_GETFL");
+        write_log_error("Error : fcntl F_GETFL");
         return;
     }
     if (fcntl(sock, F_SETFL, flags | O_NONBLOCK) == -1) {
-        write_log("Error : fcntl F_SETFL");
+        write_log_error("Error : fcntl F_SETFL");
     }
 }
 
@@ -40,7 +38,7 @@ int create_server_socket(const char* ip, int port) {
 
     sock_server = socket(AF_INET, SOCK_STREAM, 0);
     if (sock_server < 0) {
-        perror("Socket creation failed");
+        write_log_error("Socket creation failed");
         return -1;
     }
 
@@ -52,12 +50,12 @@ int create_server_socket(const char* ip, int port) {
     serv_addr.sin_port = htons(port);
 
     if (bind(sock_server, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
-        write_log("Proses bind gagal pada %s:%d", ip, port);
+        write_log_error("Proses bind gagal pada %s:%d", ip, port);
         return -1;
     }
 
     if (listen(sock_server, 4096) < 0) {
-        perror("Listen failed");
+        write_log_error("Listen failed");
         return -1;
     }
 

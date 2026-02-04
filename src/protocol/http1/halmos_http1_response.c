@@ -68,6 +68,8 @@ void send_mem_response(int client_fd, int status_code, const char *status_text,
     };
     
     send_halmos_response(client_fd, res, keep_alive);
+    write_log("[RESPONSE] Status: %d %s | Type: Memory | Keep-Alive: %s", 
+              status_code, status_text, keep_alive ? "YES" : "NO");
 }
 
 void process_request_routing(int sock_client, RequestHeader *req) {
@@ -98,6 +100,10 @@ void process_request_routing(int sock_client, RequestHeader *req) {
             // Pastikan halmos_fcgi_splice_response belum sempat kirim header apa-apa
             send_mem_response(sock_client, 502, "Bad Gateway", 
                 "<h1>502 Bad Gateway</h1><p>Backend Service is Down.</p>", req->is_keep_alive);
+        } else if (status == 0) {
+            // TAMBAHKAN LOG SUKSES FASTCGI
+            write_log("[RESPONSE] 200 OK | FastCGI Stream: %s -> %s:%d", 
+                      req->uri, target_ip, target_port);
         }
         return;
     }
@@ -166,6 +172,8 @@ void static_response(int sock_client, RequestHeader *req) {
         
         //send(sock_client, header, h_len, 0);
         send(sock_client, header, h_len, MSG_NOSIGNAL);
+
+        write_log("[RESPONSE] 200 OK | Static: %s | Size: %ld bytes", req->uri, st.st_size);
 
         off_t offset = 0;
         size_t remaining = st.st_size;

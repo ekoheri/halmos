@@ -1,4 +1,5 @@
 #include "halmos_http_utils.h"
+#include "halmos_global.h"
 #include "halmos_config.h"
 
 #include <stdio.h>
@@ -8,10 +9,9 @@
 #include <ctype.h>
 #include <sys/time.h>
 #include <time.h>
+#include <sys/sysinfo.h> // untuk info CPU dan RAM
 
 #define PATH_MAX 1024
-
-Config config;
 
 // Fungsi untuk men-dekode URL
 // Contoh : ?nama=Eko+hHeri
