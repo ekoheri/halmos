@@ -37,6 +37,23 @@ char *trim(char *str) {
     return str;
 }
 
+unsigned long parse_size(const char *str) {
+    if (str == NULL) return 0;
+
+    char *endptr;
+    unsigned long value = strtoul(str, &endptr, 10);
+
+    while (isspace((unsigned char)*endptr)) endptr++;
+
+    // Switch hanya bisa karakter tunggal
+    switch (toupper((unsigned char)*endptr)) {
+        case 'G': value *= 1024 * 1024 * 1024; break; // Covers G, GB, Gb
+        case 'M': value *= 1024 * 1024; break;        // Covers M, MB, Mb
+        case 'K': value *= 1024; break;               // Covers K, KB, Kb
+    }
+    return value;
+}
+
 // Fungsi untuk membaca file konfigurasi
 void load_config(const char *filename) {
     FILE *file = fopen(filename, "r");
@@ -101,7 +118,7 @@ void load_config(const char *filename) {
                 snprintf(config.default_page, sizeof(config.default_page), "%s", value);
             // Security
             } else if (strcmp(key, "max_body_size") == 0) {
-                config.max_body_size = (size_t)atoll(value);
+                config.max_body_size = (size_t)parse_size(value);
             } else if (strcmp(key, "secure_application") == 0) {
                 if (strcasecmp(value, "true") == 0) {
                     config.secure_application = true;
@@ -129,6 +146,9 @@ void load_config(const char *filename) {
                 snprintf(config.php_server, sizeof(config.php_server), "%s", value);
             } else if (strcmp(key, "php_port") == 0) {
                 config.php_port = atoi(value);
+            }
+            else if (strcmp(key, "php_fpm_config_path") == 0) { // <--- Tambahkan blok ini
+                snprintf(config.php_fpm_config_path, sizeof(config.php_fpm_config_path), "%s", value);
             // Backend Rust
             } else if (strcmp(key, "rust_ext") == 0) {
                 snprintf(config.rust_ext, sizeof(config.rust_ext), "%s", value);
@@ -146,9 +166,7 @@ void load_config(const char *filename) {
             // Performance
             } else if (strcmp(key, "request_buffer_size") == 0) {
                 config.request_buffer_size = atoi(value);
-            } else if (strcmp(key, "max_queue_size") == 0) {
-                config.max_queue_size = atoi(value);
-            }  
+            }
         }
     }
 

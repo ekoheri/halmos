@@ -27,6 +27,7 @@ typedef struct {
     //Backend_PHP
     char php_server[256];
     int php_port;
+    char php_fpm_config_path[512];
     //Backend_Rust
     char rust_ext[256];
     char rust_server[256];
@@ -37,7 +38,6 @@ typedef struct {
     int python_port;
     //Performance    
     int request_buffer_size;
-    int max_queue_size;
     //Virtual Host
     VHostEntry vhosts[32];    // Bisa nampung 32 domain
     int vhost_count;

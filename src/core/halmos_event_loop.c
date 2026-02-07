@@ -82,6 +82,15 @@ void run_event_loop() {
                     }
                     // -------------------------
 
+                    // --- OPTIMASI BUFFER KERNEL ---
+                    int sndbuf = 1024 * 1024; // 1MB Buffer Kirim
+                    setsockopt(sock_client, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
+
+                    // Opsional: Jika ingin ab lebih stabil lagi, set buffer terima juga
+                    int rcvbuf = 64 * 1024; 
+                    setsockopt(sock_client, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+                    // ------------------------------
+
                     // Set tamu jadi non-blocking agar tidak bikin thread pool macet
                     set_nonblocking(sock_client);
 
@@ -95,27 +104,32 @@ void run_event_loop() {
                     ev_client.events = EPOLLIN | EPOLLET | EPOLLONESHOT; 
                     
                     if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, sock_client, &ev_client) == -1) {
-                        perror("epoll_ctl: client_socket");
-                        close(sock_client);
+                       // Jika gagal karena FD sudah tidak ada (EBADF), jangan panik
+                        if (errno == EBADF) {
+                            // Cukup tutup saja, tidak perlu lapor perror yang bikin panik
+                            close(sock_client); 
+                        } else {
+                            // Jika error lain (misal ENOMEM), baru kita catat
+                            perror("epoll_ctl: client_socket (critical)");
+                            close(sock_client);
+                        }
                     }
                 }
             } else {
-                // REQUEST MASUK DARI CLIENT EXISTING
+                // --- BAGIAN YANG DIUBAH (RAMPING & AMAN) ---
                 int client_fd = events[i].data.fd;
 
-                // Masukkan socket ke antrean TaskQueue
+                // 1. Masukkan ke antrean TANPA memanipulasi epoll di sini.
+                // Karena kita pakai EPOLLONESHOT, kernel otomatis menonaktifkan
+                // FD ini dari epoll_wait sampai ada yang panggil MOD lagi.
                 int status = enqueue(&global_queue, client_fd); 
 
-                if (status == -1) {
-                    // Antrean Penuh
-                    char *res = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-                    send(client_fd, res, strlen(res), 0);
+                if (status < 0) {
+                    if (status == -1) {
+                        char *res = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                        send(client_fd, res, strlen(res), 0);
+                    }
                     close(client_fd);
-                    //write_log("REJECTED: Queue is full (%d)", global_queue.max_queue_limit);
-                } else if (status == -2) {
-                    // Gagal Malloc (RAM Habis)
-                    close(client_fd);
-                    //write_log("CRITICAL: Malloc failed for new task");
                 }
             }
         }
