@@ -1,0 +1,77 @@
+=================================================================
+        MILITARY GRADE BENCHMARK: DHE 2048-BIT EXCHANGE v2       
+=================================================================
+Laptop Status: All Systems Go (High Performance Mode)
+-----------------------------------------------------------------
+MISI: 1_REGU_SQUAD | TARGET: HALMOS_ENGINE | REQ: 120 | CONC: 12
+Failed requests:        0
+Requests per second:    40.35 [#/sec] (mean)
+Time per request:       297.421 [ms] (mean)
+Time per request:       24.785 [ms] (mean, across all concurrent requests)
+  99%    465
+Peak RAM Utilization: 2.66 MB
+-----------------------------------------------------------------
+MISI: 1_REGU_SQUAD | TARGET: NGINX_STABLE | REQ: 120 | CONC: 12
+Failed requests:        0
+Requests per second:    42.59 [#/sec] (mean)
+Time per request:       281.744 [ms] (mean)
+Time per request:       23.479 [ms] (mean, across all concurrent requests)
+  99%    476
+Peak RAM Utilization: 31.23 MB
+-----------------------------------------------------------------
+MISI: 1_REGU_SQUAD | TARGET: APACHE_HTTPD | REQ: 120 | CONC: 12
+Failed requests:        0
+Requests per second:    43.22 [#/sec] (mean)
+Time per request:       277.642 [ms] (mean)
+Time per request:       23.137 [ms] (mean, across all concurrent requests)
+  99%    385
+Peak RAM Utilization: 207.53 MB
+-----------------------------------------------------------------
+MISI: 2_REGU_SECTION | TARGET: HALMOS_ENGINE | REQ: 500 | CONC: 24
+Failed requests:        0
+Requests per second:    45.37 [#/sec] (mean)
+Time per request:       528.933 [ms] (mean)
+Time per request:       22.039 [ms] (mean, across all concurrent requests)
+  99%    743
+Peak RAM Utilization: 2.66 MB
+-----------------------------------------------------------------
+MISI: 2_REGU_SECTION | TARGET: NGINX_STABLE | REQ: 500 | CONC: 24
+Failed requests:        0
+Requests per second:    45.06 [#/sec] (mean)
+Time per request:       532.627 [ms] (mean)
+Time per request:       22.193 [ms] (mean, across all concurrent requests)
+  99%    686
+Peak RAM Utilization: 31.23 MB
+-----------------------------------------------------------------
+MISI: 2_REGU_SECTION | TARGET: APACHE_HTTPD | REQ: 500 | CONC: 24
+Failed requests:        0
+Requests per second:    45.35 [#/sec] (mean)
+Time per request:       529.178 [ms] (mean)
+Time per request:       22.049 [ms] (mean, across all concurrent requests)
+  99%    715
+Peak RAM Utilization: 532.97 MB
+-----------------------------------------------------------------
+MISI: 1_KOMPI_COMPANY | TARGET: HALMOS_ENGINE | REQ: 1000 | CONC: 100
+Failed requests:        0
+Requests per second:    45.17 [#/sec] (mean)
+Time per request:       2214.050 [ms] (mean)
+Time per request:       22.140 [ms] (mean, across all concurrent requests)
+  99%   2395
+Peak RAM Utilization: 2.66 MB
+-----------------------------------------------------------------
+MISI: 1_KOMPI_COMPANY | TARGET: NGINX_STABLE | REQ: 1000 | CONC: 100
+Failed requests:        0
+Requests per second:    46.13 [#/sec] (mean)
+Time per request:       2167.758 [ms] (mean)
+Time per request:       21.678 [ms] (mean, across all concurrent requests)
+  99%   3037
+Peak RAM Utilization: 28.57 MB
+-----------------------------------------------------------------
+MISI: 1_KOMPI_COMPANY | TARGET: APACHE_HTTPD | REQ: 1000 | CONC: 100
+Failed requests:        0
+Requests per second:    46.21 [#/sec] (mean)
+Time per request:       2163.964 [ms] (mean)
+Time per request:       21.640 [ms] (mean, across all concurrent requests)
+  99%   3065
+Peak RAM Utilization: 2255.02 MB
+-----------------------------------------------------------------

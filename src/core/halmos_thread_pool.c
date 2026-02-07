@@ -31,7 +31,8 @@ void *worker_thread_pool(void *arg){
         if (bridge_dispatch(sock_client) == 1) {
             // Jika Keep-Alive: Re-arm EPOLL
             struct epoll_event ev;
-            ev.events = EPOLLIN | EPOLLONESHOT;
+            // TAMBAHKAN EPOLLET DI SINI JUGA!
+            ev.events = EPOLLIN | EPOLLET | EPOLLONESHOT;
             ev.data.fd = sock_client;
             if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, sock_client, &ev) == -1) {
                 close(sock_client);

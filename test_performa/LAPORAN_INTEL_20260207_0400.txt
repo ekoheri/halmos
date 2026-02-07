@@ -1,0 +1,95 @@
+=================================================
+   LAPORAN HASIL OPERASI: HALMOS VS RAKSASA
+   Tanggal Eksekusi : Sat 07 Feb 2026 04:00:34 AM WIB
+   Spesifikasi Unit : i3 (4 Cores) | 6GB RAM | Debian 10
+=================================================
+
+Unit: APACHE_HTTPD (REGU)
+Requests per second:    944.78 [#/sec] (mean)
+Time per request:       10.584 [ms] (mean)
+Time per request:       1.058 [ms] (mean, across all concurrent requests)
+Transfer rate:          928823.41 [Kbytes/sec] received
+Penggunaan RAM Puncak: 194.51 MB
+-------------------------------------------------
+
+Unit: NGINX_STABLE (REGU)
+Requests per second:    1365.86 [#/sec] (mean)
+Time per request:       7.321 [ms] (mean)
+Time per request:       0.732 [ms] (mean, across all concurrent requests)
+Transfer rate:          1342744.93 [Kbytes/sec] received
+Penggunaan RAM Puncak: 32.15 MB
+-------------------------------------------------
+
+Unit: HALMOS_CORE (REGU)
+Requests per second:    1192.45 [#/sec] (mean)
+Time per request:       8.386 [ms] (mean)
+Time per request:       0.839 [ms] (mean, across all concurrent requests)
+Transfer rate:          1172112.33 [Kbytes/sec] received
+Penggunaan RAM Puncak: 5.13 MB
+-------------------------------------------------
+
+Unit: APACHE_HTTPD (KOMPI)
+Requests per second:    1004.93 [#/sec] (mean)
+Time per request:       99.510 [ms] (mean)
+Time per request:       0.995 [ms] (mean, across all concurrent requests)
+Transfer rate:          987955.88 [Kbytes/sec] received
+Penggunaan RAM Puncak: 1646.78 MB
+-------------------------------------------------
+
+Unit: NGINX_STABLE (KOMPI)
+Requests per second:    1475.40 [#/sec] (mean)
+Time per request:       67.778 [ms] (mean)
+Time per request:       0.678 [ms] (mean, across all concurrent requests)
+Transfer rate:          1450424.54 [Kbytes/sec] received
+Penggunaan RAM Puncak: 32.15 MB
+-------------------------------------------------
+
+Unit: HALMOS_CORE (KOMPI)
+PERINGATAN: TERDETEKSI PRAJURIT GUGUR (FAILED REQUESTS)!
+Failed requests:        4
+Requests per second:    1131.36 [#/sec] (mean)
+Time per request:       88.389 [ms] (mean)
+Time per request:       0.884 [ms] (mean, across all concurrent requests)
+Transfer rate:          1111734.62 [Kbytes/sec] received
+Penggunaan RAM Puncak: 5.13 MB
+-------------------------------------------------
+
+Unit: APACHE_HTTPD (BATALYON)
+Penggunaan RAM Puncak: 2342.57 MB
+-------------------------------------------------
+
+Unit: NGINX_STABLE (BATALYON)
+Requests per second:    1175.45 [#/sec] (mean)
+Time per request:       510.442 [ms] (mean)
+Time per request:       0.851 [ms] (mean, across all concurrent requests)
+Transfer rate:          1155554.23 [Kbytes/sec] received
+Penggunaan RAM Puncak: 32.15 MB
+-------------------------------------------------
+
+Unit: HALMOS_CORE (BATALYON)
+PERINGATAN: TERDETEKSI PRAJURIT GUGUR (FAILED REQUESTS)!
+Failed requests:        7
+Requests per second:    1130.59 [#/sec] (mean)
+Time per request:       530.696 [ms] (mean)
+Time per request:       0.884 [ms] (mean, across all concurrent requests)
+Transfer rate:          1111088.48 [Kbytes/sec] received
+Penggunaan RAM Puncak: 5.13 MB
+-------------------------------------------------
+
+Unit: APACHE_HTTPD (MOBILISASI_TOTAL)
+Penggunaan RAM Puncak: 2343.78 MB
+-------------------------------------------------
+
+Unit: NGINX_STABLE (MOBILISASI_TOTAL)
+Penggunaan RAM Puncak: 33.04 MB
+-------------------------------------------------
+
+Unit: HALMOS_CORE (MOBILISASI_TOTAL)
+PERINGATAN: TERDETEKSI PRAJURIT GUGUR (FAILED REQUESTS)!
+Failed requests:        8
+Requests per second:    1092.84 [#/sec] (mean)
+Time per request:       915.048 [ms] (mean)
+Time per request:       0.915 [ms] (mean, across all concurrent requests)
+Transfer rate:          1074126.28 [Kbytes/sec] received
+Penggunaan RAM Puncak: 5.13 MB
+-------------------------------------------------

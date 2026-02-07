@@ -44,9 +44,14 @@ typedef struct {
 
 /* Global Pool Manager */
 typedef struct {
-    //HalmosFCGI_Conn connections[MAX_HALMOS_FCGI_POOL];
     HalmosFCGI_Conn *connections;
     int pool_size;
+    
+    /* --- Jatah Adaptive --- */
+    int php_quota;
+    int rust_quota;
+    int python_quota;
+    
     int current_idle_count;
     pthread_mutex_t lock;
     char target_ip[16];

@@ -2,162 +2,108 @@
 // sudo pkill halmos-rust-backend
 // sudo spawn-fcgi -a 127.0.0.1 -p 9001 -n /home/eko/halmos-rust-backend/target/release/halmos-rust-backend
 
-extern crate fastcgi;
-use std::io::{Read, Write};
+use fastcgi;
+use num_bigint::{BigUint, RandBigInt};
+use num_traits::{One, Zero};
+use std::io::Write;
 use std::time::Instant;
 
-fn fibonacci(n: u32) -> u32 {
-    if n <= 1 { return n; }
-    fibonacci(n - 1) + fibonacci(n - 2)
+fn mod_exp_manual(base: &BigUint, exp: &BigUint, m: &BigUint) -> BigUint {
+    let mut res = BigUint::one();
+    let mut base = base % m;
+    let mut exp = exp.clone();
+
+    while exp > BigUint::zero() {
+        if &exp % 2u32 == BigUint::one() {
+            res = (res * &base) % m;
+        }
+        base = (&base * &base) % m;
+        exp >>= 1;
+    }
+    res
 }
 
-fn sieve(limit: usize) -> usize {
-    let mut primes = vec![true; limit + 1];
-    primes[0] = false; primes[1] = false;
-    for p in 2..=((limit as f64).sqrt() as usize) {
-        if primes[p] {
-            let mut i = p * p;
-            while i <= limit { primes[i] = false; i += p; }
-        }
+fn format_hexa(num: &BigUint) -> String {
+    let s = format!("{:x}", num);
+    if s.len() > 40 {
+        format!("{}...{} ({} chars)", &s[..20], &s[s.len()-20..], s.len())
+    } else {
+        s
     }
-    primes.iter().filter(|&&is_prime| is_prime).count()
-}
-
-fn mandelbrot() -> u64 {
-    let (width, height, max_iter) = (800, 600, 1000);
-    let mut sum = 0;
-    for y in 0..height {
-        for x in 0..width {
-            let (mut z_re, mut z_im) = (0.0, 0.0);
-            let c_re = (x as f64 - width as f64 / 1.5) * 4.0 / width as f64;
-            let c_im = (y as f64 - height as f64 / 2.0) * 4.0 / height as f64;
-            let mut iter = 0;
-            while z_re * z_re + z_im * z_im <= 4.0 && iter < max_iter {
-                let tmp = z_re * z_re - z_im * z_im + c_re;
-                z_im = 2.0 * z_re * z_im + c_im;
-                z_re = tmp;
-                iter += 1;
-            }
-            sum += iter as u64;
-        }
-    }
-    sum
 }
 
 fn main() {
-    fastcgi::run(|mut request| {
-        let query = request.param("QUERY_STRING").unwrap_or_default();
-        let method = request.param("REQUEST_METHOD").unwrap_or_default();
-        let content_type = request.param("CONTENT_TYPE").unwrap_or_default();
-        
-        let jenis = query.split('&')
-            .find(|s| s.starts_with("jenis="))
-            .map(|s| s.split('=').nth(1).unwrap_or(""))
-            .unwrap_or("");
+    // RFC 3526 MODP Group 14 (2048-bit)
+    let p_hex = "FFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD1\
+                 29024E088A67CC74020BBEA63B139B22514A08798E3404DD\
+                 EF9519B3CD3A431B302B0A6DF25F14374FE1356D6D51C245\
+                 E485B576625E7EC6F44C42E9A637ED6B0BFF5CB6F406B7ED\
+                 EE386BFB5A899FA5AE9F24117C4B1FE649286651ECE45B3D\
+                 C2007CB8A163BF0598DA48361C55D39A69163FA8FD24CF5F\
+                 83655D23DCA3AD961C62F356208552BB9ED529077096966D\
+                 670C354E4ABC9804F1746C08CA18217C32905E462E36CE3B\
+                 E39E772C180E86039B2783A2EC07A28FB5C55DF06F4BB242\
+                 431D3C20A9107119558B664687A69002B5E8CE4286110C9A\
+                 891C2A562AD95A3C8471FA60515630A868B448F8BAD697C1\
+                 572445B2F1391216957C452445447D74F74FA50462463F4B\
+                 0202F1391216957C452445447D74F74FA50462463F4B0202\
+                 FFFFFFFFFFFFFFFF";
+
+    let p = BigUint::parse_bytes(p_hex.as_bytes(), 16).expect("Failed to parse P");
+    let g = BigUint::from(2u32);
+
+    fastcgi::run(move |mut req| {
+        let qs = req.param("QUERY_STRING").unwrap_or_else(|| "".to_string());
+        let mode_manual = qs.contains("mode=manual");
 
         let start = Instant::now();
+        let mut rng = rand::thread_rng();
 
-        // --- MATCH SEBAGAI EXPRESSION (Menghilangkan Warning) ---
-        let html_output = match jenis {
-            "fibo" => {
-                format!("<h3>Hasil Fibonacci(30): {}</h3>", fibonacci(30))
-            }
-            "prime" => {
-                format!("<h3>Hasil Sieve Prime 1M: {} ditemukan</h3>", sieve(1_000_000))
-            }
-            "mandelbrot" => {
-                format!("<h3>Hasil Mandelbrot Checksum: {}</h3>", mandelbrot())
-            }
-            "upload" => {
-                use multipart::server::Multipart;
-                use std::io::Cursor;
-            
-                // 1. Ambil boundary dari header CONTENT_TYPE
-                // Bentuknya: multipart/form-data; boundary=------------------------be8dc4b...
-                let boundary = content_type
-                    .split("boundary=")
-                    .nth(1)
-                    .unwrap_or("");
-            
-                if boundary.is_empty() {
-                    "<h3>Error: Boundary tidak ditemukan!</h3>".to_string()
-                } else {
-                    // Sedot seluruh body dari STDIN (Streaming yang dikirim Halmos C)
-                    let mut body = Vec::new();
-                    let _ = request.stdin().read_to_end(&mut body);
-                    let body_size = body.len();
-                    
-                    let mut response_text = format!("<h3>Hasil Parsing Halmos (Rust):</h3><ul>");
-                    
-                    // 2. Inisialisasi Multipart Parser dengan Cursor
-                    let mut mp = Multipart::with_body(Cursor::new(body), boundary);
-                    
-                    // 3. Iterasi setiap field (file atau teks)
-                    while let Ok(Some(mut field)) = mp.read_entry() {
-                        let field_name = field.headers.name.to_string();
-                        
-                        if let Some(filename) = field.headers.filename {
-                            let mut file_data = Vec::new();
-                            let _ = field.data.read_to_end(&mut file_data);
-                            
-                            // Tentukan folder simpan (pastikan foldernya sudah ada!)
-                            let upload_path = format!("./uploads/{}", filename);
-                            
-                            // Simpan file ke disk
-                            match std::fs::write(&upload_path, &file_data) {
-                                Ok(_) => {
-                                    response_text.push_str(&format!(
-                                        "<li><b>FILE SAVED:</b> {} ({} bytes) -> Saved to {}</li><br>",
-                                        filename, file_data.len(), upload_path
-                                    ));
-                                },
-                                Err(e) => {
-                                    response_text.push_str(&format!(
-                                        "<li><b>FILE ERROR:</b> Gagal simpan {} ({})</li><br>",
-                                        filename, e
-                                    ));
-                                }
-                            }
-                        } else {
-                            // Jika ini adalah TEXT FIELD biasa
-                            let mut text_value = String::new();
-                            let _ = field.data.read_to_string(&mut text_value);
-                            
-                            response_text.push_str(&format!(
-                                "<li><b>FIELD DETECTED:</b> {} = {}</li>",
-                                field_name, text_value
-                            ));
-                        }
-                    }
-                    
-                    response_text.push_str("</ul>");
-                    response_text.push_str(&format!("<p>Total Raw Body: {} bytes</p>", body_size));
-                    response_text
-                }
-            }
-            _ => {
-                "<h3>Menu Utama Backend Rust</h3>\
-                 <p>Pilih menu: <a href='?jenis=fibo'>Fibonacci</a> | \
-                 <a href='?jenis=prime'>Sieve Prime</a> | \
-                 <a href='?jenis=mandelbrot'>Mandelbrot</a> | \
-                 <a href='?jenis=upload'>Test Upload</a></p>".to_string()
-            }
-        };
+        // Generate 2048-bit Private Keys
+        let a_priv = rng.gen_biguint(2048);
+        let b_priv = rng.gen_biguint(2048);
+
+        let (a_pub, b_pub, a_shared, b_shared);
+
+        if mode_manual {
+            a_pub = mod_exp_manual(&g, &a_priv, &p);
+            b_pub = mod_exp_manual(&g, &b_priv, &p);
+            a_shared = mod_exp_manual(&b_pub, &a_priv, &p);
+            b_shared = mod_exp_manual(&a_pub, &b_priv, &p);
+        } else {
+            // Rust mod_pow sudah dioptimalkan (seperti gmp_powm)
+            a_pub = g_powm(&g, &a_priv, &p);
+            b_pub = g_powm(&g, &b_priv, &p);
+            a_shared = g_powm(&b_pub, &a_priv, &p);
+            b_shared = g_powm(&a_pub, &b_priv, &p);
+        }
 
         let duration = start.elapsed();
+        let is_match = a_shared == b_shared;
+
         let response = format!(
-            "Content-Type: text/html\r\n\r\n\
-            <html><head><title>Halmos Rust</title></head><body>\
-            <h1>Halmos Worker (Rust Edition)</h1>\
-            <p>Method: {} | URI: {}</p>\
-            <hr>\
-            {}\
-            <hr>\
-            <p>Waktu Eksekusi: {:.6} detik</p>\
-            </body></html>",
-            method, request.param("REQUEST_URI").unwrap_or_default(), html_output, duration.as_secs_f64()
+            "Content-Type: text/plain\r\n\r\n\
+             === Halmos DHE 2048-bit Rust Test ===\n\
+             Mode Used        : {}\n\
+             Computation Time : {:.4} Seconds\n\
+             Status           : {}\n\
+             ---------------------------------------\n\
+             Alice Pub : {}\n\
+             Bob Pub   : {}\n\
+             Shared Key: {}\n",
+            if mode_manual { "MANUAL" } else { "LIBRARY (Optimized)" },
+            duration.as_secs_f64(),
+            if is_match { "YES! MATCH" } else { "ERROR" },
+            format_hexa(&a_pub),
+            format_hexa(&b_pub),
+            format_hexa(&a_shared)
         );
 
-        let _ = request.stdout().write_all(response.as_bytes());
+        req.stdout().write_all(response.as_bytes()).unwrap();
     });
+}
+
+// Helper untuk library mod_pow
+fn g_powm(base: &BigUint, exp: &BigUint, m: &BigUint) -> BigUint {
+    base.modpow(exp, m)
 }
