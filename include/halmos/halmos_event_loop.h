@@ -8,6 +8,6 @@
 
 void start_event_loop();
 void run_event_loop();
-void stop_event_loop(); 
+void stop_event_loop(int sig); 
 
 #endif

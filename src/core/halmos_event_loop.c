@@ -64,14 +64,19 @@ void run_event_loop() {
                     int sock_client = accept(sock_server, (struct sockaddr *)&client_addr, &addr_len);
                     
                     if (sock_client < 0) {
-                        // Jika errno EAGAIN atau EWOULDBLOCK, artinya antrean tamu sudah habis
                         if (errno == EAGAIN || errno == EWOULDBLOCK) {
                             break; 
                         }
-                        // Jika interupsi signal, coba lagi
                         if (errno == EINTR) continue;
+
+                        // Tambahkan keterangan errno biar tidak menebak-nebak
+                        write_log_error("[ERROR] Accept failed: %s (Errno: %d)", strerror(errno), errno);
                         
-                        write_log_error("Accept failed");
+                        // Jika karena limit file descriptor (EMFILE), kita harus berhenti sebentar
+                        if (errno == EMFILE || errno == ENFILE) {
+                            // Kasih jeda 1ms biar kernel bisa bersih-bersih FD lama
+                            usleep(1000); 
+                        }
                         break;
                     }
 
@@ -110,7 +115,7 @@ void run_event_loop() {
                             close(sock_client); 
                         } else {
                             // Jika error lain (misal ENOMEM), baru kita catat
-                            perror("epoll_ctl: client_socket (critical)");
+                            write_log_error("epoll_ctl: client_socket (critical)");
                             close(sock_client);
                         }
                     }
@@ -118,6 +123,13 @@ void run_event_loop() {
             } else {
                 // --- BAGIAN YANG DIUBAH (RAMPING & AMAN) ---
                 int client_fd = events[i].data.fd;
+
+                // CEK ERROR: Jika socket bermasalah, jangan masukkan ke antrean
+                if ((events[i].events & EPOLLERR) || (events[i].events & EPOLLHUP)) {
+                    write_log_error("[DEBUG] Closing FD %d due to epoll error/hup", client_fd);
+                    close(client_fd);
+                    continue;
+                }
 
                 // 1. Masukkan ke antrean TANPA memanipulasi epoll di sini.
                 // Karena kita pakai EPOLLONESHOT, kernel otomatis menonaktifkan
