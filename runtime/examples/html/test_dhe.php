@@ -2,10 +2,10 @@
 /*
 sudo apt update
 sudo apt install php-gmp
-Cek versi PHP dulu kalau gak yakin (misal 8.1 atau 8.2)
+Cek versi PHP dulu kalau gak yakin (misal 7.3)
 php -v
 Lalu restart service-nya
-sudo systemctl restart php8.x-f
+sudo systemctl restart php7.3-f
 */
 
 function mod_exp_manual($base, $exp, $mod) {

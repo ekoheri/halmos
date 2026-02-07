@@ -1,8 +1,7 @@
 #include "halmos_global.h"
 #include "halmos_config.h"
-#include "halmos_adaptive.h"
-#include "halmos_event_loop.h"
 #include "halmos_queue.h"
+#include "halmos_event_loop.h"
 #include "halmos_thread_pool.h"
 #include "halmos_log.h"
 #include "halmos_config.h"
@@ -13,6 +12,8 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <sys/epoll.h>
+
+Config config;
 
 // Fungsi biar kalau di-CTRL+C, server mati dengan sopan
 void setup_signals() {
@@ -26,8 +27,6 @@ int main() {
 
     load_config("/etc/halmos/halmos.conf");
 
-    halmos_adaptive_init_all();
-
     // 2. Aktifkan Logger Asynchronous (Thread Terpisah)
     start_thread_logger();
 
@@ -35,7 +34,7 @@ int main() {
     // Menggunakan batas antrean dari config
     start_thread_worker();
 
-    if(config.rate_limit_enabled == true) {
+    if(config.rate_limit_enabled) {
         start_janitor();    
     }
     
@@ -48,18 +47,16 @@ int main() {
     // Memanggil halmos_server_init yang sudah kita integrasikan dengan network.c
     start_event_loop();
 
-    
+    /*
     printf("==================================================\n");
     printf("  HALMOS SAVAGE SERVER IS RUNNING\n");
     printf("  Address : %s:%d\n", config.server_name, config.server_port);
     printf("  Root    : %s\n", config.document_root);
     printf("==================================================\n");
-    
+    */
    
     // 7. RUN! Masuk ke Loop Utama (Resepsionis Epoll)
     run_event_loop();
 
-    stop_thread_logger();
-    
     return 0;
 }

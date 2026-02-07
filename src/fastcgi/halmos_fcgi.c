@@ -154,6 +154,16 @@ int halmos_fcgi_request_stream(
     }
     FCGI_ADD_PARAM(gather_buf, "REMOTE_ADDR",     remote_addr, p_offset);
     
+    // --- TAMBAHKAN INI UNTUK PYTHON/WSGI ---
+    FCGI_ADD_PARAM(gather_buf, "SERVER_NAME",     config.server_name, p_offset);
+    
+    char s_port_str[10];
+    snprintf(s_port_str, sizeof(s_port_str), "%d", config.server_port);
+    FCGI_ADD_PARAM(gather_buf, "SERVER_PORT",     s_port_str, p_offset);
+    
+    FCGI_ADD_PARAM(gather_buf, "SERVER_PROTOCOL", "HTTP/1.1", p_offset);
+    FCGI_ADD_PARAM(gather_buf, "GATEWAY_INTERFACE", "CGI/1.1", p_offset);
+    
     char cl_str[20];
     if (content_length > 0) {
         snprintf(cl_str, sizeof(cl_str), "%zu", content_length);
@@ -439,98 +449,107 @@ int halmos_fcgi_conn_acquire(const char *target, int port) {
     bool is_unix = (port == 0 || port == -1); 
     pthread_mutex_lock(&fcgi_pool.lock);
 
-    // 1. CARI KONEKSI YANG COCOK DI POOL (REUSE)
+    int active_for_this_backend = 0;
+    int target_quota = 16; // Default safety net
+
+    // 1. Tentukan kuota secara dinamis (Sesuai Config Lo)
+    if (is_unix) {
+        if (config.php_server && strcmp(target, config.php_server) == 0) target_quota = fcgi_pool.php_quota;
+        else if (config.rust_server && strcmp(target, config.rust_server) == 0) target_quota = fcgi_pool.rust_quota;
+        else if (config.python_server && strcmp(target, config.python_server) == 0) target_quota = fcgi_pool.python_quota;
+    } else {
+        if (port == config.php_port) target_quota = fcgi_pool.php_quota;
+        else if (port == config.rust_port) target_quota = fcgi_pool.rust_quota;
+        else if (port == config.python_port) target_quota = fcgi_pool.python_quota;
+    }
+
+    // 2. CARI REUSE & HITUNG PEMAKAIAN
+    int reuse_idx = -1;
     for (int i = 0; i < fcgi_pool.pool_size; i++) {
-        if (fcgi_pool.connections[i].sockfd != -1 && !fcgi_pool.connections[i].in_use) {
-            
-            bool match = false;
-            if (is_unix && fcgi_pool.connections[i].is_unix) {
-                match = (strcmp(fcgi_pool.connections[i].target_path, target) == 0);
-            } else if (!is_unix && !fcgi_pool.connections[i].is_unix) {
-                match = (fcgi_pool.connections[i].target_port == port);
+        if (fcgi_pool.connections[i].sockfd != -1) {
+            bool belongs = false;
+            if (is_unix) {
+                belongs = (fcgi_pool.connections[i].is_unix && strcmp(fcgi_pool.connections[i].target_path, target) == 0);
+            } else {
+                // Balik ke logika lo yang asli: Cukup cek Port
+                belongs = (!fcgi_pool.connections[i].is_unix && fcgi_pool.connections[i].target_port == port);
             }
 
-            if (match) {
-                // Verifikasi apakah socket masih hidup (Zombie Check)
-                int error = 0;
-                socklen_t len = sizeof(error);
-                if (getsockopt(fcgi_pool.connections[i].sockfd, SOL_SOCKET, SO_ERROR, &error, &len) == 0 && error == 0) {
+            if (belongs) {
+                if (fcgi_pool.connections[i].in_use) active_for_this_backend++;
+                else if (reuse_idx == -1) reuse_idx = i;
+            }
+        }
+    }
+
+    // 3. LOGIKA REUSE (Sama seperti asli lo)
+    if (reuse_idx != -1) {
+        int error = 0;
+        socklen_t len = sizeof(error);
+        if (getsockopt(fcgi_pool.connections[reuse_idx].sockfd, SOL_SOCKET, SO_ERROR, &error, &len) == 0 && error == 0) {
+            fcgi_pool.connections[reuse_idx].in_use = true;
+            pthread_mutex_unlock(&fcgi_pool.lock);
+            return fcgi_pool.connections[reuse_idx].sockfd;
+        } else {
+            close(fcgi_pool.connections[reuse_idx].sockfd);
+            fcgi_pool.connections[reuse_idx].sockfd = -1;
+        }
+    }
+    pthread_mutex_unlock(&fcgi_pool.lock);
+
+    // 4. JIKA HARUS CREATE BARU
+    bool can_store_in_pool = (active_for_this_backend < target_quota);
+    int new_sock = -1;
+
+    if (is_unix) {
+        new_sock = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (new_sock >= 0) {
+            struct sockaddr_un addr;
+            memset(&addr, 0, sizeof(addr));
+            addr.sun_family = AF_UNIX;
+            strncpy(addr.sun_path, target, sizeof(addr.sun_path) - 1);
+            if (connect(new_sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+                close(new_sock);
+                new_sock = -1;
+            }
+        }
+    } else {
+        new_sock = socket(AF_INET, SOCK_STREAM, 0);
+        if (new_sock >= 0) {
+            struct timeval timeout = {2, 0};
+            setsockopt(new_sock, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+            struct sockaddr_in addr;
+            memset(&addr, 0, sizeof(addr));
+            addr.sin_family = AF_INET;
+            addr.sin_port = htons(port);
+            inet_pton(AF_INET, target, &addr.sin_addr);
+            if (connect(new_sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+                close(new_sock);
+                new_sock = -1;
+            }
+        }
+    }
+    
+    // 5. SIMPAN KE POOL (Hanya jika kuota belum penuh)
+    if (new_sock != -1) {
+        pthread_mutex_lock(&fcgi_pool.lock);
+        if (can_store_in_pool) {
+            for (int i = 0; i < fcgi_pool.pool_size; i++) {
+                if (fcgi_pool.connections[i].sockfd == -1) {
+                    fcgi_pool.connections[i].sockfd = new_sock;
                     fcgi_pool.connections[i].in_use = true;
+                    fcgi_pool.connections[i].is_unix = is_unix;
+                    if (is_unix) strncpy(fcgi_pool.connections[i].target_path, target, 107);
+                    else fcgi_pool.connections[i].target_port = port;
+                    
                     pthread_mutex_unlock(&fcgi_pool.lock);
-                    return fcgi_pool.connections[i].sockfd;
-                } else {
-                    // Socket sudah mati, bersihkan
-                    close(fcgi_pool.connections[i].sockfd);
-                    fcgi_pool.connections[i].sockfd = -1;
+                    return new_sock;
                 }
             }
         }
-    }
-    pthread_mutex_unlock(&fcgi_pool.lock);
-
-    // 2. BUAT KONEKSI BARU JIKA TIDAK ADA YANG COCOK
-    int new_sock;
-    if (is_unix) {
-        // --- JALUR UNIX DOMAIN SOCKET ---
-        new_sock = socket(AF_UNIX, SOCK_STREAM, 0);
-        if (new_sock < 0) return -1;
-
-        struct sockaddr_un addr;
-        memset(&addr, 0, sizeof(addr));
-        addr.sun_family = AF_UNIX;
-        strncpy(addr.sun_path, target, sizeof(addr.sun_path) - 1);
-
-        if (connect(new_sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-            close(new_sock);
-            write_log_error("[ERROR halmos_fcgi.c] Failed to connect to Unix socket : %s", target);
-            return -1;
-        }
-    } else {
-        // --- JALUR TCP/IP ---
-        new_sock = socket(AF_INET, SOCK_STREAM, 0);
-        if (new_sock < 0) return -1;
-
-        // Set Timeout agar tidak hang
-        struct timeval timeout = {2, 0};
-        setsockopt(new_sock, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
-
-        struct sockaddr_in addr;
-        memset(&addr, 0, sizeof(addr));
-        addr.sin_family = AF_INET;
-        addr.sin_port = htons(port);
-        inet_pton(AF_INET, target, &addr.sin_addr);
-
-        if (connect(new_sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-            close(new_sock);
-            //write_log("[ERROR] Gagal konek ke TCP Backend: %s:%d", target, port);
-            //fprintf(stderr, "\033[1;31m[FCGI_ERROR]\033[0m Failed to connect to PHP-FPM (%s:%d): %s\n", 
-            //    target, port, strerror(errno));
-            write_log_error("[ERROR halmos_fcgi.c] Failed to connect to Backend FastCGI (%s:%d): %s", 
-                target, port, strerror(errno));
-            return -1;
-        }
+        pthread_mutex_unlock(&fcgi_pool.lock);
     }
 
-    // 3. SIMPAN KE SLOT KOSONG DI POOL
-    pthread_mutex_lock(&fcgi_pool.lock);
-    //int assigned_slot = -1;
-    for (int i = 0; i < fcgi_pool.pool_size; i++) {
-        if (fcgi_pool.connections[i].sockfd == -1) {
-            fcgi_pool.connections[i].sockfd = new_sock;
-            fcgi_pool.connections[i].in_use = true;
-            fcgi_pool.connections[i].is_unix = is_unix;
-            if (is_unix) {
-                strncpy(fcgi_pool.connections[i].target_path, target, 107);
-            } else {
-                fcgi_pool.connections[i].target_port = port;
-            }
-            //assigned_slot = i;
-            break;
-        }
-    }
-    pthread_mutex_unlock(&fcgi_pool.lock);
-
-    // Jika pool penuh, socket tetap dipakai tapi tidak disimpan (langsung return)
     return new_sock;
 }
 
@@ -540,14 +559,31 @@ void halmos_fcgi_conn_release(int sockfd) {
     pthread_mutex_lock(&fcgi_pool.lock);
     for (int i = 0; i < fcgi_pool.pool_size; i++) {
         if (fcgi_pool.connections[i].sockfd == sockfd) {
-            fcgi_pool.connections[i].in_use = false;
-            pthread_mutex_unlock(&fcgi_pool.lock);
-            return;
+            
+            // --- VALIDASI KESEHATAN SOCKET ---
+            // Cek apakah socket masih OK (tidak diputus oleh backend)
+            int error = 0;
+            socklen_t len = sizeof(error);
+            int retval = getsockopt(sockfd, SOL_SOCKET, SO_ERROR, &error, &len);
+            
+            if (retval == 0 && error == 0) {
+                // Socket sehat, boleh balik ke pool
+                fcgi_pool.connections[i].in_use = false;
+                pthread_mutex_unlock(&fcgi_pool.lock);
+                return;
+            } else {
+                // Socket sudah mati/error, buang dari pool
+                fcgi_pool.connections[i].sockfd = -1;
+                fcgi_pool.connections[i].in_use = false;
+                pthread_mutex_unlock(&fcgi_pool.lock);
+                close(sockfd);
+                return;
+            }
         }
     }
     pthread_mutex_unlock(&fcgi_pool.lock);
 
-    // Jika socket tidak ditemukan di pool (misal pool penuh tadi), tutup saja
+    // Jika socket tidak ditemukan di pool (overflow socket), tutup paksa
     close(sockfd);
 }
 

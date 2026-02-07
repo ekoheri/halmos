@@ -1,8 +1,11 @@
 [package]
-name = "halmos-rust-backend"
+name = "halmos_dhe_test"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
 [dependencies]
-fastcgi = "1.0.0"
-multipart = "0.18.0"
+# Kita pakai versi 1.0.0 yang stabil saja
+fastcgi = "1.0.0" 
+num-bigint = { version = "0.4", features = ["rand"] }
+num-traits = "0.2"
+rand = "0.8"
