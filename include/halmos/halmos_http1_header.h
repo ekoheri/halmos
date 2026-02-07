@@ -29,24 +29,28 @@ typedef struct {
 // Struktur RequestHeader ini sangat spesifik HTTP/1 (berbasis teks/string)
 typedef struct {
     char client_ip[45];
-    char method[16];
-    char *directory;
+    char method[16];        // Statis, aman
+    char http_version[16];   // Statis, aman
+    
+    // POINTER ZERO-COPY (Hanya menunjuk ke buffer di manager)
     char *uri;
     char *host;
-    char http_version[16];
     char *query_string;
-    char *path_info;
-    void *body_data;
-    size_t body_length;
     char *content_type;
+    char *cookie_data;
+    
+    // BODY ZERO-COPY
+    void *body_data;        // Menunjuk langsung ke offset di buffer manager
+    size_t body_length;
     int content_length;
+    
     bool is_keep_alive; 
     bool is_upgrade;
     bool is_valid;      
-    WebSocketInfo ws; // Modularitas terkumpul di sini
-    MultipartPart *parts;
+    
+    WebSocketInfo ws;
+    MultipartPart *parts;   // Array-nya tetap malloc, tapi isinya zero-copy
     int parts_count;
-    char *cookie_data;
 } RequestHeader;
 
 // Struktur Respon Akhir yang akan dikirim ke client

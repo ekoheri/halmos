@@ -306,22 +306,15 @@ int halmos_fcgi_splice_response(int fpm_fd, int sock_client, RequestHeader *req)
                     // HEADER KETEMU! Kirim status line Halmos + Header PHP
                     // --- LOGIKA REDIRECT & STATUS ---
                     int status_code = 200;
-                    const char *status_msg = "OK";
-
                     char *s_ptr = strstr(header_buffer, "Status:");
                     if (s_ptr) {
-                        sscanf(s_ptr, "Status: %d", &status_code);
-                        // Mapping sederhana status code
-                        if (status_code == 302) status_msg = "Found";
-                        else if (status_code == 301) status_msg = "Moved Permanently";
-                        else if (status_code == 404) status_msg = "Not Found";
-                        else if (status_code == 303) status_msg = "See Other";
-                        else if (status_code >= 500) status_msg = "Internal Server Error";
-                    } 
-                    else if (strstr(header_buffer, "Location:")) {
-                        status_code = 302;
-                        status_msg = "Found";
+                        status_code = atoi(s_ptr + 8); // Langsung ambil angka status
+                    } else if (strstr(header_buffer, "Location:")) {
+                        status_code = 302; // Otomatis jadi redirect kalau ada header Location
                     }
+
+                    // Ambil pesan status dari fungsi helper
+                    const char *status_msg = get_status_text(status_code);
 
                     // Kirim Status Line Halmos
                     char response_start[512];
@@ -333,7 +326,7 @@ int halmos_fcgi_splice_response(int fpm_fd, int sock_client, RequestHeader *req)
                     
                     send(sock_client, response_start, start_len, 0);
 
-                    // Kirim header asli dari PHP
+                    // Kirim sisa header dari PHP (setelah Status Line kita sendiri)
                     send(sock_client, header_buffer, header_pos, 0);
                     header_sent = 1;
 
@@ -376,19 +369,21 @@ int halmos_fcgi_splice_response(int fpm_fd, int sock_client, RequestHeader *req)
             */
             success = 1;
             int total_junk = clen + plen;
-            if (total_junk > 0) {
-                // Gunakan buffer yang cukup besar atau loop sampai habis
-                char junk[256]; 
-                int to_read = ((size_t)total_junk > sizeof(junk)) ? (int)sizeof(junk) : total_junk;
-                recv(fpm_fd, junk, to_read, MSG_WAITALL);
+            
+            // Perbaikan: Deklarasikan junk_buf di sini
+            char junk_buf[256]; 
+            while (total_junk > 0) {
+                int to_read = (total_junk > 256) ? 256 : total_junk;
+                // Pastikan variabelnya sinkron: junk_buf
+                recv(fpm_fd, junk_buf, to_read, MSG_WAITALL);
+                total_junk -= to_read;
             }
-            // SOKET BERSIH! Sekarang aman buat dibalikin ke Pool
             break;
         }
 
         if (plen > 0) {
-            unsigned char dummy[8];
-            recv(fpm_fd, dummy, plen, MSG_WAITALL);
+            unsigned char dummy_padding[256];
+            recv(fpm_fd, dummy_padding, plen, MSG_WAITALL);
         }
     }
 

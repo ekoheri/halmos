@@ -83,9 +83,16 @@ char *get_time_string() {
 // Fungsi pembantu: Cek apakah string berakhir dengan suffix tertentu
 // Lebih kencang dan akurat daripada strstr()
 int has_extension(const char *uri, const char *ext) {
+    // 1. Pengaman: Kalau ext NULL atau cuma string kosong "", jangan dianggap cocok
+    if (!uri || !ext || ext[0] == '\0') return 0;
+
     size_t len_uri = strlen(uri);
     size_t len_ext = strlen(ext);
+
+    // 2. Kalau ekstensi lebih panjang dari URI (misal uri "a.py" tapi ext ".python_ext")
     if (len_uri < len_ext) return 0;
+
+    // 3. Bandingkan dari belakang
     return (strcasecmp(uri + len_uri - len_ext, ext) == 0);
 }
 
@@ -168,4 +175,32 @@ const char *get_mime_type(const char *file) {
     }
 
     return "application/octet-stream"; // Default buat file gak dikenal
+}
+
+const char* get_status_text(int code) {
+    switch (code) {
+        case 100: return "Continue";
+        case 101: return "Switching Protocols";
+        case 200: return "OK";
+        case 201: return "Created";         // Penting untuk PUT
+        case 202: return "Accepted";
+        case 204: return "No Content";      // Penting untuk DELETE
+        case 206: return "Partial Content";
+        case 301: return "Moved Permanently";
+        case 302: return "Found";
+        case 303: return "See Other";
+        case 304: return "Not Modified";
+        case 400: return "Bad Request";
+        case 401: return "Unauthorized";
+        case 403: return "Forbidden";
+        case 404: return "Not Found";
+        case 405: return "Method Not Allowed";
+        case 413: return "Payload Too Large";
+        case 500: return "Internal Server Error";
+        case 501: return "Not Implemented";
+        case 502: return "Bad Gateway";
+        case 503: return "Service Unavailable";
+        case 504: return "Gateway Timeout";
+        default:  return "Unknown Status";
+    }
 }

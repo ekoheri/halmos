@@ -23,9 +23,8 @@ void *worker_thread_pool(void *arg){
         int sock_client = dequeue(&global_queue, &arrival);
 
         if (sock_client < 0) continue; // Pastikan socket valid
-
+        
         // 2. Proses Request (Bisa HTML atau PHP)
-
         // Panggil bridge_dispatch dari http_bridge 
         // dan cek kembaliannya
         if (bridge_dispatch(sock_client) == 1) {

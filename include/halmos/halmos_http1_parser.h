@@ -5,7 +5,7 @@
 
 // Prototipe Fungsi khusus HTTP/1
 // Ini di implementasikan di http1_parser.c
-bool parse_http_request(const char *buffer, size_t size, RequestHeader *req);
+bool parse_http_request(char *raw_data, size_t total_received, RequestHeader *req);
 void free_request_header(RequestHeader *req);
 
 //pindah ke manager

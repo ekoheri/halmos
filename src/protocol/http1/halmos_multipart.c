@@ -9,100 +9,96 @@
 #include "halmos_http_utils.h"
 #include "halmos_log.h"
 
-/**********************************************
- * Ini hanya fungsi cadangan saja untuk menangani upload file besar
- * Di dunia pemrograman nyata, fungsi ini nyaris tidak digunakan
- * karena yang menangani multipart biasanya adalah backend (PHP/Rust)
- * Hanya jika diperlukan, maka fungsi ini disediakan
-***********************************************/
 void parse_multipart_body(RequestHeader *req) {
     if (!req->content_type || !req->body_data || req->body_length == 0) return;
 
-    // 1. Ekstrak Boundary dari Content-Type
+    // 1. Ekstrak Boundary
     char *boundary_ptr = strstr(req->content_type, "boundary=");
     if (!boundary_ptr) return;
     
     char boundary[256];
-    snprintf(boundary, sizeof(boundary), "--%s", boundary_ptr + 9);
-    size_t boundary_len = strlen(boundary);
+    int b_len = snprintf(boundary, sizeof(boundary), "--%s", boundary_ptr + 9);
 
     char *current_pos = (char *)req->body_data;
     size_t remaining_len = req->body_length;
 
-    // Alokasi awal untuk 10 parts (bisa di-realloc jika kurang)
     req->parts = malloc(sizeof(MultipartPart) * 10);
     req->parts_count = 0;
 
-    while (remaining_len > boundary_len) {
-        // Cari posisi boundary
-        char *part_start = memmem(current_pos, remaining_len, boundary, boundary_len);
+    while (remaining_len > (size_t)b_len) {
+        char *part_start = memmem(current_pos, remaining_len, boundary, b_len);
         if (!part_start) break;
 
-        // Header part dimulai setelah boundary + \r\n
-        char *header_start = part_start + boundary_len + 2;
-        
-        // Cari akhir dari header part (\r\n\r\n)
-        char *header_end = memmem(header_start, remaining_len - (header_start - (char*)req->body_data), "\r\n\r\n", 4);
-        if (!header_end) break;
-
-        // --- INI BAGIAN BARU (Taruh tepat di sini) ---
-        // Cek apakah laci sudah penuh (0-9 sudah terisi, sekarang mau isi yang ke-10)
-        if (req->parts_count >= 10 && req->parts_count % 10 == 0) {
-            size_t new_size = sizeof(MultipartPart) * (req->parts_count + 10);
-            MultipartPart *temp = realloc(req->parts, new_size);
-            if (!temp) {
-                //write_log("Security: Gagal menambah kapasitas Multipart (Out of Memory)");
-                break; 
+        // Cek apakah array parts sudah penuh sebelum memproses part baru
+        if (req->parts_count > 0 && req->parts_count % 10 == 0) {
+            MultipartPart *tmp = realloc(req->parts, sizeof(MultipartPart) * (req->parts_count + 10));
+            if (!tmp) {
+                // Jika RAM penuh, kita berhenti parkir part baru tapi 
+                // data yang sudah masuk sebelumnya tidak hilang (tidak leak).
+                write_log("Error: Gagal realloc memory untuk multipart parts.");
+                return; 
             }
-            req->parts = temp;
+            req->parts = tmp;
         }
-        // --------------------------------------------
+
+        char *header_start = part_start + b_len + 2; 
+        char *header_end = memmem(header_start, remaining_len - (header_start - current_pos), "\r\n\r\n", 4);
+        if (!header_end) break;
 
         MultipartPart *p = &req->parts[req->parts_count];
         memset(p, 0, sizeof(MultipartPart));
 
-        // 2. Ekstrak 'name' dan 'filename' dari header part
-        char *h_buf = strndup(header_start, header_end - header_start);
-        char *n_ptr = strstr(h_buf, "name=\"");
-        if (n_ptr) {
-            char *n_end = strchr(n_ptr + 6, '\"');
-            if (n_end) p->name = strndup(n_ptr + 6, n_end - (n_ptr + 6));
-        }
-        char *f_ptr = strstr(h_buf, "filename=\"");
-        if (f_ptr) {
-            char *f_end = strchr(f_ptr + 10, '\"');
-            if (f_end) p->filename = strndup(f_ptr + 10, f_end - (f_ptr + 10));
-        }
-        free(h_buf);
-
-        // 3. Tentukan letak DATA
-        char *data_start = header_end + 4;
+        // --- TEKNIK RESTORE AGAR TIDAK MERUSAK BUFFER FASTCGI ---
         
-        // Cari boundary berikutnya untuk menentukan akhir data ini
-        char *next_boundary = memmem(data_start, remaining_len - (data_start - (char*)req->body_data), boundary, boundary_len);
+        // Simpan karakter asli di header_end (\r)
+        char orig_header_end = *header_end;
+        *header_end = '\0'; 
+
+        // Parsing Name
+        char *n_ptr = strstr(header_start, "name=\"");
+        if (n_ptr) {
+            char *val_start = n_ptr + 6;
+            char *n_end = strchr(val_start, '\"');
+            if (n_end) {
+                // Pinjam buffer: suntik NULL, log/copy, lalu kembalikan
+                char orig_n = *n_end;
+                *n_end = '\0';
+                p->name = strdup(val_start); // Harus di-copy karena buffer asli akan dikembalikan
+                *n_end = orig_n;
+            }
+        }
+
+        // Parsing Filename
+        char *f_ptr = strstr(header_start, "filename=\"");
+        if (f_ptr) {
+            char *val_start = f_ptr + 10;
+            char *f_end = strchr(val_start, '\"');
+            if (f_end) {
+                char orig_f = *f_end;
+                *f_end = '\0';
+                p->filename = strdup(val_start); // Di-copy agar tetap aman di struct lo
+                *f_end = orig_f;
+            }
+        }
+
+        // Balikkan karakter asli di header_end
+        *header_end = orig_header_end;
+
+        // 3. Tentukan Data (Tetap Zero-Copy p->data menunjuk ke buffer asli)
+        p->data = header_end + 4;
+        
+        char *next_boundary = memmem(p->data, req->body_length - ((char*)p->data - (char*)req->body_data), boundary, b_len);
         
         if (next_boundary) {
-            // data_len adalah jarak antara data_start dan boundary berikutnya (dikurangi \r\n)
-            // 1. Hitung panjang data asli (tanpa \r\n sebelum boundary)
-            p->data_len = (size_t)((next_boundary - 2) - data_start);
-
-            // 2. KUNCI: Alokasikan data_len + 1 (untuk null terminator)
-            p->data = malloc(p->data_len + 1);
-            
-            if (p->data) {
-                // 3. Salin hanya data aslinya (sejauh data_len)
-                memcpy(p->data, data_start, p->data_len);
-                
-                // 4. Tambahkan terminator di byte terakhir yang kita pesan tadi
-                // Ini menjaga agar p->data tetap aman jika diakses sebagai string
-                ((char*)p->data)[p->data_len] = '\0';
+            //p->data_len = (size_t)((next_boundary - 2) - (char*)p->data);
+            if (next_boundary && (next_boundary >= (char*)p->data + 2)) {
+                p->data_len = (size_t)((next_boundary - 2) - (char*)p->data);
+            } else if (next_boundary) {
+                p->data_len = (size_t)(next_boundary - (char*)p->data);
             }
-            
-            req->parts_count++;
-            
-            // Geser posisi pembacaan
             remaining_len -= (next_boundary - current_pos);
             current_pos = next_boundary;
+            req->parts_count++;
         } else {
             break;
         }
@@ -112,10 +108,11 @@ void parse_multipart_body(RequestHeader *req) {
 void free_multipart_parts(MultipartPart *parts, int count) {
     if (!parts) return;
     for (int i = 0; i < count; i++) {
+        // Bebaskan hasil strdup (Milik sendiri)
         if (parts[i].name) free(parts[i].name);
         if (parts[i].filename) free(parts[i].filename);
-        if (parts[i].data) free(parts[i].data);
-        if (parts[i].content_type) free(parts[i].content_type);
+        
+        // parts[i].data JANGAN di-free karena itu Zero-Copy (Nempel buffer utama)
     }
-    free(parts);
+    free(parts); // Bebaskan array-nya
 }

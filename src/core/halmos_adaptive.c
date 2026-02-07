@@ -90,7 +90,7 @@ void halmos_adaptive_init_all(void) {
     int ram_based_max = (int)((free_mem_bytes * 0.10) / buf_size);
     
     // Tentukan Global Max Worker (Inilah yang bikin .html kencang)
-    // Angka 10.000 menganur sistem C10K Problem (Ten Thousand Concurrent Connections).
+    // Angka 10.000 menganut sistem C10K Problem (Ten Thousand Concurrent Connections).
     g_worker_max = (ram_based_max > 10000) ? 10000 : (ram_based_max < 64 ? 64 : ram_based_max);
     
     // --- STEP 2: Ambil Konfigurasi PHP ---

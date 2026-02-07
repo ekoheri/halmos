@@ -37,4 +37,6 @@ char *sanitize_path(const char *root, const char *uri);
 
 const char *get_mime_type(const char *file);
 
+const char* get_status_text(int code);
+
 #endif

@@ -125,9 +125,11 @@ void process_request_routing(int sock_client, RequestHeader *req) {
             // Jika ada index.html, update URI dan kirim sebagai static
             strcat(req->uri, (req->uri[strlen(req->uri)-1] == '/' ? "index.html" : "/index.html"));
             static_response(sock_client, req);
+            return;
         } else {
             // Jika tidak ada index, baru tampilkan Directory Listing
             send_directory_listing(sock_client, full_path, req->uri);
+            return;
         }
     } else {
         // 3. JALUR TERAKHIR: Kirim sebagai file statis biasa
