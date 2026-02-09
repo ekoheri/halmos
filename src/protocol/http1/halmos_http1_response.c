@@ -73,7 +73,6 @@ void send_mem_response(int client_fd, int status_code, const char *status_text,
 }
 
 void process_request_routing(int sock_client, RequestHeader *req) {
-    // 1. CEK: Apakah ini script dinamis (FastCGI)?
     const char *target_ip = NULL;
     int target_port = 0;
     if (has_extension(req->uri, ".php")) {
@@ -123,8 +122,19 @@ void process_request_routing(int sock_client, RequestHeader *req) {
         
         if (access(index_path, F_OK) == 0) {
             // Jika ada index.html, update URI dan kirim sebagai static
-            strcat(req->uri, (req->uri[strlen(req->uri)-1] == '/' ? "index.html" : "/index.html"));
+            // FIX BUG 5: Jangan pakai strcat(req->uri, ...) karena rawan overflow
+            char tmp_uri[1024];
+            snprintf(tmp_uri, sizeof(tmp_uri), "%s%sindex.html", req->uri, 
+                     (req->uri[strlen(req->uri)-1] == '/' ? "" : "/"));
+            
+            // Simpan pointer asli, pinjamkan pointer tmp_uri ke static_response
+            char *original_uri = req->uri;
+            req->uri = tmp_uri;
+            
             static_response(sock_client, req);
+            
+            // Kembalikan ke pointer asli agar tidak error saat free() di luar
+            req->uri = original_uri; 
             return;
         } else {
             // Jika tidak ada index, baru tampilkan Directory Listing
@@ -145,10 +155,7 @@ void static_response(int sock_client, RequestHeader *req) {
     const char *active_root = get_active_root(req->host);
     char *safe_path = sanitize_path(active_root, req->uri);
 
-    //printf("[DEBUG] Full Path: %s", safe_path);
-
     if (!safe_path) {
-        //printf("[DEBUG] Error Stat: %s (File mungkin tidak ada)\n", safe_file_path);
         send_mem_response(sock_client, 404, "Not Found", "<h1>404 Not Found</h1>", req->is_keep_alive);
         return;
     }
@@ -156,109 +163,79 @@ void static_response(int sock_client, RequestHeader *req) {
     struct stat st;
     if (stat(safe_path, &st) != 0 || !S_ISREG(st.st_mode)) {
         send_mem_response(sock_client, 404, "Not Found", "<h1>404 Not Found</h1>", req->is_keep_alive);
-        free(safe_path); return;
+        free(safe_path); 
+        return;
     }
 
     int fd = open(safe_path, O_RDONLY);
     if (fd != -1) {
+        // Optimasi Socket
         int state = 1;
-        // Paksa paket langsung keluar (NODELAY) dan minta ACK cepat (QUICKACK)
         setsockopt(sock_client, IPPROTO_TCP, TCP_NODELAY, &state, sizeof(state));
-        setsockopt(sock_client, IPPROTO_TCP, TCP_QUICKACK, &state, sizeof(state));
 
         char header[1024];
         int h_len = snprintf(header, sizeof(header),
             "HTTP/1.1 200 OK\r\nContent-Type: %s\r\nContent-Length: %ld\r\n"
-            "Server: Halmos-Core\r\nConnection: %s\r\n\r\n",
+            "Server: Halmos-Savage\r\nConnection: %s\r\n"
+            "X-Content-Type-Options: nosniff\r\n\r\n",
             get_mime_type(req->uri), st.st_size, req->is_keep_alive ? "keep-alive" : "close");
         
-        //send(sock_client, header, h_len, 0);
         send(sock_client, header, h_len, MSG_NOSIGNAL);
-
-        write_log("[RESPONSE] 200 OK | Static: %s | Size: %ld bytes", req->uri, st.st_size);
 
         off_t offset = 0;
         size_t remaining = st.st_size;
         
         while (remaining > 0) {
             ssize_t sent = sendfile(sock_client, fd, &offset, remaining);
-            
-            if (sent > 0) {
-                remaining -= sent;
-            } else if (sent < 0) {
+            if (sent < 0) {
                 if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                    // C. GANTI: Poll cukup 10ms - 50ms saja. 
-                    // Kalau 100ms keburu di-abort sama AB kalau antrean numpuk.
                     struct pollfd pfd = { .fd = sock_client, .events = POLLOUT };
-                    if (poll(&pfd, 1, 5000) > 0) continue; 
+                    // FIX BUG 3: Turunkan ke 100ms
+                    if (poll(&pfd, 1, 100) > 0) continue; 
                     else break; 
-                } else if (errno == EINTR) {
-                    continue;
-                } else {
-                    break; 
-                }
-            } else {
-                break;
-            }
+                } else if (errno == EINTR) continue;
+                else break; 
+            } else if (sent == 0) break;
+            remaining -= (size_t)sent;
         }
-
-        // D. Cabut CORK: Paksa kernel kirim paket terakhir (Zero-Latency Finish)
-        // printf("[DEBUG] Total Body terkirim: %zu/%ld bytes\n", total_sent, st.st_size);
-        //state = 0;
-        //setsockopt(sock_client, IPPROTO_TCP, TCP_CORK, &state, sizeof(state));
-
         close(fd);
     }
     free(safe_path);
 }
 
-void dynamic_response(int sock_client, RequestHeader req_header) {
-    // 1. CEK: Apakah ini script dinamis (FastCGI)?
-    // 1. Tentukan Root-nya dulu!
-    const char *active_root = get_active_root(req_header.host);
-
-    // 2. Perbaikan URI (tetap seperti kodemu)
-    if (req_header.uri[0] != '/') {
-        char temp[1024];
-        snprintf(temp, sizeof(temp), "/%s", req_header.uri);
-        req_header.uri = strdup(temp);
-    }
-    
+void dynamic_response(int sock_client, RequestHeader *req) {
+    const char *active_root = get_active_root(req->host);
     char full_path[1024];
-    // PAKAI active_root, JANGAN config.document_root
-    if (active_root[strlen(active_root)-1] == '/' && req_header.uri[0] == '/') {
-        snprintf(full_path, sizeof(full_path), "%s%s", active_root, req_header.uri + 1);
-    } else {
-        snprintf(full_path, sizeof(full_path), "%s%s", active_root, req_header.uri);
-    }
 
-    // DEBUG sekarang jadi akurat
-    // printf("[DEBUG] URI: %s | Active Root: %s | Full Path: %s", req_header.uri, active_root, full_path);
+    // FIX BUG 4: Cek Truncation
+    int path_len = snprintf(full_path, sizeof(full_path), "%s%s", active_root, req->uri);
+    if (path_len >= (int)sizeof(full_path)) {
+        send_mem_response(sock_client, 414, "URI Too Long", "<h1>414 Request-URI Too Long</h1>", req->is_keep_alive);
+        return;
+    }
 
     struct stat st;
     if (stat(full_path, &st) == 0) {
         if (S_ISDIR(st.st_mode)) {
-            char index_path[1024+32];
-            // Standardisasi path index
-            if (full_path[strlen(full_path)-1] == '/') {
-                snprintf(index_path, sizeof(index_path), "%sindex.html", full_path);
-            } else {
-                snprintf(index_path, sizeof(index_path), "%s/index.html", full_path);
-            }
+            char index_path[1100];
+            snprintf(index_path, sizeof(index_path), "%s%sindex.html", full_path, 
+                     (full_path[strlen(full_path)-1] == '/' ? "" : "/"));
             
             if (access(index_path, F_OK) == 0) {
-                // Tambahkan index.html ke URI asli buat dilempar ke static/dynamic handler
-                if (req_header.uri[strlen(req_header.uri)-1] == '/') {
-                    strcat(req_header.uri, "index.html");
-                } else {
-                    strcat(req_header.uri, "/index.html");
-                }
+                // Jangan strcat ke req->uri (Bisa leak/overflow)
+                // Langsung lempar ke static_response dengan URI baru sementara
+                char tmp_uri[1024];
+                snprintf(tmp_uri, sizeof(tmp_uri), "%s%sindex.html", req->uri, 
+                         (req->uri[strlen(req->uri)-1] == '/' ? "" : "/"));
+                
+                // Backup URI lama, ganti dengan yang ada index.html
+                char *old_uri = req->uri;
+                req->uri = tmp_uri;
+                static_response(sock_client, req);
+                req->uri = old_uri; // Kembalikan agar free() di luar tidak crash
+                return;
             } else {
-                send_directory_listing(sock_client, full_path, req_header.uri);
-                // Penting: Free sebelum return!
-                if (req_header.uri) free(req_header.uri);
-                if (req_header.query_string) free(req_header.query_string);
-                if (req_header.cookie_data) free(req_header.cookie_data);
+                send_directory_listing(sock_client, full_path, req->uri);
                 return;
             }
         }
@@ -268,6 +245,7 @@ void dynamic_response(int sock_client, RequestHeader req_header) {
 /*
 FUNGSI HELPER
 */
+
 void send_directory_listing(int sock_client, const char *path, const char *uri) {
     DIR *d = opendir(path);
     if (!d) {
@@ -275,15 +253,30 @@ void send_directory_listing(int sock_client, const char *path, const char *uri) 
         return;
     }
 
-    // Header HTML dengan sedikit CSS biar gak kaku banget
-    char *body = (char *)malloc(32768); // Alokasi agak besar buat folder rame
-    snprintf(body, 32768, 
-        "<html><head><title>Index of %s</title>"
-        "<style>body{font-family:sans-serif;} table{width:100%%; border-collapse:collapse;} "
-        "th,td{text-align:left; padding:8px;} tr:nth-child(even){background:#f2f2f2;}</style>"
-        "</head><body><h1>Index of %s</h1><hr><table>"
-        "<tr><th>Name</th><th>Last Modified</th><th>Size</th></tr>", uri, uri);
+    // 1. Kirim Header HTTP murni
+    char header[512];
+    int h_len = snprintf(header, sizeof(header),
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: text/html\r\n"
+        "Server: Halmos-Savage-Server\r\n"
+        "Connection: close\r\n\r\n");
+    send(sock_client, header, h_len, 0);
 
+    // 2. Kirim Pembuka HTML (Gunakan strlen untuk menghitung panjangnya)
+    const char *html_start = "<html><head><style>"
+                             "body{font-family:sans-serif; padding:20px;}"
+                             "table{width:100%%; border-collapse:collapse;}"
+                             "th,td{text-align:left; padding:8px; border-bottom:1px solid #ddd;}"
+                             "tr:hover{background-color:#f5f5f5;}"
+                             "</style></head><body>";
+    send(sock_client, html_start, strlen(html_start), 0);
+
+    char title[1024];
+    int t_len = snprintf(title, sizeof(title), "<h1>Index of %s</h1><hr><table>"
+                                               "<tr><th>Name</th><th>Size</th><th>Last Modified</th></tr>", uri);
+    send(sock_client, title, t_len, 0);
+
+    // 3. Loop Isi Folder (Streaming per baris)
     struct dirent *dir;
     while ((dir = readdir(d)) != NULL) {
         if (strcmp(dir->d_name, ".") == 0) continue;
@@ -291,31 +284,31 @@ void send_directory_listing(int sock_client, const char *path, const char *uri) 
         struct stat st;
         char full_item_path[1024];
         snprintf(full_item_path, sizeof(full_item_path), "%s/%s", path, dir->d_name);
-        stat(full_item_path, &st);
+        
+        char size_buf[32] = "-";
+        char time_buf[64] = "-";
 
-        // Format Waktu
-        char time_buf[64];
-        strftime(time_buf, sizeof(time_buf), "%d-%b-%Y %H:%M", localtime(&st.st_mtime));
-
-        // Format Ukuran
-        char size_buf[32];
-        if (S_ISDIR(st.st_mode)) strcpy(size_buf, "-");
-        else snprintf(size_buf, sizeof(size_buf), "%lld KB", (long long)st.st_size / 1024);
+        if (stat(full_item_path, &st) == 0) {
+            if (!S_ISDIR(st.st_mode)) {
+                snprintf(size_buf, sizeof(size_buf), "%lld KB", (long long)st.st_size / 1024);
+            }
+            strftime(time_buf, sizeof(time_buf), "%d-%b-%Y %H:%M", localtime(&st.st_mtime));
+        }
 
         char entry[2048];
-        snprintf(entry, sizeof(entry), 
+        int e_len = snprintf(entry, sizeof(entry), 
             "<tr><td><a href=\"%s%s%s\">%s%s</a></td><td>%s</td><td>%s</td></tr>",
             uri, (uri[strlen(uri)-1] == '/' ? "" : "/"), dir->d_name,
             dir->d_name, (S_ISDIR(st.st_mode) ? "/" : ""), 
-            time_buf, size_buf);
+            size_buf, time_buf);
         
-        strcat(body, entry);
+        send(sock_client, entry, e_len, 0);
     }
     closedir(d);
-    strcat(body, "</table><hr><i>Halmos Engine v1.0</i></body></html>");
-    
-    send_mem_response(sock_client, 200, "OK", body, false);
-    free(body);
+
+    // 4. Kirim Penutup
+    const char *html_end = "</table><hr><i>Halmos Savage Engine v2.1</i></body></html>";
+    send(sock_client, html_end, strlen(html_end), 0);
 }
 
 void send_http1_headers(int client_fd, const HalmosResponse *res, bool keep_alive) {
@@ -344,5 +337,5 @@ void send_http1_headers(int client_fd, const HalmosResponse *res, bool keep_aliv
         write_log("[ERROR http1_response.c] Headers too long, truncated!");
     }
 
-    send(client_fd, header, len, 0);
+    send(client_fd, header, len, MSG_NOSIGNAL);
 }

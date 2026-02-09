@@ -8,8 +8,8 @@ Group=root
 # Gunakan path absolut yang baru
 ExecStart=/usr/bin/halmos
 WorkingDirectory=/var/www/halmos
-Restart=always
-RestartSec=5s
+#Restart=always
+#RestartSec=5s
 KillSignal=SIGINT
 
 [Install]

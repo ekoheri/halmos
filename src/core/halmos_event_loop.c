@@ -141,6 +141,9 @@ void run_event_loop() {
                         char *res = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                         send(client_fd, res, strlen(res), 0);
                     }
+                    // Hapus dulu dari epoll sebelum close
+                    epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, NULL);
+                    shutdown(client_fd, SHUT_RDWR); // Pastikan browser tidak nunggu
                     close(client_fd);
                 }
             }

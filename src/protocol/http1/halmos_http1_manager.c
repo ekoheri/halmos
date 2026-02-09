@@ -43,7 +43,7 @@ int handle_http1_session(int sock_client) {
     while (keep_alive_status) {
         RequestHeader req_header;
         memset(&req_header, 0, sizeof(RequestHeader));
-        memset(buffer, 0, 1024); 
+        memset(buffer, 0, buf_size);
 
         // 2. Terima data awal
         ssize_t received = recv(sock_client, buffer, buf_size - 1, 0);
@@ -58,54 +58,48 @@ int handle_http1_session(int sock_client) {
 
         // 4. Tarik sisa Body (Proteksi data buntung)
         int body_error = 0;
-        if (req_header.content_length > 0 && req_header.body_length < (size_t)req_header.content_length) {
-            size_t total_needed = req_header.content_length - req_header.body_length;
+        if (req_header.content_length > 0) {
+            // Hitung berapa yang benar-benar kurang
+            ssize_t actual_body_received = (char*)(buffer + received) - (char*)req_header.body_data;
             
-            if (received + total_needed >= (size_t)buf_size) {
-                send_mem_response(sock_client, 413, "Payload Too Large", "<h1>413</h1>", false);
-                body_error = 1;
-            } else {
-                char *ptr = buffer + received;
-                int retry_count = 0;
-                while (total_needed > 0 && retry_count < 100) {
-                    ssize_t n = recv(sock_client, ptr, total_needed, 0);
-                    if (n > 0) {
-                        ptr += n;
-                        total_needed -= n;
-                        req_header.body_length += n; // Update panjang body
-                        retry_count = 0;
-                    } else if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-                        struct pollfd pfd = {.fd = sock_client, .events = POLLIN};
-                        if (poll(&pfd, 1, 100) <= 0) retry_count++;
-                        continue;
-                    } else {
-                        body_error = 1; // Koneksi putus tengah dalan
-                        break;
-                    }
-                }
+            if (actual_body_received < req_header.content_length) {
+                size_t total_needed = req_header.content_length - actual_body_received;
                 
-                // Kunci NULL di ujung body
-                // Setekah loop sisa body selesai:
-                if (ptr < buffer + buf_size) {
-                    *ptr = '\0'; // Kunci disini!
+                // Cek apakah buffer muat
+                if (received + total_needed >= (size_t)buf_size) {
+                    send_mem_response(sock_client, 413, "Payload Too Large", "<h1>413 Payload Too Large</h1>", false);
+                    body_error = 1;
                 } else {
-                    // Ini untuk jaga-jaga kalo datane pas banget dgn ukuran buffer
-                    buffer[buf_size - 1] = '\0'; 
+                    char *ptr = buffer + received;
+                    int retry_count = 0;
+                    while (total_needed > 0 && retry_count < 10) { // Turunkan retry ke 10 biar gak spam
+                        ssize_t n = recv(sock_client, ptr, total_needed, 0);
+                        if (n > 0) {
+                            ptr += n;
+                            total_needed -= n;
+                            received += n; // Update total received juga!
+                            retry_count = 0;
+                        } else if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                            struct pollfd pfd = {.fd = sock_client, .events = POLLIN};
+                            if (poll(&pfd, 1, 1000) <= 0) retry_count++; // Tunggu 1 detik
+                            continue;
+                        } else {
+                            body_error = 1;
+                            break;
+                        }
+                    }
+                    if (total_needed > 0) body_error = 1;
+                    
+                    // Pastikan NULL terminator di ujung total data
+                    buffer[received] = '\0';
+                    // Update final body_length
+                    req_header.body_length = (size_t)(ptr - (char*)req_header.body_data);
                 }
-
-                // Update body_length jadi total real yang ketrima
-                req_header.body_length = (size_t)(ptr - (char*)req_header.body_data);
-                // Kalo loop seleai tapi data masih kurang, berarti data buntung (Client nakal/lemot)
-                if (total_needed > 0) body_error = 1;
             }
         }
 
         // 5. Eksekusi nek ora ono error neng body
         if (!body_error) {
-            if (req_header.content_type && strstr(req_header.content_type, "multipart/form-data")) {
-                parse_multipart_body(&req_header);
-            }
-
             if (req_header.uri != NULL && strlen(req_header.uri) > 0) {
                 if (strstr(req_header.uri, "favicon.ico")) {
                     send_mem_response(sock_client, 404, "Not Found", "", false);

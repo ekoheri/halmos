@@ -23,6 +23,6 @@ void process_request_routing(int sock_client, RequestHeader *req);
 
 void static_response(int sock_client, RequestHeader *req);
 
-void dynamic_response(int sock_client, RequestHeader req_header);
+void dynamic_response(int sock_client, RequestHeader *req_header);
 
 #endif

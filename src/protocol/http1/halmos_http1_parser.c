@@ -33,78 +33,95 @@ static char* fast_trim(char *s) {
 }
 
 bool parse_http_request(char *raw_data, size_t total_received, RequestHeader *req) {
-    // 1. Cari batas Header (\r\n\r\n)
+    // 0. RESET: Bersihkan struct agar tidak ada sisa data dari request sebelumnya
+    memset(req, 0, sizeof(RequestHeader));
+
+    // 1. CARI BATAS HEADER (\r\n\r\n)
     char *header_end = strstr(raw_data, "\r\n\r\n");
     if (!header_end) return false;
 
-    // Suntik NULL sementara agar strtok_r tidak kebablasan ke body
-    *header_end = '\0'; 
+    char *line_start = raw_data;
+    char *line_end = strstr(line_start, "\r\n");
+    if (!line_end || line_end > header_end) return false;
 
-    char *saveptr_line;   // Pointer untuk iterasi baris (\r\n)
-    char *saveptr_word;   // Pointer untuk iterasi kata (spasi) di Request Line
+    // --- PARSE REQUEST LINE (METHOD URI VERSION) ---
+    char *m_end = strchr(line_start, ' ');
+    if (m_end && m_end < line_end) {
+        size_t m_len = m_end - line_start;
+        if (m_len < sizeof(req->method)) {
+            memcpy(req->method, line_start, m_len);
+            req->method[m_len] = '\0';
+        }
 
-    // 2. Parse Baris Pertama (Request Line)
-    char *line = strtok_r(raw_data, "\r\n", &saveptr_line);
-    if (line) {
-        // Pakai saveptr_word supaya tidak mengganggu saveptr_line
-        char *m = strtok_r(line, " ", &saveptr_word);
-        char *u = strtok_r(NULL, " ", &saveptr_word);
-        char *v = strtok_r(NULL, " ", &saveptr_word);
-
-        if (m && u) {
-            // Copy aman dengan paksa null-terminator
-            strncpy(req->method, m, sizeof(req->method) - 1);
-            req->method[sizeof(req->method) - 1] = '\0';
-
-            if (v) {
-                strncpy(req->http_version, v, sizeof(req->http_version) - 1);
-                req->http_version[sizeof(req->http_version) - 1] = '\0';
+        char *u_start = m_end + 1;
+        char *u_end = strchr(u_start, ' ');
+        if (u_end && u_end < line_end) {
+            // Parse Versi HTTP
+            char *v_start = u_end + 1;
+            size_t v_len = line_end - v_start;
+            if (v_len < sizeof(req->http_version)) {
+                memcpy(req->http_version, v_start, v_len);
+                req->http_version[v_len] = '\0';
             }
 
-            // Pisahkan Query String secara In-place
-            char *q = strchr(u, '?');
+            // Parse URI & Query String
+            *u_end = '\0'; 
+            req->uri = u_start;
+            char *q = strchr(u_start, '?');
             if (q) {
                 *q = '\0'; 
                 req->query_string = q + 1;
             } else {
                 req->query_string = ""; 
             }
-            
-            req->uri = u; 
             req->is_valid = true;
-
-            write_log("Request: Method=%s, Resource=%s, Version=%s", 
-                      req->method, req->uri, req->http_version);
         }
     }
 
-    // 3. Loop Parsing Header Fields
-    // Lanjutkan iterasi baris menggunakan saveptr_line yang tadi
-    while ((line = strtok_r(NULL, "\r\n", &saveptr_line)) != NULL) {
-        char *colon = strchr(line, ':');
-        if (!colon) continue;
+    // 2. PARSE HEADERS (Looping aman tanpa strtok_r)
+    char *p = line_end + 2; 
+    while (p < header_end) {
+        char *next_line = strstr(p, "\r\n");
+        if (!next_line || next_line > header_end) break;
+        
+        *next_line = '\0'; 
+        char *colon = strchr(p, ':');
+        if (colon) {
+            *colon = '\0';
+            char *key = p;
+            char *val = fast_trim(colon + 1);
 
-        *colon = '\0'; 
-        char *value = fast_trim(colon + 1);
-
-        if (strcasecmp(line, "Host") == 0) {
-            req->host = value;
-        } else if (strcasecmp(line, "Content-Type") == 0) {
-            req->content_type = value;
-        } else if (strcasecmp(line, "Content-Length") == 0) {
-            req->content_length = atoi(value);
-        } else if (strcasecmp(line, "Cookie") == 0) {
-            req->cookie_data = value;
-        } else if (strcasecmp(line, "Connection") == 0) {
-            req->is_keep_alive = (strcasestr(value, "keep-alive") != NULL);
+            if (strcasecmp(key, "Host") == 0) req->host = val;
+            else if (strcasecmp(key, "Content-Type") == 0) req->content_type = val;
+            else if (strcasecmp(key, "Content-Length") == 0) {
+                // FIX BUG: Gunakan strtol agar tidak overflow/negatif
+                req->content_length = strtol(val, NULL, 10);
+                if (req->content_length < 0) req->content_length = 0;
+            }
+            else if (strcasecmp(key, "Cookie") == 0) req->cookie_data = val;
+            else if (strcasecmp(key, "Connection") == 0) {
+                req->is_keep_alive = (strcasestr(val, "keep-alive") != NULL);
+            }
         }
+        p = next_line + 2;
     }
 
-    // 4. Set Body Data (Zero-Copy)
-    // Kembalikan alamat awal body
+    // 3. SET BODY DATA (Penting untuk POST)
     char *body_start = header_end + 4;
     req->body_data = body_start; 
-    req->body_length = total_received - (body_start - raw_data);
+    
+    // Proteksi perhitungan body_length
+    if (total_received >= (size_t)(body_start - raw_data)) {
+        req->body_length = total_received - (body_start - raw_data);
+    } else {
+        req->body_length = 0;
+    }
+
+    // 4. LOGIKA MULTIPART: Aktif kembali!
+    if (req->content_type && strstr(req->content_type, "multipart/form-data")) {
+        // Panggil fungsi multipart kamu di sini
+        parse_multipart_body(req); 
+    }
 
     return req->is_valid;
 }

@@ -11,6 +11,7 @@
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <errno.h>
+#include <sys/uio.h>
 
 #include "halmos_fcgi.h"
 #include "halmos_global.h"
@@ -141,6 +142,8 @@ int halmos_fcgi_request_stream(
     //printf("[FCGI_DEBUG] Script name (Fixed): %s\n", full_script_path);
 
     FCGI_ADD_PARAM(gather_buf, "SCRIPT_FILENAME", full_script_path, p_offset);
+    FCGI_ADD_PARAM(gather_buf, "SCRIPT_NAME",     req->uri, p_offset); // WAJIB ADA
+    FCGI_ADD_PARAM(gather_buf, "REQUEST_URI",     req->uri, p_offset); // WAJIB ADA
     FCGI_ADD_PARAM(gather_buf, "REQUEST_METHOD",  req->method, p_offset);
     FCGI_ADD_PARAM(gather_buf, "QUERY_STRING",    req->query_string ? req->query_string : "", p_offset);
     FCGI_ADD_PARAM(gather_buf, "HTTP_COOKIE",     req->cookie_data ? req->cookie_data : "", p_offset);
@@ -256,6 +259,13 @@ int halmos_fcgi_request_stream(
         // Kirim 502 Bad Gateway jika gagal
     }
     
+    // --- INI KUNCINYA ---
+    // Jika koneksi bukan keep-alive, atau setelah response selesai diproses:
+    if (req == NULL || !req->is_keep_alive) {
+        shutdown(sock_client, SHUT_RDWR);
+        close(sock_client);
+    }
+
     //res = halmos_fcgi_read_response(fpm_sock);
 
     halmos_fcgi_conn_release(fpm_sock);
@@ -276,7 +286,6 @@ int halmos_fcgi_splice_response(int fpm_fd, int sock_client, RequestHeader *req)
     unsigned char h_buf[8];
     int pipe_fds[2];
     if (pipe(pipe_fds) < 0) {
-        //fprintf(stderr, "[DEBUG] Pipe failed: %s\n", strerror(errno));
         write_log_error("[ERROR : halmos_fcgi.c] Pipe failed: %s", strerror(errno));
         return -1;
     }
@@ -293,7 +302,7 @@ int halmos_fcgi_splice_response(int fpm_fd, int sock_client, RequestHeader *req)
 
         if (h->type == FCGI_STDOUT && clen > 0) {
             if (!header_sent) {
-                // FASE 1: Ambil data ke RAM untuk parsing header HTTP
+                // Ambil data ke buffer untuk cari \r\n\r\n
                 int space = sizeof(header_buffer) - header_pos - 1;
                 int to_read = (clen < space) ? clen : space;
                 
@@ -303,54 +312,59 @@ int halmos_fcgi_splice_response(int fpm_fd, int sock_client, RequestHeader *req)
 
                 char *delim = strstr(header_buffer, "\r\n\r\n");
                 if (delim) {
-                    // HEADER KETEMU! Kirim status line Halmos + Header PHP
-                    // --- LOGIKA REDIRECT & STATUS ---
+                    // --- DETEKSI STATUS (WAJIB ADA BIAR REDIRECT JALAN) ---
                     int status_code = 200;
-                    char *s_ptr = strstr(header_buffer, "Status:");
+                    char *s_ptr = strcasestr(header_buffer, "Status:");
                     if (s_ptr) {
-                        status_code = atoi(s_ptr + 8); // Langsung ambil angka status
-                    } else if (strstr(header_buffer, "Location:")) {
-                        status_code = 302; // Otomatis jadi redirect kalau ada header Location
+                        status_code = atoi(s_ptr + 8);
+                    } else if (strcasestr(header_buffer, "Location:")) {
+                        status_code = 302; // Browser butuh ini untuk pindah halaman
                     }
-
-                    // Ambil pesan status dari fungsi helper
+                    // --- DETEKSI STATUS ---
                     const char *status_msg = get_status_text(status_code);
 
-                    // Kirim Status Line Halmos
+                    // 1. Kirim Status Line Halmos
                     char response_start[512];
                     int start_len = snprintf(response_start, sizeof(response_start),
                         "HTTP/1.1 %d %s\r\n"
                         "Server: Halmos-Core/2.1\r\n"
+                        "X-Content-Type-Options: nosniff\r\n" // <--- TAMBAHKAN INI
                         "Connection: %s\r\n",
                         status_code, status_msg, (req && req->is_keep_alive) ? "keep-alive" : "close");
                     
-                    send(sock_client, response_start, start_len, 0);
+                    // Gunakan MSG_MORE agar kernel menunggu header berikutnya sebelum dikirim
+                    send(sock_client, response_start, start_len, MSG_MORE | MSG_NOSIGNAL);
 
-                    // Kirim sisa header dari PHP (setelah Status Line kita sendiri)
-                    send(sock_client, header_buffer, header_pos, 0);
+                    // 2. Kirim Header murni dari PHP (sampai \r\n\r\n)
+                    int header_only_len = (delim - header_buffer) + 4; 
+                    send(sock_client, header_buffer, header_only_len, MSG_NOSIGNAL);
+                    
                     header_sent = 1;
 
-                    // Jika ada sisa body di paket yang sama, langsung splice
-                    int remain = clen - to_read;
-                    if (remain > 0) {
-                        splice(fpm_fd, NULL, pipe_fds[1], NULL, remain, SPLICE_F_MOVE | SPLICE_F_MORE);
-                        splice(pipe_fds[0], NULL, sock_client, NULL, remain, SPLICE_F_MOVE | SPLICE_F_MORE);
-                    }else {
-                        // LOG PENTING: Jika data STDOUT masuk tapi \r\n\r\n belum ketemu
-                        // Ini bisa jadi penyebab 502 kalau PHP kirim headernya kepotong-potong
-                        if ((size_t)header_pos >= sizeof(header_buffer) - 1) {
-                            //fprintf(stderr, "[DEBUG] Header buffer full but no delimiter found!\n");
-                            write_log_error("[ERROR : halmos_fcgi.c] Header buffer full but no delimiter found!");
-                        }
+                    // 3. Kirim sisa BODY yang tidak sengaja terbaca ke buffer
+                    int body_in_buffer = header_pos - header_only_len;
+                    if (body_in_buffer > 0) {
+                        send(sock_client, header_buffer + header_only_len, body_in_buffer, MSG_NOSIGNAL);
+                    }
+
+                    // 4. Splice sisa data (Jalur Tol)
+                    int remain_in_chunk = clen - to_read; 
+                    if (remain_in_chunk > 0) {
+                        splice(fpm_fd, NULL, pipe_fds[1], NULL, remain_in_chunk, SPLICE_F_MOVE | SPLICE_F_MORE);
+                        splice(pipe_fds[0], NULL, sock_client, NULL, remain_in_chunk, SPLICE_F_MOVE | SPLICE_F_MORE);
                     }
                 }
+                else if (header_pos >= (int)sizeof(header_buffer) - 1) {
+                    // Emergency: Header kepanjangan sampai 8KB dan belum ketemu \r\n\r\n
+                    // Di sini harusnya kirim 502 atau paksa kirim apa adanya
+                    write_log_error("[ERROR] Header too large, delimiter not found");
+                }
             } else {
-                // FASE 2: Jalur Tol (Zero Copy)
-                // Pindahkan data dari socket FPM ke pipe, lalu dari pipe ke client
+                // Jalur Tol Zero Copy untuk paket selanjutnya
                 splice(fpm_fd, NULL, pipe_fds[1], NULL, clen, SPLICE_F_MOVE | SPLICE_F_MORE);
                 splice(pipe_fds[0], NULL, sock_client, NULL, clen, SPLICE_F_MOVE | SPLICE_F_MORE);
             }
-        } 
+        }
         else if (h->type == FCGI_STDERR && clen > 0) {
             char *err = malloc(clen + 1);
             recv(fpm_fd, err, clen, MSG_WAITALL);
@@ -399,15 +413,15 @@ int halmos_fcgi_splice_response(int fpm_fd, int sock_client, RequestHeader *req)
 }
 
 void halmos_fcgi_send_stdin(int sockfd, int request_id, const void *data, int data_len) {
-    // Kita pecah data jika lebih besar dari limit FastCGI (65535 byte)
     int sent_so_far = 0;
     
     if (data_len > 0 && data != NULL) {
         while (sent_so_far < data_len) {
             int chunk_size = (data_len - sent_so_far > 65535) ? 65535 : (data_len - sent_so_far);
             int padding_len = (8 - (chunk_size % 8)) % 8;
+            unsigned char padding[8] = {0};
 
-            FCGI_Header header;
+            HalmosFCGI_Header header; // Pakai struct lo sendiri
             memset(&header, 0, sizeof(header));
             header.version = FCGI_VERSION_1;
             header.type = FCGI_STDIN;
@@ -417,26 +431,31 @@ void halmos_fcgi_send_stdin(int sockfd, int request_id, const void *data, int da
             header.contentLengthB0 = chunk_size & 0xFF;
             header.paddingLength = padding_len;
 
-            // 1. Kirim Header (8 byte)
-            send(sockfd, &header, 8, 0);
-            // 2. Kirim Body
-            send(sockfd, (char*)data + sent_so_far, chunk_size, 0);
-            // 3. Kirim Padding jika ada
-            if (padding_len > 0) {
-                unsigned char padding[8] = {0};
-                send(sockfd, padding, padding_len, 0);
+            // Kumpulkan 3 bagian data dalam satu iovec
+            struct iovec iov[3];
+            iov[0].iov_base = &header;
+            iov[0].iov_len  = 8;
+            iov[1].iov_base = (char*)data + sent_so_far;
+            iov[1].iov_len  = chunk_size;
+            iov[2].iov_base = padding;
+            iov[2].iov_len  = padding_len;
+
+            // Kirim sekaligus (Atomic)
+            if (writev(sockfd, iov, 3) < 0) {
+                write_log_error("[ERROR] Failed to send STDIN: %s", strerror(errno));
+                break;
             }
+            
             sent_so_far += chunk_size;
         }
     } else {
-        // Jika data_len 0, kirim paket STDIN kosong sebagai penanda END_OF_STDIN
-        FCGI_Header empty_header;
-        memset(&empty_header, 0, sizeof(empty_header));
-        empty_header.version = FCGI_VERSION_1;
-        empty_header.type = FCGI_STDIN;
-        empty_header.requestIdB1 = (request_id >> 8) & 0xFF;
-        empty_header.requestIdB0 = request_id & 0xFF;
-        send(sockfd, &empty_header, 8, 0);
+        // Kirim paket penutup (Empty STDIN)
+        HalmosFCGI_Header empty_h = {0};
+        empty_h.version = FCGI_VERSION_1;
+        empty_h.type = FCGI_STDIN;
+        empty_h.requestIdB0 = request_id; // Simple ID handle
+        
+        send(sockfd, &empty_h, 8, MSG_NOSIGNAL);
     }
 }
 
@@ -447,7 +466,7 @@ int halmos_fcgi_conn_acquire(const char *target, int port) {
     int active_for_this_backend = 0;
     int target_quota = 16; // Default safety net
 
-    // 1. Tentukan kuota secara dinamis (Sesuai Config Lo)
+    // 1. Tentukan kuota secara dinamis sesuai config
     if (is_unix) {
         if (config.php_server && strcmp(target, config.php_server) == 0) target_quota = fcgi_pool.php_quota;
         else if (config.rust_server && strcmp(target, config.rust_server) == 0) target_quota = fcgi_pool.rust_quota;
@@ -466,7 +485,6 @@ int halmos_fcgi_conn_acquire(const char *target, int port) {
             if (is_unix) {
                 belongs = (fcgi_pool.connections[i].is_unix && strcmp(fcgi_pool.connections[i].target_path, target) == 0);
             } else {
-                // Balik ke logika lo yang asli: Cukup cek Port
                 belongs = (!fcgi_pool.connections[i].is_unix && fcgi_pool.connections[i].target_port == port);
             }
 
@@ -477,25 +495,28 @@ int halmos_fcgi_conn_acquire(const char *target, int port) {
         }
     }
 
-    // 3. LOGIKA REUSE (Sama seperti asli lo)
+    // 3. LOGIKA REUSE
     if (reuse_idx != -1) {
         int error = 0;
         socklen_t len = sizeof(error);
+        // Pastikan socket masih hidup sebelum dipakai lagi
         if (getsockopt(fcgi_pool.connections[reuse_idx].sockfd, SOL_SOCKET, SO_ERROR, &error, &len) == 0 && error == 0) {
             fcgi_pool.connections[reuse_idx].in_use = true;
             pthread_mutex_unlock(&fcgi_pool.lock);
             return fcgi_pool.connections[reuse_idx].sockfd;
         } else {
+            // Socket mati, bersihkan
             close(fcgi_pool.connections[reuse_idx].sockfd);
             fcgi_pool.connections[reuse_idx].sockfd = -1;
         }
     }
+    
+    // Simpan status kuota sebelum lepas lock untuk connect
+    bool can_store_in_pool = (active_for_this_backend < target_quota);
     pthread_mutex_unlock(&fcgi_pool.lock);
 
-    // 4. JIKA HARUS CREATE BARU
-    bool can_store_in_pool = (active_for_this_backend < target_quota);
+    // 4. JIKA HARUS CREATE BARU (Diluar Lock agar tidak blocking thread lain)
     int new_sock = -1;
-
     if (is_unix) {
         new_sock = socket(AF_UNIX, SOCK_STREAM, 0);
         if (new_sock >= 0) {
@@ -511,7 +532,7 @@ int halmos_fcgi_conn_acquire(const char *target, int port) {
     } else {
         new_sock = socket(AF_INET, SOCK_STREAM, 0);
         if (new_sock >= 0) {
-            struct timeval timeout = {2, 0};
+            struct timeval timeout = {2, 0}; // 2 detik timeout connect
             setsockopt(new_sock, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
             struct sockaddr_in addr;
             memset(&addr, 0, sizeof(addr));
@@ -525,9 +546,10 @@ int halmos_fcgi_conn_acquire(const char *target, int port) {
         }
     }
     
-    // 5. SIMPAN KE POOL (Hanya jika kuota belum penuh)
+    // 5. SIMPAN KE POOL
     if (new_sock != -1) {
         pthread_mutex_lock(&fcgi_pool.lock);
+        bool stored = false;
         if (can_store_in_pool) {
             for (int i = 0; i < fcgi_pool.pool_size; i++) {
                 if (fcgi_pool.connections[i].sockfd == -1) {
@@ -536,13 +558,18 @@ int halmos_fcgi_conn_acquire(const char *target, int port) {
                     fcgi_pool.connections[i].is_unix = is_unix;
                     if (is_unix) strncpy(fcgi_pool.connections[i].target_path, target, 107);
                     else fcgi_pool.connections[i].target_port = port;
-                    
-                    pthread_mutex_unlock(&fcgi_pool.lock);
-                    return new_sock;
+                    stored = true;
+                    break;
                 }
             }
         }
         pthread_mutex_unlock(&fcgi_pool.lock);
+
+        // Gunakan variabel stored untuk logging atau debug
+        if (!stored && can_store_in_pool) {
+            // Ini kondisi langka: kuota masih ada tapi slot pool penuh total
+            write_log_error("[DEBUG] Pool full, connection will be temporary (non-pooled)");
+        }
     }
 
     return new_sock;
@@ -555,19 +582,28 @@ void halmos_fcgi_conn_release(int sockfd) {
     for (int i = 0; i < fcgi_pool.pool_size; i++) {
         if (fcgi_pool.connections[i].sockfd == sockfd) {
             
-            // --- VALIDASI KESEHATAN SOCKET ---
-            // Cek apakah socket masih OK (tidak diputus oleh backend)
+            // 1. Cek kesehatan socket via getsockopt
             int error = 0;
             socklen_t len = sizeof(error);
             int retval = getsockopt(sockfd, SOL_SOCKET, SO_ERROR, &error, &len);
             
+            // 2. Tambahan: Cek apakah socket sebenarnya sudah hangup (POLLRDHUP/EOF)
+            // Kadang error=0 tapi socket sudah ditutup sepihak oleh PHP.
+            char dummy;
             if (retval == 0 && error == 0) {
-                // Socket sehat, boleh balik ke pool
+                // Peek 1 byte: jika return 0 artinya FIN diterima (EOF)
+                if (recv(sockfd, &dummy, 1, MSG_PEEK | MSG_DONTWAIT) == 0) {
+                    error = EPIPE; // Anggap saja pipa putus
+                }
+            }
+
+            if (retval == 0 && error == 0) {
+                // Socket benar-benar sehat
                 fcgi_pool.connections[i].in_use = false;
                 pthread_mutex_unlock(&fcgi_pool.lock);
                 return;
             } else {
-                // Socket sudah mati/error, buang dari pool
+                // Socket sakit, buang dari record pool
                 fcgi_pool.connections[i].sockfd = -1;
                 fcgi_pool.connections[i].in_use = false;
                 pthread_mutex_unlock(&fcgi_pool.lock);
@@ -578,7 +614,8 @@ void halmos_fcgi_conn_release(int sockfd) {
     }
     pthread_mutex_unlock(&fcgi_pool.lock);
 
-    // Jika socket tidak ditemukan di pool (overflow socket), tutup paksa
+    // Jika socket tidak ditemukan di pool (misal karena kuota tadi penuh)
+    // Langsung tutup agar FD tidak menumpuk
     close(sockfd);
 }
 
