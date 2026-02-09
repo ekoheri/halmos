@@ -6,36 +6,26 @@
 #include "halmos_multipart.h"
 #include "halmos_http_utils.h"
 #include "halmos_security.h"
-#include "halmos_config.h"  // Di sini variabel 'config' sudah ada (extern)
-#include "halmos_log.h"     // Di sini variabel 'global_queue' sudah ada (extern)
+#include "halmos_config.h"
+#include "halmos_log.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
 #include <poll.h>
 #include <errno.h>
-#include <sys/time.h>    // Wajib buat struct timeval
-#include <sys/socket.h>  // Wajib buat setsockopt
-
-#include <pthread.h>
-
-// Objek Antrean Global (Pusat Kendali)
-TaskQueue global_queue;
-
-Config config;
+#include <arpa/inet.h>
 
 int handle_http1_session(int sock_client) {
     int keep_alive_status = 1;
-    int buf_size = config.max_body_size + 8192;
-    
-    // 1. Cek malloc dhisik, ojo langsung memset!
-    char *buffer = (char *)malloc(buf_size);
+
+    // --- OPTIMASI 1: Start Lean (8KB Default) ---
+    // Balik ke cara lama: jangan booking RAM gede di depan.
+    size_t current_buf_limit = (config.request_buffer_size > 0) ? config.request_buffer_size : 8192;
+    char *buffer = (char *)malloc(current_buf_limit);
     if (!buffer) {
-        write_log("Error: Gagal alokasi buffer manager.");
         close(sock_client);
         return -1;
     }
@@ -43,70 +33,92 @@ int handle_http1_session(int sock_client) {
     while (keep_alive_status) {
         RequestHeader req_header;
         memset(&req_header, 0, sizeof(RequestHeader));
-        memset(buffer, 0, buf_size);
-
-        // 2. Terima data awal
-        ssize_t received = recv(sock_client, buffer, buf_size - 1, 0);
-        if (received <= 0) break; 
         
+        // Cukup nol-kan byte pertama, jangan memset seluruh buffer (Save CPU!)
+        buffer[0] = '\0';
+
+        // --- 2. Terima Header ---
+        ssize_t received = recv(sock_client, buffer, current_buf_limit - 1, 0);
+        if (received <= 0) break; 
         buffer[received] = '\0';
 
-        // 3. Parsing (Zero-Copy)
+        // --- 3. Parsing (Zero-Copy) ---
         if (!parse_http_request(buffer, (size_t)received, &req_header) || !req_header.is_valid) {
+            send_mem_response(sock_client, 400, "Bad Request", "<h1>400 Bad Request</h1>", false);
+            free_request_header(&req_header);
             break; 
         }
 
-        // 4. Tarik sisa Body (Proteksi data buntung)
-        int body_error = 0;
+        // --- 4. Dynamic Body Expansion (Lazy Allocation) ---
+        bool body_error = false;
         if (req_header.content_length > 0) {
-            // Hitung berapa yang benar-benar kurang
-            ssize_t actual_body_received = (char*)(buffer + received) - (char*)req_header.body_data;
+            size_t max_allowed = config.max_body_size > 0 ? config.max_body_size : (10 * 1024 * 1024);
             
-            if (actual_body_received < req_header.content_length) {
-                size_t total_needed = req_header.content_length - actual_body_received;
-                
-                // Cek apakah buffer muat
-                if (received + total_needed >= (size_t)buf_size) {
-                    send_mem_response(sock_client, 413, "Payload Too Large", "<h1>413 Payload Too Large</h1>", false);
-                    body_error = 1;
-                } else {
-                    char *ptr = buffer + received;
+            if ((size_t)req_header.content_length > max_allowed) {
+                send_mem_response(sock_client, 413, "Payload Too Large", "<h1>413</h1>", false);
+                body_error = true;
+            } else {
+                // Hitung total buffer yang dibutuhin (Header + Content-Length)
+                size_t header_len = (char*)req_header.body_data - buffer;
+                size_t total_needed_size = header_len + req_header.content_length;
+
+                // Realloc buffer utama HANYA jika body lebih gede dari buffer 8KB awal
+                if (total_needed_size > current_buf_limit) {
+                    char *new_buf = (char *)realloc(buffer, total_needed_size + 1);
+                    if (!new_buf) {
+                        body_error = true;
+                    } else {
+                        // SYNC POINTER: Karena alamat buffer pindah, semua pointer di req_header harus di-update!
+                        size_t body_offset = (char*)req_header.body_data - buffer;
+                        buffer = new_buf;
+                        req_header.body_data = buffer + body_offset;
+                        current_buf_limit = total_needed_size + 1;
+                    }
+                }
+
+                if (!body_error) {
+                    // Tarik sisa body menggunakan logika lo yang solid
+                    char *ptr = (char *)req_header.body_data + req_header.body_length;
+                    size_t total_needed_recv = req_header.content_length - req_header.body_length;
                     int retry_count = 0;
-                    while (total_needed > 0 && retry_count < 10) { // Turunkan retry ke 10 biar gak spam
-                        ssize_t n = recv(sock_client, ptr, total_needed, 0);
+
+                    while (total_needed_recv > 0 && retry_count < 100) {
+                        ssize_t n = recv(sock_client, ptr, total_needed_recv, 0);
                         if (n > 0) {
                             ptr += n;
-                            total_needed -= n;
-                            received += n; // Update total received juga!
+                            total_needed_recv -= n;
+                            req_header.body_length += n;
                             retry_count = 0;
                         } else if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
                             struct pollfd pfd = {.fd = sock_client, .events = POLLIN};
-                            if (poll(&pfd, 1, 1000) <= 0) retry_count++; // Tunggu 1 detik
+                            if (poll(&pfd, 1, 100) <= 0) retry_count++;
                             continue;
                         } else {
-                            body_error = 1;
+                            body_error = true;
                             break;
                         }
                     }
-                    if (total_needed > 0) body_error = 1;
-                    
-                    // Pastikan NULL terminator di ujung total data
-                    buffer[received] = '\0';
-                    // Update final body_length
-                    req_header.body_length = (size_t)(ptr - (char*)req_header.body_data);
+                    if (total_needed_recv > 0) body_error = true;
+                    buffer[header_len + req_header.body_length] = '\0';
                 }
             }
         }
 
-        // 5. Eksekusi nek ora ono error neng body
+        // --- 5. Eksekusi Multipart (Hanya jika body lengkap) ---
+        /*if (!body_error && req_header.content_type && strstr(req_header.content_type, "multipart/form-data")) {
+            parse_multipart_body(&req_header);
+        }*/
+
+        // --- 6. Routing & Response ---
         if (!body_error) {
-            if (req_header.uri != NULL && strlen(req_header.uri) > 0) {
-                if (strstr(req_header.uri, "favicon.ico")) {
-                    send_mem_response(sock_client, 404, "Not Found", "", false);
-                } else {
-                    process_request_routing(sock_client, &req_header);
-                }
+            // Get Client IP (Cara lama lo yang akurat)
+            struct sockaddr_in addr;
+            socklen_t addr_len = sizeof(addr);
+            if (getpeername(sock_client, (struct sockaddr *)&addr, &addr_len) == 0) {
+                inet_ntop(AF_INET, &addr.sin_addr, req_header.client_ip, 45);
             }
+            
+            process_request_routing(sock_client, &req_header);
         }
 
         keep_alive_status = req_header.is_keep_alive;
@@ -115,11 +127,12 @@ int handle_http1_session(int sock_client) {
         if (!keep_alive_status || body_error) break;
     }
 
-    // Clean up kabeh sakdurunge metu
+    // --- 7. Clean Exit (Shutdown & Drain Junk) ---
     if (buffer) free(buffer);
     shutdown(sock_client, SHUT_WR);
+    char junk[1024];
+    while(recv(sock_client, junk, sizeof(junk), MSG_DONTWAIT) > 0);
     close(sock_client);
+    
     return 0;
 }
-
-

@@ -87,15 +87,6 @@ void run_event_loop() {
                     }
                     // -------------------------
 
-                    // --- OPTIMASI BUFFER KERNEL ---
-                    int sndbuf = 1024 * 1024; // 1MB Buffer Kirim
-                    setsockopt(sock_client, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
-
-                    // Opsional: Jika ingin ab lebih stabil lagi, set buffer terima juga
-                    int rcvbuf = 64 * 1024; 
-                    setsockopt(sock_client, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
-                    // ------------------------------
-
                     // Set tamu jadi non-blocking agar tidak bikin thread pool macet
                     set_nonblocking(sock_client);
 
