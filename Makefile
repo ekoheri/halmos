@@ -1,10 +1,5 @@
-# Nama program
+# --- Konfigurasi Dasar ---
 TARGET_NAME = halmos
-
-# Ambil versi dan bersihkan
-VERSION := $(shell cat VERSION | tr -d '\r\n' | xargs 2>/dev/null || echo "0.0.1")
-
-# Direktori Proyek
 BIN_DIR = bin
 SRC_DIR = src
 OBJ_DIR = build
@@ -13,99 +8,89 @@ RUNTIME_DIR = runtime
 SERVICE_NAME = halmos.service
 
 TARGET = $(BIN_DIR)/$(TARGET_NAME)
+VERSION := $(shell cat VERSION 2>/dev/null || echo "0.0.1")
 
-# Path Destinasi Sistem (Langsung ke /etc sesuai permintaanmu)
+# Path Sistem
 DEST_BIN     = /usr/bin/$(TARGET_NAME)
 DEST_CONF    = /etc/halmos
 DEST_SERVICE = /etc/systemd/system/$(SERVICE_NAME)
 DEST_WWW     = /var/www/halmos
 
-# Compiler dan Flags
+# Compiler
 CC = gcc
-INC_FLAGS = -I$(INC_DIR) -I$(INC_DIR)/halmos
-CFLAGS = -Wall -Wextra -O3 $(INC_FLAGS) -DVERSION=\"$(VERSION)\" -D_GNU_SOURCE
+CFLAGS = -Wall -Wextra -O3 -I$(INC_DIR) -I$(INC_DIR)/halmos -DVERSION=\"$(VERSION)\" -D_GNU_SOURCE
 LDFLAGS = -lpthread -lm
 
-# Mencari semua file .c secara rekursif
 SRCS := $(shell find $(SRC_DIR) -name '*.c')
 OBJS := $(patsubst $(SRC_DIR)/%.c, $(OBJ_DIR)/%.o, $(SRCS))
 
-# --- Rules ---
-
 all: $(TARGET)
 
-# Linker
 $(TARGET): $(OBJS)
 	@mkdir -p $(BIN_DIR)
-	@echo "Linking binary: $(TARGET)..."
 	@$(CC) $(OBJS) -o $@ $(LDFLAGS)
-	@echo "Build version $(VERSION) complete."
 
-# Kompilasi Source ke Objects
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c
 	@mkdir -p $(dir $@)
-	@echo "Compiling $<..."
 	@$(CC) $(CFLAGS) -c $< -o $@
 
-# 1. Install: Copy semua file ke folder sistem (TARGET: /etc)
+# ---------------------------------------------------------
+# 1. INSTALL: Cuma copy file ke folder sistem (Tanpa Start)
+# ---------------------------------------------------------
 install: all
-	@echo "Installing Halmos v$(VERSION) to /etc/systemd/system/..."
-	
-	# Bersihkan file lama di /lib jika pernah ada supaya tidak bentrok
-	sudo rm -f /lib/systemd/system/$(SERVICE_NAME)
-	
-	# Install Binary
-	sudo install -d $(DESTDIR)/usr/bin
-	sudo install -m 755 $(TARGET) $(DESTDIR)$(DEST_BIN)
-	
-	# Install Konfigurasi
-	sudo install -d $(DESTDIR)$(DEST_CONF)
-	sudo install -m 644 $(RUNTIME_DIR)/configs/halmos.conf $(DESTDIR)$(DEST_CONF)/
-	
-	# Install Systemd Service LANGSUNG KE /ETC
-	sudo install -d $(DESTDIR)/etc/systemd/system
-	sudo install -m 644 $(RUNTIME_DIR)/configs/$(SERVICE_NAME) $(DESTDIR)$(DEST_SERVICE)
-	
-	# Install Web Assets
-	sudo install -d $(DESTDIR)$(DEST_WWW)
-	sudo cp -r $(RUNTIME_DIR)/examples/* $(DESTDIR)$(DEST_WWW)/
-	
-	# Atur Izin Akses
-	sudo chmod -R 755 $(DESTDIR)$(DEST_WWW)
-	
-	@echo "--------------------------------------------------------"
-	@echo "Selesai! File service ada di: /etc/systemd/system/halmos.service"
-	@echo "--------------------------------------------------------"
-	@echo "Jalankan perintah ini untuk mengaktifkan:"
-	@echo "sudo systemctl daemon-reload"
-	@echo "sudo systemctl enable halmos"
-	@echo "sudo systemctl start halmos"
+	@echo "[INSTALL] Menyalin file ke folder sistem..."
+	sudo install -d $(DEST_CONF)
+	sudo install -d $(DEST_WWW)
+	sudo install -m 755 $(TARGET) $(DEST_BIN)
+	sudo install -m 644 $(RUNTIME_DIR)/configs/halmos.conf $(DEST_CONF)/
+	sudo install -m 644 $(RUNTIME_DIR)/configs/$(SERVICE_NAME) $(DEST_SERVICE)
+	sudo cp -r $(RUNTIME_DIR)/examples/* $(DEST_WWW)/
+	sudo systemctl daemon-reload
+	@echo "[OK] File terpasang. Gunakan 'make run' untuk menyalakan background."
 
-# 2. Uninstall: Hapus semua jejak dari sistem
-uninstall:
-	@echo "Uninstalling Halmos..."
-	
-	# Matikan service dulu
-	-sudo systemctl stop $(TARGET_NAME)
-	-sudo systemctl disable $(TARGET_NAME)
-	
-	# Hapus Binary, Config, dan Service
+# ---------------------------------------------------------
+# 2. RUN: Jalankan sebagai service background (Systemd)
+# ---------------------------------------------------------
+run:
+	@echo "[RUN] Menjalankan Halmos di background (Systemd)..."
+	-sudo systemctl stop $(TARGET_NAME) 2>/dev/null || true
+	sudo systemctl start $(TARGET_NAME)
+	@echo "[OK] Halmos Service Aktif!"
+	@systemctl status $(TARGET_NAME) | grep -E "Active|Main PID|Tasks|Memory"
+
+# ---------------------------------------------------------
+# 3. DEBUG: Jalankan di terminal (Foreground) + Cek Background
+# ---------------------------------------------------------
+debug: all
+	@echo "[CHECK] Memeriksa konflik background..."
+	@if systemctl is-active --quiet $(TARGET_NAME); then \
+		echo "--------------------------------------------------------"; \
+		echo "WARNING: Ada Halmos versi BACKGROUND yang lagi jalan!"; \
+		echo "Matiin dulu bos, biar nggak bentrok port-nya."; \
+		echo "Ketik: sudo systemctl stop halmos"; \
+		echo "--------------------------------------------------------"; \
+		exit 1; \
+	fi
+	@if pgrep -x "$(TARGET_NAME)" > /dev/null; then \
+		echo "WARNING: Ada proses Halmos liar (zombie) ditemukan!"; \
+		echo "Gue sembelih dulu ya..."; \
+		sudo killall -9 $(TARGET_NAME); \
+	fi
+	@echo "[DEBUG] Memulai Halmos v$(VERSION) di terminal..."
+	sudo ./$(TARGET)
+
+# ---------------------------------------------------------
+# 4. CLEAN: Uninstall total & Bersihkan build
+# ---------------------------------------------------------
+clean:
+	@echo "[CLEAN] Menghapus build files & Uninstall dari sistem..."
+	-sudo systemctl stop $(TARGET_NAME) 2>/dev/null || true
+	-sudo systemctl disable $(TARGET_NAME) 2>/dev/null || true
+	sudo rm -rf $(OBJ_DIR) $(BIN_DIR)
 	sudo rm -f $(DEST_BIN)
 	sudo rm -f $(DEST_SERVICE)
 	sudo rm -rf $(DEST_CONF)
-	sudo rm -rf $(DEST_WWW)
-	
-	# Hapus sisa symlink di folder wants
-	sudo rm -f /etc/systemd/system/multi-user.target.wants/$(SERVICE_NAME)
-	
-	# Reload systemd agar bersih
 	sudo systemctl daemon-reload
-	
-	@echo "Uninstall selesai! Bersih total."
+	@echo "[OK] Bersih total, CUK!"
 
-clean:
-	@echo "Cleaning up build directories..."
-	@rm -rf $(OBJ_DIR) $(BIN_DIR)
-	@echo "Cleaned."
-
-.PHONY: all clean run install uninstall
+.PHONY: all install run debug clean
