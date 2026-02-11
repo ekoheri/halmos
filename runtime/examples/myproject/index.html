@@ -1,0 +1,151 @@
+<html lang="en"><head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="css/bootstrap/bootstrap.min.css">
+    <link href="css/site.css" rel="stylesheet">
+    <link href="css/product.css" rel="stylesheet">
+    <link href="css/BlazorApp.styles.css" rel="stylesheet">
+    <title>Akuntansi</title>
+</head>
+<body>
+    
+<div class="page" b-3ij3p7wwc4="">
+    <div class="sidebar" b-3ij3p7wwc4="">
+        <div class="top-row ps-3 navbar navbar-dark" b-wk4bcz64v1="">
+            <div class="container-fluid" b-wk4bcz64v1="">
+                <a class="navbar-brand" href="" b-wk4bcz64v1="">Akuntasi</a>
+                <button title="Navigation menu" class="navbar-toggler" b-wk4bcz64v1="">
+                    <span class="navbar-toggler-icon" b-wk4bcz64v1=""></span>
+                </button>
+            </div>
+        </div>
+
+        <div class="collapse" b-wk4bcz64v1="">
+            <nav class="flex-column" b-wk4bcz64v1="">
+                <div class="nav-item px-3" b-wk4bcz64v1="">
+                    <a href="#" class="nav-link active">
+                        <span class="oi oi-home" aria-hidden="true" b-wk4bcz64v1=""></span> Kas Masuk Keluar
+                    </a>
+                </div>
+                <div class="nav-item px-3" b-wk4bcz64v1="">
+                    <a href="#" class="nav-link">
+                        <span class="oi oi-plus" aria-hidden="true" b-wk4bcz64v1=""></span> Jurmal Umum
+                    </a>
+                </div>
+                <div class="nav-item px-3" b-wk4bcz64v1="">
+                    <a href="#" class="nav-link">
+                        <span class="oi oi-plus" aria-hidden="true" b-wk4bcz64v1=""></span> Master CoA
+                    </a>
+                </div>
+                <div class="nav-item px-3" b-wk4bcz64v1="">
+                    <a href="#" class="nav-link">
+                        <span class="oi oi-list-rich" aria-hidden="true" b-wk4bcz64v1=""></span> Menu Lainnya
+                    </a>
+                </div>
+            </nav>
+        </div>
+    </div>
+
+    <main b-3ij3p7wwc4="">
+        <div class="top-row px-4" b-3ij3p7wwc4="">
+            <button class="btn btn-primary">Login</button>
+        </div>
+
+        <article class="content px-4" b-3ij3p7wwc4="">
+            <h1 tabindex="-1">Kas Masuk & Keluar</h1>
+
+            <section>
+                <div class="card">
+                    <div class="card-body">
+                        <div class="row">
+                            <div class="col">
+                                <label for="cmbJenisKas" class="form-label">Jenis Kas</label>
+                                <select class="form-control" id="cmbJenisKas">
+                                    <option value="100.1">100.1 - Kas Penjualan</option>
+                                    <option value="100.2">100.2 - Kas Pembelian</option>
+                                </select>
+                            </div>
+                            <div class="col">
+                                <label for="txtSaldo" class="form-label">Saldo</label>
+                                <input class="form-control" type="text" id="txtSaldo" value ="2.000.000" />
+                            </div>
+                        </div>
+                        <hr />
+                        <div class="row">
+                            <div class="col-12 col-lg-2">
+                                <label for="txtTgl" class="form-label">Tanggal</label>
+                                <input class="form-control" type="text" id="txtTgl" value ="20/08/2023:13.24.01" />
+                            </div>
+                            <div class="col-12 col-lg-3">
+                                <label for="cmbKodeAkun" class="form-label">Jenis Akun</label>
+                                <select class="form-control" id="cmbKodeAkun">
+                                    <option value="100.11">Gaji</option>
+                                    <option value="100.12">Uang Makan</option>
+                                </select>
+                            </div>
+                            <div class="col-12 col-lg-7">
+                                <label for="txtKeterangan" class="form-label">Keterangan</label>
+                                <input class="form-control" type="text" id="txtKeterangan" />
+                            </div>
+                            <div class="col-12  col-lg-5">
+                                <label for="txtNominal" class="form-label">Nominal</label>
+                                <input class="form-control" type="text" id="txtNominal" />
+                            </div>
+                            <div class="col-12 col-lg-4">
+                                <label for="cmbInOut" class="form-label">Jenis Kas</label>
+                                <select class="form-control" id="cmbInOut">
+                                    <option value="in">Masuk</option>
+                                    <option value="out">Keluar</option>
+                                </select>
+                            </div>
+                            <div class="col-12 col-lg-3">
+                                <label for="btnAdd" class="form-label">Aksi</label>
+                                <button class="btn btn-primary form-control" id="btnAdd">Tambah</button>
+                            </div>
+                        </div>
+                        <hr />
+                        <div class="table-responsive">
+                            <table class="table text-center">
+                              <thead>
+                                <tr>
+                                  <th style="width: 16.6%;">Tanggal</th>
+                                  <th style="width: 16.6%;">Akun</th>
+                                  <th style="width: 16.6%;">Keterangan</th>
+                                  <th style="width: 16.6%;">Masuk</th>
+                                  <th style="width: 16.6%;">Keluar</th>
+                                  <th style="width: 16.6%;">Aksi</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                <tr>
+                                    <td>20/08/2023</td>
+                                    <td>1001.11 - Gaji</td>
+                                    <td>Bayar Gaji Karyawan</td>
+                                    <td>0</td>
+                                    <td>1.000.000</td>
+                                    <td>
+                                        <button class="btn btn-primary">Edit</button>
+                                        <button class="btn btn-danger">Hapus</button>
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <td>20/08/2023</td>
+                                    <td>1001.12 - Konsumen Bayar</td>
+                                    <td>Pembayaran Tagihan Konsumen a/n Budi</td>
+                                    <td>5.000.000</td>
+                                    <td>0</td>
+                                    <td>
+                                        <button class="btn btn-primary">Edit</button>
+                                        <button class="btn btn-danger">Hapus</button>
+                                    </td>
+                                </tr>
+                              </tbody>
+                            </table>
+                    </div> <!-- card-body -->
+                </div> <!-- card -->
+            </section>
+        </article>
+    </main>
+</div>
+</body>
+</html>

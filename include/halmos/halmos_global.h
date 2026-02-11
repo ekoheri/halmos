@@ -24,12 +24,12 @@ extern int epoll_fd;
 
 // 4. menyimpan informasi jumlah maksimum event loop
 // sesuaidengan kapasitas Core CPU komputer
-extern int max_event_loop;
+// extern int max_event_loop;
 
-// 5. Informasi menyimpan taskqueue
+// 4. Informasi menyimpan taskqueue
 extern TaskQueue global_queue;
 
-// 6. Forward declaration untukworker_thread_pool 
+// 5. Forward declaration untukworker_thread_pool 
 // yang ada di halmos_queue.c
 extern void *worker_thread_pool(void *arg);
 

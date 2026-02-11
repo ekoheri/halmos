@@ -66,7 +66,6 @@ void send_mem_response(int client_fd, int status_code, const char *status_text,
 void static_response(int sock_client, RequestHeader *req) {
     const char *active_root = get_active_root(req->host);
     char *safe_path = sanitize_path(active_root, req->uri);
-
     if (!safe_path) {
         send_mem_response(sock_client, 404, "Not Found", "<h1>404 Not Found</h1>", req->is_keep_alive);
         return;
@@ -120,19 +119,24 @@ void static_response(int sock_client, RequestHeader *req) {
  * 3. PROCESS REQUEST ROUTING
  * Otak dari penentuan arah request
  ********************************************************************/
+
 void process_request_routing(int sock_client, RequestHeader *req) {
     // A. Scripting (FastCGI)
     const char *target_ip = NULL;
     int target_port = 0;
-    if (has_extension(req->uri, ".php")) {
+    if (has_extension(req->uri, req->path_info,".php")) {
         target_ip = config.php_server;
         target_port = config.php_port;
-    } else if (has_extension(req->uri, config.rust_ext)) {
+    } else if (has_extension(req->uri, req->path_info, config.rust_ext)) {
         target_ip = config.rust_server;
         target_port = config.rust_port;
+    } else if (has_extension(req->uri, req->path_info, config.python_ext)) {
+        target_ip = config.python_server;
+        target_port = config.python_port;
     }
 
     if (target_ip && target_port > 0) {
+        printf("[JALANKAN FASTCGI]\n");
         if (halmos_fcgi_request_stream(req, sock_client, target_ip, target_port,
             req->body_data, req->body_length, req->content_length) != 0) {
             send_mem_response(sock_client, 502, "Bad Gateway", "<h1>502 Bad Gateway</h1>", req->is_keep_alive);
@@ -141,9 +145,19 @@ void process_request_routing(int sock_client, RequestHeader *req) {
     }
 
     // B. Folder & Index Discovery
-    const char *active_root = get_active_root(req->host);
+    //const char *active_root = get_active_root(req->host);
+    //char full_path[1024];
+    //snprintf(full_path, sizeof(full_path), "%s%s", active_root, req->uri);
+
     char full_path[1024];
-    snprintf(full_path, sizeof(full_path), "%s%s", active_root, req->uri);
+    const char *active_root = get_active_root(req->host);
+
+    // Logika: Jika root diakhiri '/' DAN uri diawali '/', buang salah satu
+    if (active_root[strlen(active_root)-1] == '/' && req->directory[0] == '/') {
+        snprintf(full_path, sizeof(full_path), "%s%s", active_root, req->directory + 1);
+    } else {
+        snprintf(full_path, sizeof(full_path), "%s%s", active_root, req->directory);
+    }
 
     struct stat st;
     if (stat(full_path, &st) == 0 && S_ISDIR(st.st_mode)) {

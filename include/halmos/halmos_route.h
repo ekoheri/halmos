@@ -1,33 +1,67 @@
 #ifndef HALMOS_ROUTE_H
 #define HALMOS_ROUTE_H
 
-#include <stdbool.h>
+/* --- Konfigurasi Maksimal --- */
+#define MAX_ROUTES 100
+#define MAX_VAR_COUNT 10
+#define MAX_VAR_NAME_LEN 32
 
-#define MAX_ROUTES 256
-
-// halmos_route.h
 typedef enum {
-    RT_STATIC,
-    RT_FASTCGI_PHP,
-    RT_FASTCGI_RS,
-    RT_FASTCGI_PY,
-    RT_FALLBACK
+    RT_NONE, 
+    RT_QUERY, 
+    RT_PATH
 } RouteType;
 
+typedef enum {
+    FCGI_PHP, 
+    FCGI_PY, 
+    FCGI_RS
+} FcgiBackend;
+
 typedef struct {
-    char pattern[128];     // Misal: "/php/dhe/lib"
-    RouteType type;        // Misal: RT_FASTCGI_PHP
-    char script_name[128]; // Misal: "test_dhe.php"
-    char query_args[128];  // Misal: "mode=lib"
-    bool is_wildcard;
-} RouteRule;
+    RouteType type;
+    char source[64];
+    char target[128];
+    FcgiBackend fcgi_type;
+    char var_names[10][32]; // Kapasitas 10 variabel @32 char
+    int var_count;
+} RouteTable;
 
+/* --- Global Variable untuk Tabel Rute --- */
+// Disimpan secara eksternal agar bisa diakses di main program
+/* --- Global Variable --- */
+extern RouteTable g_routes[MAX_ROUTES];
+extern int g_total_routes;
+extern const char *route_config_filename;
 
-// Deklarasi agar bisa diakses file lain
-extern RouteRule route_table[MAX_ROUTES];
-extern int total_routes;
+/* --- Prototipe Fungsi Eksternal --- */
 
-void load_routes(const char *filename);
-RouteRule* match_route(const char *uri);
+/**
+ * Fungsi Auto Reload yang dipanggil di event loop.
+ * Mengecek mtime file setiap 5 detik.
+ */
+void halmos_router_auto_reload();
+
+/**
+ * Membaca file konfigurasi (Internal, tapi bisa dipanggil manual jika perlu).
+ */
+void load_routes();
+
+/**
+ * Mencocokkan URI request dengan tabel rute.
+ * Digunakan untuk mencari baris mana yang cocok di memory.
+ */
+RouteTable* match_route(const char *uri);
+
+/**
+ * Melakukan transformasi URL.
+ * Memecah URI user menjadi Script Target, Query String, atau Path Info.
+ */
+void apply_route_logic(RouteTable *match, const char *original_uri, char *out_target, char *out_query, char *out_path_info);
+
+/**
+ * Helper Utility
+ */
+void trim_util(char *str);
 
 #endif
