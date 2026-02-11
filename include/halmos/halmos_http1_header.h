@@ -4,6 +4,8 @@
 #include <stddef.h>
 #include <stdbool.h>
 
+#include "halmos_route.h"
+
 // Tipe respon (Memory vs File) tetap sama di semua versi HTTP
 typedef enum {
     RES_TYPE_MEMORY,
@@ -35,9 +37,16 @@ typedef struct {
     // POINTER ZERO-COPY (Hanya menunjuk ke buffer di manager)
     char *uri;
     char *host;
+    char *directory;
     char *query_string;
+    char *path_info;
     char *content_type;
     char *cookie_data;
+    FcgiBackend backend_type;
+
+    // BUFFER FISIK (Landing Strip)
+    // Tempat penyimpanan hasil transformasi agar pointer di atas tetap valid
+    char route_result[512];
     
     // BODY ZERO-COPY
     void *body_data;        // Menunjuk langsung ke offset di buffer manager

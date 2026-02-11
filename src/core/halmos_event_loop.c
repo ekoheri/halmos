@@ -5,6 +5,7 @@
 #include "halmos_log.h"
 #include "halmos_queue.h"
 #include "halmos_security.h"
+#include "halmos_route.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -53,6 +54,8 @@ void start_event_loop() {
 
 void run_event_loop() {
     while (server_running) {
+        halmos_router_auto_reload();
+
         int num_fds = epoll_wait(epoll_fd, events, g_event_batch_size, 500); // awalnya -1
         
         for (int i = 0; i < num_fds; i++) {

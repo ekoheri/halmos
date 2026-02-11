@@ -43,6 +43,7 @@ install: all
 	sudo install -d $(DEST_WWW)
 	sudo install -m 755 $(TARGET) $(DEST_BIN)
 	sudo install -m 644 $(RUNTIME_DIR)/configs/halmos.conf $(DEST_CONF)/
+	sudo install -m 644 $(RUNTIME_DIR)/configs/route.conf $(DEST_CONF)/
 	sudo install -m 644 $(RUNTIME_DIR)/configs/$(SERVICE_NAME) $(DEST_SERVICE)
 	sudo cp -r $(RUNTIME_DIR)/examples/* $(DEST_WWW)/
 	sudo systemctl daemon-reload

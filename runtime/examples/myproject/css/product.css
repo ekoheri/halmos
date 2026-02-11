@@ -1,0 +1,107 @@
+.product_pod {
+    height: 370px;
+    overflow: hidden;
+    text-align: center;
+    margin: 20px 0;
+    position: relative;
+}
+  .product_pod p,
+  .product_pod h3,
+  .product_pod h2,
+  .product_pod form {
+    margin-bottom: 0;
+  }
+  .product_pod h3 {
+    font-family: inherit;
+    font-weight: 500;
+    line-height: 1.1;
+    color: inherit;
+    margin-top: 10px;
+    margin-bottom: 10px;
+    font-size: 14px;
+    line-height: 1.42857143;
+    margin-bottom: 0;
+  }
+  .product_pod h3 small,
+  .product_pod h3 .small {
+    font-weight: normal;
+    line-height: 1;
+    color: #777777;
+  }
+  .product_pod h3 small,
+  .product_pod h3 .small {
+    font-size: 75%;
+  }
+  .product_pod .price_color {
+    font-family: inherit;
+    font-weight: 500;
+    line-height: 1.1;
+    color: inherit;
+    margin-top: 10px;
+    margin-bottom: 10px;
+    font-size: 18px;
+    font-size: 16.1px;
+    line-height: 1.4;
+    color: #5cb85c;
+  }
+  .product_pod .price_color small,
+  .product_pod .price_color .small {
+    font-weight: normal;
+    line-height: 1;
+    color: #777777;
+  }
+  .product_pod .price_color small,
+  .product_pod .price_color .small {
+    font-size: 75%;
+  }
+  .product_pod .availability,
+  .product_pod .price_color {
+    min-height: 30px;
+    white-space: nowrap;
+  }
+  .product_pod .image_container,
+  .product_pod .availability,
+  .product_pod .price_color {
+    margin-bottom: 10px;
+  }
+  .product_pod .product_price {
+    position: absolute;
+    bottom: 0;
+    width: 100%;
+  }
+
+  .star-rating {
+    color: #CBCBCB;
+  }
+  .star-rating i {
+    letter-spacing: -1px;
+    width: auto;
+  }
+  .star-rating a {
+    margin-left: 10px;
+  }
+  .star-rating.One i:first-child {
+    color: #E6CE31;
+  }
+  .star-rating.Two i:first-child,
+  .star-rating.Two i:first-child + i {
+    color: #E6CE31;
+  }
+  .star-rating.Three i:first-child,
+  .star-rating.Three i:first-child + i,
+  .star-rating.Three i:first-child + i + i {
+    color: #E6CE31;
+  }
+  .star-rating.Four i:first-child,
+  .star-rating.Four i:first-child + i,
+  .star-rating.Four i:first-child + i + i,
+  .star-rating.Four i:first-child + i + i + i {
+    color: #E6CE31;
+  }
+  .star-rating.Five i {
+    color: #E6CE31;
+  }
+
+  ol {
+    list-style: none;
+  }

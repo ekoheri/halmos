@@ -129,21 +129,49 @@ int halmos_fcgi_request_stream(
     int params_start = g_ptr + sizeof(HalmosFCGI_Header);
     int p_offset = params_start;
 
-    // Tambahkan params yang dibutuhkan backend Rust/PHP
     char full_script_path[1024];
+    char script_name_only[512] = {0};
     const char *active_root = get_active_root(req->host);
 
-    // Logika: Jika root diakhiri '/' DAN uri diawali '/', buang salah satu
-    if (active_root[strlen(active_root)-1] == '/' && req->uri[0] == '/') {
-        snprintf(full_script_path, sizeof(full_script_path), "%s%s", active_root, req->uri + 1);
-    } else {
-        snprintf(full_script_path, sizeof(full_script_path), "%s%s", active_root, req->uri);
+    // 1. Hitung panjang SCRIPT_NAME murni (URI tanpa PATH_INFO)
+    // Jika req->directory = "/test/index.php/login"
+    // Dan req->path_info = "/login"
+    // Maka panjang script murni adalah (alamat path_info - alamat directory)
+    size_t script_len = strlen(req->directory);
+    if (req->path_info && req->path_info[0] != '\0') {
+        script_len = req->path_info - req->directory;
     }
-    //printf("[FCGI_DEBUG] Script name (Fixed): %s\n", full_script_path);
+    
+    // Copy bagian script saja (misal: "/test/index.php")
+    if (script_len < sizeof(script_name_only)) {
+        strncpy(script_name_only, req->directory, script_len);
+        script_name_only[script_len] = '\0';
+    }
 
+    // 2. Rakit Full Physical Path untuk SCRIPT_FILENAME
+    if (active_root[strlen(active_root)-1] == '/' && script_name_only[0] == '/') {
+        snprintf(full_script_path, sizeof(full_script_path), "%s%s", active_root, script_name_only + 1);
+    } else {
+        snprintf(full_script_path, sizeof(full_script_path), "%s%s", active_root, script_name_only);
+    }
+    
+    printf("DOCUMENT_ROOT : %s\n", active_root);
+    printf("SCRIPT_FILENAME : %s\n", full_script_path);
+    printf("SCRIPT_NAME : %s\n", script_name_only);
+    printf("REQUEST_URI : %s\n", req->directory);
+    printf("PATH_INFO : %s\n", req->path_info);
+    printf("QUERY_STRING : %s\n", req->query_string);
+
+    fflush(stdout);
+
+    FCGI_ADD_PARAM(gather_buf, "DOCUMENT_ROOT",   active_root, p_offset);
     FCGI_ADD_PARAM(gather_buf, "SCRIPT_FILENAME", full_script_path, p_offset);
-    FCGI_ADD_PARAM(gather_buf, "SCRIPT_NAME",     req->uri, p_offset); // WAJIB ADA
-    FCGI_ADD_PARAM(gather_buf, "REQUEST_URI",     req->uri, p_offset); // WAJIB ADA
+    FCGI_ADD_PARAM(gather_buf, "SCRIPT_NAME",     script_name_only, p_offset); // WAJIB ADA
+    FCGI_ADD_PARAM(gather_buf, "REQUEST_URI",     req->directory, p_offset); // WAJIB ADA
+    // INI YANG WAJIB ADA BIAR $_SERVER['PATH_INFO'] JALAN
+    if (req->path_info && req->path_info[0] != '\0') {
+        FCGI_ADD_PARAM(gather_buf, "PATH_INFO", req->path_info, p_offset);
+    }
     FCGI_ADD_PARAM(gather_buf, "REQUEST_METHOD",  req->method, p_offset);
     FCGI_ADD_PARAM(gather_buf, "QUERY_STRING",    req->query_string ? req->query_string : "", p_offset);
     FCGI_ADD_PARAM(gather_buf, "HTTP_COOKIE",     req->cookie_data ? req->cookie_data : "", p_offset);

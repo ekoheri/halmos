@@ -82,18 +82,30 @@ char *get_time_string() {
 
 // Fungsi pembantu: Cek apakah string berakhir dengan suffix tertentu
 // Lebih kencang dan akurat daripada strstr()
-int has_extension(const char *uri, const char *ext) {
-    // 1. Pengaman: Kalau ext NULL atau cuma string kosong "", jangan dianggap cocok
+int has_extension(const char *uri, const char *path_info, const char *ext) {
+    printf("[HASH-EXTENSION-CHECK] URI: [%s] Ext: %s\n", 
+                uri, ext);
+
+    // 1. Pengaman
     if (!uri || !ext || ext[0] == '\0') return 0;
 
-    size_t len_uri = strlen(uri);
+    // 2. Tentukan batas akhir (pembatas titik)
+    // Kalau ada path_info, kita kunci panjangnya cuma sampe sebelum path_info mulai
+    size_t len_to_check;
+    if (path_info && path_info[0] != '\0') {
+        len_to_check = path_info - uri;
+    } else {
+        len_to_check = strlen(uri);
+    }
+
     size_t len_ext = strlen(ext);
 
-    // 2. Kalau ekstensi lebih panjang dari URI (misal uri "a.py" tapi ext ".python_ext")
-    if (len_uri < len_ext) return 0;
+    // 3. Kalau sisa path lebih pendek dari ekstensi, gak mungkin cocok
+    if (len_to_check < len_ext) return 0;
 
-    // 3. Bandingkan dari belakang
-    return (strcasecmp(uri + len_uri - len_ext, ext) == 0);
+    // 4. Bandingkan dari posisi "titik pembatas"
+    // Kita bandingkan string tepat di belakang len_to_check
+    return (strncasecmp(uri + len_to_check - len_ext, ext, len_ext) == 0);
 }
 
 /************************************
