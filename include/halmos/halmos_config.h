@@ -19,7 +19,10 @@ typedef struct {
     char default_page[256];
     //Security
     size_t max_body_size; // Misal dalam byte
-    bool secure_application;
+    bool tls_enabled;
+    bool e2ee_enabled;
+    char ssl_certificate_file[512];
+    char ssl_private_key_file[512];
     bool rate_limit_enabled;
     bool anti_slow_loris_enabled;
     int max_requests_per_sec;

@@ -34,6 +34,11 @@ int sock_server;
 volatile sig_atomic_t server_running = 1;
 
 void start_event_loop() {
+    // 1. Inisialisasi TLS dulu sebelum perang
+    init_openssl_runtime();
+    init_ssl_mapping(g_queue_capacity + 2000);
+    
+    // 2. aktifkan epoll
     // menghitung berapa jumah core untuk 
     // patokan berapa jumlah event pool yang cocok
     events = malloc(sizeof(struct epoll_event) * g_event_batch_size);
@@ -49,7 +54,7 @@ void start_event_loop() {
     ev.events = EPOLLIN; // Level Triggered untuk listen socket
     epoll_ctl(epoll_fd, EPOLL_CTL_ADD, sock_server, &ev);
 
-    write_log("Halmos Server listening on %s:%d", config.server_name, config.server_port);
+    write_log("[CORE] Server listening on %s:%d", config.server_name, config.server_port);
 }
 
 void run_event_loop() {
@@ -57,7 +62,13 @@ void run_event_loop() {
         halmos_router_auto_reload();
 
         int num_fds = epoll_wait(epoll_fd, events, g_event_batch_size, 500); // awalnya -1
-        
+        if (num_fds < 0) {
+            if (errno != EINTR) {
+                write_log_error("[CORE] epoll_wait critical error: %s", strerror(errno));
+            }
+            continue; // Jangan for-loop kalau error
+        }
+
         for (int i = 0; i < num_fds; i++) {
             if (events[i].data.fd == sock_server) {
                 // LOOP ACCEPT: Ambil semua tamu yang antre sampai ludes
@@ -73,7 +84,7 @@ void run_event_loop() {
                         if (errno == EINTR) continue;
 
                         // Tambahkan keterangan errno biar tidak menebak-nebak
-                        write_log_error("[ERROR] Accept failed: %s (Errno: %d)", strerror(errno), errno);
+                        write_log_error("[ERR] Accept failed:: %s (Errno: %d)", strerror(errno), errno);
                         
                         // Jika karena limit file descriptor (EMFILE), kita harus berhenti sebentar
                         if (errno == EMFILE || errno == ENFILE) {
@@ -82,6 +93,7 @@ void run_event_loop() {
                         }
                         break;
                     }
+                    global_telemetry.active_connections++; // Tambah saat ada tamu masuk
 
                     // --- PANGGIL ANTI SLOW LORIS ---
                     // Jika di konfigurasi diset true
@@ -93,6 +105,21 @@ void run_event_loop() {
                     // Set tamu jadi non-blocking agar tidak bikin thread pool macet
                     set_nonblocking(sock_client);
 
+                    // --- SET SSL ---
+                    if (config.tls_enabled) {
+                        SSL *ssl = SSL_new(halmos_tls_ctx);
+                        if(ssl) {
+                            SSL_set_fd(ssl, sock_client);
+                            set_ssl_for_fd(sock_client, ssl);
+                        } else {
+                            close(sock_client);
+                            global_telemetry.active_connections--;
+                            continue;
+                        }
+                    }
+                    // --- END SSL ---
+
+                    // -------------------------------------
                     struct epoll_event ev_client;
                     ev_client.data.fd = sock_client;
                     // EPOLLONESHOT = Begitu resepsionis minta satu pelayan (worker thread) 
@@ -109,7 +136,7 @@ void run_event_loop() {
                             close(sock_client); 
                         } else {
                             // Jika error lain (misal ENOMEM), baru kita catat
-                            write_log_error("epoll_ctl: client_socket (critical)");
+                            write_log_error("[CRIT] Epoll add failed for client FD %d: %s", sock_client, strerror(errno));
                             close(sock_client);
                         }
                     }
@@ -120,7 +147,10 @@ void run_event_loop() {
 
                 // CEK ERROR: Jika socket bermasalah, jangan masukkan ke antrean
                 if ((events[i].events & EPOLLERR) || (events[i].events & EPOLLHUP)) {
-                    write_log_error("[DEBUG] Closing FD %d due to epoll error/hup", client_fd);
+                    write_log_error("[NET] Closing FD %d (EPOLLERR/HUP)", client_fd);
+                    
+                    global_telemetry.active_connections--; // <--- TAMBAHKAN INI! Tamu batal masuk.
+
                     close(client_fd);
                     continue;
                 }
@@ -132,9 +162,15 @@ void run_event_loop() {
 
                 if (status < 0) {
                     if (status == -1) {
+                        write_log_error("[CORE] Worker queue full! Rejecting FD %d with 503", client_fd);
                         char *res = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                         send(client_fd, res, strlen(res), 0);
+                    } else {
+                        write_log_error("[CORE] Enqueue failed for FD %d (Internal Error)", client_fd);
                     }
+
+                    global_telemetry.active_connections--; // Kurangi karena gagal/tutup
+
                     // Hapus dulu dari epoll sebelum close
                     epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, NULL);
                     shutdown(client_fd, SHUT_RDWR); // Pastikan browser tidak nunggu
@@ -148,10 +184,32 @@ void run_event_loop() {
     close(epoll_fd);
     free(events);
 
-    write_log("Server Halmos is stopped. Cleanup complete."); 
+    // bersihkan resource SSL jika aktif
+    cleanup_openssl();
+    write_log("[CORE] Server stopped. Resource cleanup complete."); 
 }
 
 void stop_event_loop(int sig) {
     (void)sig;
     server_running = 0;
 }
+
+/**
+ * REARM EPOLL ONESHOT
+ * Analogi: Pelayan (Worker) melapor ke Resepsionis (Epoll) 
+ * bahwa meja ini sudah selesai dibersihkan dan siap menerima pesanan lagi.
+ */
+void rearm_epoll_oneshot(int fd) {
+    struct epoll_event ev;
+    // Kembalikan status ke mode pantau: Read + Edge-Triggered + One-Shot
+    ev.events = EPOLLIN | EPOLLET | EPOLLONESHOT;
+    ev.data.fd = fd;
+
+    if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev) == -1) {
+        // Kita log error-nya, kecuali kalau socket-nya memang sudah keburu tutup (EBADF)
+        if (errno != EBADF) {
+            write_log_error("[NET] Failed to re-arm epoll for FD %d: %s", fd, strerror(errno));
+        }
+    }
+}
+

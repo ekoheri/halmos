@@ -19,7 +19,7 @@ DEST_WWW     = /var/www/halmos
 # Compiler
 CC = gcc
 CFLAGS = -Wall -Wextra -O3 -I$(INC_DIR) -I$(INC_DIR)/halmos -DVERSION=\"$(VERSION)\" -D_GNU_SOURCE
-LDFLAGS = -lpthread -lm
+LDFLAGS = -lpthread -lm -lssl -lcrypto
 
 SRCS := $(shell find $(SRC_DIR) -name '*.c')
 OBJS := $(patsubst $(SRC_DIR)/%.c, $(OBJ_DIR)/%.o, $(SRCS))
@@ -90,7 +90,8 @@ clean:
 	sudo rm -rf $(OBJ_DIR) $(BIN_DIR)
 	sudo rm -f $(DEST_BIN)
 	sudo rm -f $(DEST_SERVICE)
-	sudo rm -rf $(DEST_CONF)
+	sudo rm -f $(DEST_CONF)/halmos.conf
+	sudo rm -f $(DEST_CONF)/route.conf
 	sudo systemctl daemon-reload
 	@echo "[OK] Bersih total, CUK!"
 

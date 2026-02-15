@@ -119,12 +119,22 @@ void load_config(const char *filename) {
             // Security
             } else if (strcmp(key, "max_body_size") == 0) {
                 config.max_body_size = (size_t)parse_size(value);
-            } else if (strcmp(key, "secure_application") == 0) {
+            } else if (strcmp(key, "tls_enabled") == 0) {
                 if (strcasecmp(value, "true") == 0) {
-                    config.secure_application = true;
+                    config.tls_enabled = true;
                 } else {
-                    config.secure_application = false;
+                    config.tls_enabled = false;
                 }
+            } else if (strcmp(key, "e2ee_enabled") == 0) {
+                if (strcasecmp(value, "true") == 0) {
+                    config.e2ee_enabled = true;
+                } else {
+                    config.e2ee_enabled = false;
+                }
+            } else if (strcmp(key, "ssl_certificate_file") == 0) {
+                snprintf(config.ssl_certificate_file, sizeof(config.ssl_certificate_file), "%s", value);
+            } else if (strcmp(key, "ssl_private_key_file") == 0) {
+                snprintf(config.ssl_private_key_file, sizeof(config.ssl_private_key_file), "%s", value);
             } else if (strcmp(key, "rate_limit_enabled") == 0) {
                 if (strcasecmp(value, "true") == 0) {
                     config.rate_limit_enabled = true;

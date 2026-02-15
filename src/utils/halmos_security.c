@@ -1,5 +1,7 @@
 #include "halmos_security.h"
+#include "halmos_global.h"
 #include "halmos_log.h"
+#include "halmos_config.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -11,8 +13,18 @@
 #include <unistd.h>      // Untuk sleep()
 #include <time.h>        // Untuk struct timeval (jika belum ada)
 
+#include <openssl/ssl.h>
+#include <stdlib.h>
+
 static RateEntry hash_table[HASH_TABLE_SIZE];
 static pthread_mutex_t rate_limit_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+// Variable Global untuk SSl
+SSL_CTX *halmos_tls_ctx = NULL;
+
+// Variabel ini "sembunyi" di dalam file ini saja
+static SSL** fd_to_ssl_map = NULL;
+static int current_max_limit = 0;
 
 // Algoritma DJB2 Hash - Sangat cepat untuk string (IP Address)
 static unsigned long hash_ip(const char *str) {
@@ -57,12 +69,18 @@ bool is_request_allowed(const char *client_ip, int limit_per_sec) {
                 return true;
             }
 
-            // Cek Limit
             if (hash_table[current_idx].count < limit_per_sec) {
                 hash_table[current_idx].count++;
                 pthread_mutex_unlock(&rate_limit_mutex);
                 return true;
             } else {
+                // LOGIKA CERDAS: Hanya tulis log jika ini request pertama yang melampaui limit
+                // Agar tidak banjir log (Log Spamming)
+                if (hash_table[current_idx].count == limit_per_sec) {
+                    write_log_error("[SEC] Rate limit exceeded for IP: %s (Limit: %d req/sec)", 
+                                     client_ip, limit_per_sec);
+                    hash_table[current_idx].count++; // Naikkan agar log tidak muncul lagi di detik ini
+                }
                 pthread_mutex_unlock(&rate_limit_mutex);
                 return false; // RATE LIMIT EXCEEDED
             }
@@ -103,7 +121,10 @@ void clean_old_rate_limits() {
     }
     
     pthread_mutex_unlock(&rate_limit_mutex);
-    // if(cleared > 0) printf("[SYSTEM] Janitor cleared %d inactive IPs\n", cleared);
+    // Log Janitor: Penting untuk tahu tabel hash kita tidak penuh (collision)
+    if(cleared > 0) {
+        write_log("[SEC] Janitor service: Cleared %d inactive IP entries from table.", cleared);
+    }
 }
 
 void* janitor_thread(void* arg) {
@@ -124,7 +145,7 @@ void start_janitor() {
     // Membuat thread janitor untuk membersihkan rate limit setiap 10 menit
     if (pthread_create(&janitor_tid, NULL, janitor_thread, NULL) == 0) {
         pthread_detach(janitor_tid); // Agar thread berjalan mandiri
-        write_log("[INFO : halmos_Security.c] Background Service: Janitor thread started.");
+        write_log("[SEC] Defense System: Janitor background service activated.");
     }
 }
 
@@ -154,4 +175,132 @@ void anti_slow_loris(int sock_client) {
     tv.tv_usec = 0;
     setsockopt(sock_client, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     setsockopt(sock_client, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+}
+
+// Fungsi untuk mengaktifkan SSL
+
+void init_openssl_runtime() {
+    if (!config.tls_enabled) return; // Jangan inisialisasi kalau di config OFF
+
+    // 1. Inisialisasi library
+    SSL_library_init();
+    OpenSSL_add_all_algorithms();
+    SSL_load_error_strings();
+
+    // 2. Buat Context (Gunakan metode TLS_server_method agar support TLS 1.2 & 1.3)
+    const SSL_METHOD *method = TLS_server_method();
+    halmos_tls_ctx = SSL_CTX_new(method);
+
+    if (!halmos_tls_ctx) {
+        write_log_error("[SEC] Failed to create SSL context: %s", 
+                        ERR_error_string(ERR_get_error(), NULL));
+        exit(EXIT_FAILURE);
+    }
+
+    // 3. Load Certificate & Private Key (Nama file bisa diambil dari config)
+    if (SSL_CTX_use_certificate_file(halmos_tls_ctx, config.ssl_certificate_file, SSL_FILETYPE_PEM) <= 0) {
+        write_log_error("[SEC] Failed to load certificate file: %s", 
+                        ERR_error_string(ERR_get_error(), NULL));
+        exit(EXIT_FAILURE);
+    }
+
+    if (SSL_CTX_use_PrivateKey_file(halmos_tls_ctx, config.ssl_private_key_file, SSL_FILETYPE_PEM) <= 0) {
+        write_log_error("[SEC] Failed to load private key file: %s", 
+                        ERR_error_string(ERR_get_error(), NULL));
+        exit(EXIT_FAILURE);
+    }
+
+    write_log("[SEC] TLS Engine: OpenSSL initialized with certificate.");
+}
+
+void cleanup_openssl() {
+    // Jika context NULL, berarti TLS memang tidak aktif atau sudah di-cleanup
+    if (halmos_tls_ctx == NULL) {
+        return; 
+    }
+
+    // --- FD harus dibersihkan ---
+    if (fd_to_ssl_map != NULL) {
+        // Bebaskan semua objek SSL yang mungkin masih tersisa di map
+        for (int i = 0; i < current_max_limit; i++) {
+            if (fd_to_ssl_map[i] != NULL) {
+                SSL_free(fd_to_ssl_map[i]);
+            }
+        }
+        free(fd_to_ssl_map);
+        fd_to_ssl_map = NULL;
+    }
+    // ---------------------
+    SSL_CTX_free(halmos_tls_ctx);
+    halmos_tls_ctx = NULL;
+
+    // Bersihkan sisa-sisa library OpenSSL dari memori
+    EVP_cleanup();
+    ERR_free_strings();
+    
+    write_log("[SEC] TLS Engine: Resources cleaned up.");
+}
+
+/**
+ * Mendapatkan atau membuat objek SSL untuk FD tertentu
+ */
+void init_ssl_mapping(int max_fds) {
+    current_max_limit = max_fds;
+    // Gunakan calloc agar semua otomatis jadi NULL
+    fd_to_ssl_map = calloc(current_max_limit, sizeof(SSL*));
+    if (!fd_to_ssl_map) {
+        write_log_error("[SEC] FATAL: Failed to allocate SSL mapping table for %d FDs: %s", 
+                        max_fds, strerror(errno));
+        exit(EXIT_FAILURE); // Jika ini gagal, server tidak bisa jalan
+    }
+}
+
+void set_ssl_for_fd(int fd, SSL *ssl) {
+    if (fd_to_ssl_map && fd >= 0 && fd < current_max_limit) {
+        fd_to_ssl_map[fd] = ssl;
+    } else {
+        write_log_error("[SEC] Mapping failed: FD %d is out of range (Limit: %d)", 
+                        fd, current_max_limit);
+    }
+}
+
+SSL* get_ssl_for_fd(int fd) {
+    if (fd_to_ssl_map && fd >= 0 && fd < current_max_limit) {
+        return fd_to_ssl_map[fd];
+    }
+    return NULL;
+}
+
+void nullify_ssl_ptr(int fd) {
+    if (fd_to_ssl_map && fd >= 0 && fd < current_max_limit) {
+        fd_to_ssl_map[fd] = NULL;
+    }
+}
+
+void handle_connection_error(int sock_client, SSL *ssl) {
+    // 1. Cabut dari map SEGERA biar thread lain nggak bisa akses
+    nullify_ssl_ptr(sock_client); 
+    
+    if (ssl) {
+        // 2. Cek error OpenSSL
+        unsigned long err_code = ERR_peek_last_error(); 
+        if (err_code != 0) {
+            write_log_error("[SEC] Connection error on FD %d: %s", 
+                            sock_client, ERR_error_string(err_code, NULL));
+        }
+        
+        // 3. Bebaskan memori SSL
+        SSL_free(ssl);
+    }
+    
+    // 4. Bersihkan queue global OpenSSL untuk thread ini
+    ERR_clear_error();
+    
+    if (global_telemetry.active_connections > 0) {
+        global_telemetry.active_connections--;
+    }
+
+    // 5. Tutup socket secara paksa
+    shutdown(sock_client, SHUT_RDWR);
+    close(sock_client);
 }

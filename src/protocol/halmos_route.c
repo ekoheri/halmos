@@ -1,4 +1,5 @@
 #include "halmos_route.h"
+#include "halmos_log.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -30,7 +31,10 @@ FcgiBackend parse_fcgi_type(const char *s) {
 
 void load_routes() {
     FILE *fp = fopen(route_config_filename, "r");
-    if (!fp) return;
+    if (!fp) {
+        write_log_error("[ROUTER] Configuration file not found: %s", route_config_filename);
+        return;
+    }
 
     g_total_routes = 0;
     char line[512];
@@ -74,7 +78,7 @@ void load_routes() {
         }
     }
     fclose(fp);
-    printf("[ROUTER] %d routes loaded successfully.\n", g_total_routes);
+    write_log("[ROUTER] Successfully loaded %d routes from config", g_total_routes);
 }
 
 void halmos_router_auto_reload() {
@@ -91,7 +95,7 @@ void halmos_router_auto_reload() {
             last_file_mtime = st.st_mtime;
         }
     } else {
-        // write_log_error("[ROUTER-ERROR] File %s NOT FOUND!", route_config_filename);
+        write_log_error("[ROUTER] Access lost to config file: %s", route_config_filename);
     }
 }
 
