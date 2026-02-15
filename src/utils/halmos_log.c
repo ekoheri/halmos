@@ -7,12 +7,21 @@
 #include <time.h>
 #include <pthread.h>
 #include <stdbool.h>
+#include <sys/resource.h>
 
 // Header fungsi helper
 static void* log_thread_routine(void* arg);
 static void enqueue_log(LogType type, const char *format, va_list args);
 
-// 1. Inisialisasi Global Log Queue
+// 1. Inisialisasi Telemetry Global
+HalmosTelemetry global_telemetry = {
+    .total_requests = 0,
+    .active_connections = 0,
+    .mem_usage_kb = 0,
+    .last_latency_ms = 0.0
+};
+
+// 2. Inisialisasi Global Log Queue
 LogQueue global_log_queue = {
     .head = 0, 
     .tail = 0, 
@@ -39,6 +48,25 @@ void write_log_error(const char *format, ...) {
     va_start(args, format);
     enqueue_log(LOG_TYPE_ERROR, format, args);
     va_end(args);
+}
+
+void write_log_telemetry() {
+    char meta_buffer[MAX_LOG_MESSAGE];
+    // Ambil waktu detik ini
+    time_t now = time(NULL);
+    struct tm *t = localtime(&now);
+    char ts[20];
+    strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", t);
+
+    snprintf(meta_buffer, MAX_LOG_MESSAGE, 
+             "{\"ts\":\"%s\",\"type\":\"metrics\",\"req\":%lu,\"conn\":%u,\"ram_kb\":%zu,\"lat_ms\":%.3f}", 
+             ts,
+             global_telemetry.total_requests,
+             global_telemetry.active_connections,
+             global_telemetry.mem_usage_kb,
+             global_telemetry.last_latency_ms);
+    // Langsung kirim 0, tidak perlu variabel empty_args lagi
+    enqueue_log(LOG_TYPE_METRICS, meta_buffer, (va_list){0});
 }
 
 void start_thread_logger() {
@@ -91,25 +119,44 @@ void* log_thread_routine(void* arg) {
         struct tm *t = localtime(&now);
         char log_filename[256];
         char date_str[15];
-        strftime(date_str, sizeof(date_str), "%Y-%m-%d", t);
+        char ts[25];
 
+        // ISI string date_str dan ts!
+        strftime(date_str, sizeof(date_str), "%Y-%m-%d", t);
+        strftime(ts, sizeof(ts), "%H:%M:%S", t); // Jam:Menit:Detik
+
+        // Perbaikan: Logika pemisahan file
         if (current_entry.type == LOG_TYPE_ERROR) {
             snprintf(log_filename, sizeof(log_filename), "%s%s_error.log", LOG_DIR, date_str);
+        } else if (current_entry.type == LOG_TYPE_METRICS) {
+            snprintf(log_filename, sizeof(log_filename), "%s%s_telemetry.log", LOG_DIR, date_str);
         } else {
             snprintf(log_filename, sizeof(log_filename), "%s%s_system.log", LOG_DIR, date_str);
         }
 
         FILE *f = fopen(log_filename, "a");
         if (f) {
-            char ts[25];
-            strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", t);
-            fprintf(f, "[%s] [%s] %s\n", ts, 
-                    (current_entry.type == LOG_TYPE_ERROR ? "ERROR" : "INFO"), 
-                    current_entry.text);
+            if (current_entry.type == LOG_TYPE_METRICS) {
+                // Untuk metrik, kita print mentah-mentah JSON-nya per baris
+                // Kita tambahkan timestamp di dalam JSON agar lebih keren
+                fprintf(f, "%s\n", current_entry.text); 
+            } else {
+                // Untuk log biasa (System/Error), tetap pakai format lama yang manusiawi
+                const char* label = (current_entry.type == LOG_TYPE_ERROR) ? "ERROR" : "INFO";
+                fprintf(f, "[%s] [%s] %s\n", ts, label, current_entry.text);
+            }
             fclose(f);
         }
     }
     return NULL;
+}
+
+void update_mem_usage() {
+    struct rusage usage;
+    if (getrusage(RUSAGE_SELF, &usage) == 0) {
+        // Di Linux, ru_maxrss hasilnya dalam Kilobytes (KB)
+        global_telemetry.mem_usage_kb = (size_t)usage.ru_maxrss;
+    }
 }
 
 void enqueue_log(LogType type, const char *format, va_list args) {
@@ -119,7 +166,17 @@ void enqueue_log(LogType type, const char *format, va_list args) {
         int tail = global_log_queue.tail;
         
         // Simpan pesan dan tipenya
-        vsnprintf(global_log_queue.entries[tail].text, MAX_LOG_MESSAGE, format, args);
+        // FIX 3: Cek jika args valid (untuk write_log) atau NULL (untuk telemetry)
+        if (format) {
+            if (type == LOG_TYPE_METRICS) {
+                // Ganti strncpy dengan snprintf untuk menghilangkan warning
+                // Ini menjamin string selalu diakhiri dengan '\0'
+                snprintf(global_log_queue.entries[tail].text, MAX_LOG_MESSAGE, "%s", format);
+            } else {
+                // Untuk log biasa tetap pakai vsnprintf
+                vsnprintf(global_log_queue.entries[tail].text, MAX_LOG_MESSAGE, format, args);
+            }
+        }
         global_log_queue.entries[tail].type = type;
         
         global_log_queue.tail = (tail + 1) % MAX_LOG_QUEUE;
@@ -141,4 +198,11 @@ void stop_thread_logger() {
     pthread_join(log_tid, NULL);
     
     //fprintf(stderr, "[HALMOS] Logger thread joined. Goodbye.\n");
+}
+
+//helper
+double hitung_durasi(struct timespec start, struct timespec end) {
+    double s = (double)end.tv_sec - (double)start.tv_sec;
+    double ns = (double)end.tv_nsec - (double)start.tv_nsec;
+    return (s * 1000.0) + (ns / 1000000.0); // Hasil dalam milidetik (ms)
 }

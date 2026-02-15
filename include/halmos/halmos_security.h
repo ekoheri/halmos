@@ -5,6 +5,11 @@
 #include <time.h>
 #include <pthread.h>
 
+// tambahan untuk library SSL
+#include <openssl/ssl.h>
+#include <openssl/err.h>
+#include <stdlib.h>
+
 // Tentukan ukuran table (Gunakan angka prima agar distribusi hash bagus)
 #define HASH_TABLE_SIZE 10007
 
@@ -14,6 +19,9 @@ typedef struct {
     int count;              // Jumlah request
     time_t window_start;    // Detik saat ini
 } RateEntry;
+
+// Variable global untuk context SSL
+extern SSL_CTX *halmos_tls_ctx;
 
 /**
  * Pengecekan apakah request diperbolehkan.
@@ -44,5 +52,16 @@ void reset_rate_limits();
 * FUngsi untuk membersihkan IP user yang nyangkut di RAM 
 */
 void start_janitor();
+
+/*
+* Fungsi-fungsi untuk mengaktifkan SSL
+*/
+void init_openssl_runtime();
+void cleanup_openssl();
+void init_ssl_mapping(int max_fds);
+void set_ssl_for_fd(int fd, SSL *ssl);
+SSL* get_ssl_for_fd(int fd);
+void nullify_ssl_ptr(int fd);
+void handle_connection_error(int sock_client, SSL *ssl);
 
 #endif

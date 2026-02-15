@@ -89,59 +89,47 @@ typedef struct {
 
 extern HalmosFCGI_Pool fcgi_pool;
 
-/* --- Core Lifecycle Functions --- */
+/* --- GLOBAL EXTERN --- */
+extern HalmosFCGI_Pool fcgi_pool;
 
-/**
- * Inisialisasi pool koneksi FastCGI.
- * Dipanggil sekali saat startup server.
+/* * ==========================================
+ * 1. POOL MANAGEMENT (halmos_fcgi_pool.c)
+ * ==========================================
  */
 void halmos_fcgi_pool_init(void);
-
-/**
- * Mengambil koneksi aktif dari pool (Thread-Safe).
- * Jika pool kosong, fungsi ini akan membuka socket baru ke backend.
- */
-//int halmos_fcgi_conn_acquire(const char *target, int port);
-
-/**
- * Mengembalikan koneksi ke pool agar bisa digunakan kembali.
- * Jika pool sudah penuh (MAX_HALMOS_FCGI_POOL), socket akan ditutup.
- */
-//void halmos_fcgi_conn_release(int sockfd);
-
-/* --- Request Handling --- */
-
-/**
- * Eksekusi request ke FastCGI backend (Rust, PHP, dll).
- * Menggunakan internal buffering untuk efisiensi system call.
- */
-int halmos_fcgi_request_stream(
-    RequestHeader *req,
-    int sock_client,
-    const char *target,
-    int port,
-    void *post_data,          
-    size_t post_data_len,      
-    size_t content_length
-);
-
-/**
- * Dealokasi memori response.
- */
-void halmos_fcgi_pool_init(void);
-
-int halmos_fcgi_request_stream(
-    RequestHeader *req,
-    int sock_client,
-    const char *target,  // Tambahkan ini (bisa IP "127.0.0.1" atau path "/tmp/php.sock")
-    int port,            // Tambahkan ini (9000 untuk TCP, atau 0 untuk Unix Socket)
-    void *post_data,
-    size_t post_data_len,
-    size_t content_length
-);
-
-/**
- * Membersihkan seluruh pool saat shutdown.
- */
 void halmos_fcgi_pool_destroy(void);
+int  halmos_fcgi_conn_acquire(const char *target, int port);
+void halmos_fcgi_conn_release(int sockfd);
+
+/* * ==========================================
+ * 2. PROTOCOL & MARSHALLING (halmos_fcgi_proto.c)
+ * ==========================================
+ */
+// Merakit semua Params menjadi satu buffer besar
+int halmos_fcgi_begin_request(const char *target, int port, unsigned char *gather_buf, int *g_ptr, int request_id);
+
+void halmos_fcgi_build_params(RequestHeader *req, int sock_client, size_t content_length, unsigned char *gather_buf, int *g_ptr, int request_id);
+
+int halmos_fcgi_send_and_receive(int fpm_sock, int sock_client, RequestHeader *req, int request_id, unsigned char *gather_buf, int g_ptr, void *post_data, size_t content_length);
+
+// Mengirim data STDIN (Body POST)
+void halmos_fcgi_send_stdin(int sockfd, int request_id, const void *data, int data_len);
+
+// Helper internal untuk pasangan key-value
+int  add_fcgi_pair(unsigned char* dest, const char *name, const char *value, int offset, int max_len);
+
+/* * ==========================================
+ * 3. I/O & STREAMING (halmos_fcgi_io.c)
+ * ==========================================
+ */
+// Fungsi berat yang melakukan Zero-Copy Splice
+int  halmos_fcgi_splice_response(int fpm_fd, int sock_client, RequestHeader *req);
+
+/* * ==========================================
+ * 4. PUBLIC API (halmos_fcgi.c)
+ * ==========================================
+ */
+// Fungsi fasad yang dipanggil oleh manager http
+int halmos_fcgi_request_stream(RequestHeader *req, int sock_client, const char *target, int port, void *post_data, size_t content_length);
+
 #endif

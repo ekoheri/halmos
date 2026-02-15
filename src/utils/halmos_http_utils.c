@@ -1,6 +1,7 @@
 #include "halmos_http_utils.h"
 #include "halmos_global.h"
 #include "halmos_config.h"
+#include "halmos_log.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -83,29 +84,30 @@ char *get_time_string() {
 // Fungsi pembantu: Cek apakah string berakhir dengan suffix tertentu
 // Lebih kencang dan akurat daripada strstr()
 int has_extension(const char *uri, const char *path_info, const char *ext) {
-    printf("[HASH-EXTENSION-CHECK] URI: [%s] Ext: %s\n", 
-                uri, ext);
-
-    // 1. Pengaman
     if (!uri || !ext || ext[0] == '\0') return 0;
 
-    // 2. Tentukan batas akhir (pembatas titik)
-    // Kalau ada path_info, kita kunci panjangnya cuma sampe sebelum path_info mulai
+    char temp_path[1024];
     size_t len_to_check;
-    if (path_info && path_info[0] != '\0') {
-        len_to_check = path_info - uri;
+
+    // 1. Tentukan berapa banyak karakter yang harus dicek
+    if (path_info && path_info >= uri) { // Pastikan path_info memang di dalam/setelah uri
+        len_to_check = (size_t)(path_info - uri);
     } else {
         len_to_check = strlen(uri);
     }
 
-    size_t len_ext = strlen(ext);
+    // 2. Batasi agar tidak overflow buffer temp
+    if (len_to_check >= sizeof(temp_path)) len_to_check = sizeof(temp_path) - 1;
 
-    // 3. Kalau sisa path lebih pendek dari ekstensi, gak mungkin cocok
+    // 3. Copy bagian file-nya saja ke buffer sementara agar aman dari "sampah" body
+    strncpy(temp_path, uri, len_to_check);
+    temp_path[len_to_check] = '\0';
+
+    // 4. Baru cari ekstasinya di temp_path
+    size_t len_ext = strlen(ext);
     if (len_to_check < len_ext) return 0;
 
-    // 4. Bandingkan dari posisi "titik pembatas"
-    // Kita bandingkan string tepat di belakang len_to_check
-    return (strncasecmp(uri + len_to_check - len_ext, ext, len_ext) == 0);
+    return (strcasecmp(temp_path + len_to_check - len_ext, ext) == 0);
 }
 
 /************************************
@@ -143,7 +145,7 @@ char *sanitize_path(const char *root, const char *uri) {
     }
 
     if (realpath(full_path, resolved_path) == NULL) {
-        // printf("[DEBUG] realpath gagal untuk: %s\n", full_path);
+        write_log_error("[ERR] Root path invalid or inaccessible: %s", root);
         return NULL;
     }
 
@@ -153,6 +155,8 @@ char *sanitize_path(const char *root, const char *uri) {
     
     size_t root_len = strlen(resolved_root);
     if (strncmp(resolved_root, resolved_path, root_len) != 0) {
+        // TANDA BAHAYA: Percobaan Path Traversal!
+        write_log_error("[SECURITY] Path traversal attempt blocked: %s", resolved_path);
         return NULL;
     }
 

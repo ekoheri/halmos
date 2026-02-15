@@ -38,6 +38,8 @@ bool parse_http_request(char *raw_data, size_t total_received, RequestHeader *re
     // 0. RESET: Bersihkan struct agar tidak ada sisa data dari request sebelumnya
     memset(req, 0, sizeof(RequestHeader));
 
+    req->is_keep_alive = true;
+
     // 1. CARI BATAS HEADER (\r\n\r\n)
     char *header_end = strstr(raw_data, "\r\n\r\n");
     if (!header_end) return false;
@@ -76,13 +78,13 @@ bool parse_http_request(char *raw_data, size_t total_received, RequestHeader *re
                 *q = '\0'; 
                 req->query_string = q + 1; 
             } else {
-                req->query_string = "";
+                req->query_string = NULL;
             }
 
             // --- ANALISIS STRUKTUR PATH (ZERO-COPY) ---
             req->directory = u_start; // Default ke root URI
             req->uri = u_start;       // Default URI adalah u_start
-            req->path_info = "";
+            req->path_info = NULL;
 
             char *last_dot = strrchr(u_start, '.');
             if (last_dot) {
@@ -102,22 +104,16 @@ bool parse_http_request(char *raw_data, size_t total_received, RequestHeader *re
                     while (file_sep > u_start && *file_sep != '/') {
                         file_sep--;
                     }
-                    // Pointing ke posisi yang tepat
-                    //req->uri = file_sep + 1; // Contoh: "index.php/login"
                 }
             } else {
                 // Kasus tanpa titik: Bisa jadi folder atau Clean URL
                 // Kita biarkan req->uri = u_start
             }
-            printf("[DEBUG] Step 1 (Standard) -> Method: %s, URI: %s, Query: %s, PathInfo: %s\n", 
-                   req->method, req->uri, req->query_string, req->path_info);
-            fflush(stdout);
-
             req->is_valid = true;
         }
     }
 
-    // 2 [ INJECT TABLE ROUTER NYA DISINI SAJA ] 
+    // 2 [ INJECT TABLE ROUTER ] 
 
     if (req->is_valid) {
         // Cari di tabel apakah ada rute yang cocok (misal: /dhe-sedang)
@@ -135,25 +131,25 @@ bool parse_http_request(char *raw_data, size_t total_received, RequestHeader *re
                 strcat(t_query, req->query_string);
             }
 
-            // 3. UPDATE DATA DI STRUCT (Agar FastCGI-mu yang matang langsung dapet data bener)
+            // 3. UPDATE DATA DI STRUCT
             // Simpan hasil rakitan ke route_result milik struct
             int offset = 0;
 
-            // Update req->uri (Agar SCRIPT_FILENAME FastCGI-mu otomatis bener)
+            // Update req->uri
             req->uri = &req->route_result[offset];
             strcpy(req->uri, t_uri);
             offset += strlen(t_uri) + 1;
 
             // 2. SINKRONISASI UNTUK SISTEM UTAMA (PENTING!)
-            // Agar SCRIPT_FILENAME di FastCGI-mu otomatis mengarah ke file yang benar
+            // Agar SCRIPT_FILENAME di FastCGI otomatis mengarah ke file yang benar
             req->directory = req->uri;
 
-            // Update req->query_string (Agar QUERY_STRING FastCGI-mu otomatis bener)
+            // Update req->query_string
             req->query_string = &req->route_result[offset];
             strcpy(req->query_string, t_query);
             offset += strlen(t_query) + 1;
 
-            // --- SINKRONISASI URI & PATH_INFO (GABUNGAN) ---
+            // --- SINKRONISASI URI & PATH_INFO ---
             offset = 0;
             req->uri = &req->route_result[offset];
             
@@ -170,15 +166,10 @@ bool parse_http_request(char *raw_data, size_t total_received, RequestHeader *re
                 // strcat akan menimpa \0 milik t_uri dan menutupnya di akhir t_path
                 strcat(req->uri, t_path);
             } else {
-                req->path_info = ""; 
+                req->path_info = NULL; 
             }
 
             req->backend_type = match->fcgi_type;
-
-            printf("[ROUTER] MATCH FOUND! Target: %s, Final Query: %s, Backend: %d\n", 
-                   req->uri, req->query_string, req->backend_type);
-            printf("[ROUTER-CHECK] URI: [%s] | Query: [%s] |Path Info [%s] | Backend: %d\n", 
-                req->uri, req->query_string, req->path_info, req->backend_type);
         } else {
             // Jika rute tidak ditemukan (NULL), default ke PHP
             // URI dan Query tetap menunjuk ke raw_data (Zero-Copy murni)
@@ -186,7 +177,7 @@ bool parse_http_request(char *raw_data, size_t total_received, RequestHeader *re
         }
     }
     
-    // 3. PARSE HEADERS (Looping aman tanpa strtok_r)
+    // 3. PARSE HEADERS
     char *p = line_end + 2; 
     while (p < header_end) {
         char *next_line = strstr(p, "\r\n");
@@ -202,16 +193,25 @@ bool parse_http_request(char *raw_data, size_t total_received, RequestHeader *re
             if (strcasecmp(key, "Host") == 0) req->host = val;
             else if (strcasecmp(key, "Content-Type") == 0) req->content_type = val;
             else if (strcasecmp(key, "Content-Length") == 0) {
-                // FIX BUG: Gunakan strtol agar tidak overflow/negatif
+                // FIX BUG: Digunakan strtol agar tidak overflow/negatif
                 req->content_length = strtol(val, NULL, 10);
                 if (req->content_length < 0) req->content_length = 0;
             }
             else if (strcasecmp(key, "Cookie") == 0) req->cookie_data = val;
             else if (strcasecmp(key, "Connection") == 0) {
-                req->is_keep_alive = (strcasestr(val, "keep-alive") != NULL);
+                // UPDATE: Cek "close" secara eksplisit
+                if (strcasestr(val, "close")) {
+                    req->is_keep_alive = false;
+                } else if (strcasestr(val, "keep-alive")) {
+                    req->is_keep_alive = true;
+                }
             }
         }
         p = next_line + 2;
+    }
+
+    if (req->is_valid) {
+        write_log("[HTTP] %s %s (Host: %s)", req->method, req->uri, req->host ? req->host : "unknown");
     }
 
     // 4. SET BODY DATA (Penting untuk POST)
@@ -225,9 +225,9 @@ bool parse_http_request(char *raw_data, size_t total_received, RequestHeader *re
         req->body_length = 0;
     }
 
-    // 5. LOGIKA MULTIPART: Aktif kembali!
+    // 5. LOGIKA MULTIPART
     if (req->content_type && strstr(req->content_type, "multipart/form-data")) {
-        // Panggil fungsi multipart kamu di sini
+        // Panggil fungsi multipart dari halmos_multipart.c
         parse_multipart_body(req); 
     }
 
@@ -240,6 +240,5 @@ void free_request_header(RequestHeader *req) {
         req->parts = NULL;
         req->parts_count = 0;
     }
-    // Field lain (uri, host, query_string) aman, nggak perlu di-free
 }
 

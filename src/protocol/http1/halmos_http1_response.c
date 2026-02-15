@@ -9,6 +9,7 @@
 #include "halmos_fcgi.h"
 #include "halmos_log.h"
 #include "halmos_config.h"
+#include "halmos_security.h" // Supaya get_ssl_for_fd dikenal
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -32,8 +33,9 @@
 #include <sys/sendfile.h>
 
 /* --- PROTOTYPE INTERNAL --- */
-void send_directory_listing(int sock_client, const char *path, const char *uri);
-void send_http1_headers(int client_fd, const HalmosResponse *res, bool keep_alive);
+static void send_directory_listing(int sock_client, const char *path, const char *uri);
+static void send_http1_headers(int client_fd, const HalmosResponse *res, bool keep_alive);
+static ssize_t halmos_send(int fd, const void *buf, size_t len, int flags);
 
 /********************************************************************
  * 1. SEND HALMOS RESPONSE
@@ -42,7 +44,8 @@ void send_http1_headers(int client_fd, const HalmosResponse *res, bool keep_aliv
 void send_halmos_response(int sock_client, HalmosResponse res, bool keep_alive) {
     send_http1_headers(sock_client, &res, keep_alive);
     if (res.type == RES_TYPE_MEMORY && res.content != NULL && res.length > 0) {
-        send(sock_client, res.content, res.length, MSG_NOSIGNAL);
+        //halmos_send(sock_client, res.content, res.length, MSG_NOSIGNAL);
+        halmos_send(sock_client, res.content, res.length, MSG_NOSIGNAL);
     }
 }
 
@@ -67,33 +70,54 @@ void static_response(int sock_client, RequestHeader *req) {
     const char *active_root = get_active_root(req->host);
     char *safe_path = sanitize_path(active_root, req->uri);
     if (!safe_path) {
+        write_log_error("[STATIC] Path sanitization failed for URI: %s", req->uri);
         send_mem_response(sock_client, 404, "Not Found", "<h1>404 Not Found</h1>", req->is_keep_alive);
         return;
     }
 
     struct stat st;
     if (stat(safe_path, &st) != 0 || !S_ISREG(st.st_mode)) {
+        write_log("[STATIC] 404 Not Found: %s", safe_path);
         send_mem_response(sock_client, 404, "Not Found", "<h1>404 Not Found</h1>", req->is_keep_alive);
         free(safe_path); 
         return;
     }
 
     int fd = open(safe_path, O_RDONLY);
-    if (fd != -1) {
-        // OPTIMASI TINGKAT DEWA
-        int state = 1;
-        setsockopt(sock_client, IPPROTO_TCP, TCP_NODELAY, &state, sizeof(state));
-        setsockopt(sock_client, IPPROTO_TCP, TCP_QUICKACK, &state, sizeof(state));
+    if (fd == -1) {
+        write_log_error("[ERR] Failed to open file %s: %s", safe_path, strerror(errno));
+        send_mem_response(sock_client, 500, "Internal Server Error", "<h1>500</h1>", false);
+        free(safe_path);
+        return;
+    }
+    // OPTIMASI TINGKAT DEWA
+    int state = 1;
+    setsockopt(sock_client, IPPROTO_TCP, TCP_NODELAY, &state, sizeof(state));
+    setsockopt(sock_client, IPPROTO_TCP, TCP_QUICKACK, &state, sizeof(state));
 
-        char header[1024];
-        int h_len = snprintf(header, sizeof(header),
-            "HTTP/1.1 200 OK\r\nContent-Type: %s\r\nContent-Length: %ld\r\n"
-            "Server: Halmos-Savage/2.1\r\nConnection: %s\r\n"
-            "X-Content-Type-Options: nosniff\r\n\r\n",
-            get_mime_type(req->uri), st.st_size, req->is_keep_alive ? "keep-alive" : "close");
-        
-        send(sock_client, header, h_len, MSG_NOSIGNAL);
+    char header[1024];
+    int h_len = snprintf(header, sizeof(header),
+        "HTTP/1.1 200 OK\r\nContent-Type: %s\r\nContent-Length: %ld\r\n"
+        "Server: Halmos-Savage/2.1\r\nConnection: %s\r\n"
+        "X-Content-Type-Options: nosniff\r\n\r\n",
+        get_mime_type(req->uri), st.st_size, req->is_keep_alive ? "keep-alive" : "close");
+    
+    halmos_send(sock_client, header, h_len, MSG_NOSIGNAL);
 
+    if (config.tls_enabled) {
+        // --- JALUR TLS: Read-Encrypt-Write ---
+        char *file_buf = malloc(65536); // Chunk 64KB
+        ssize_t n_read;
+        while ((n_read = read(fd, file_buf, 65536)) > 0) {
+            ssize_t total_sent = 0;
+            while (total_sent < n_read) {
+                ssize_t n_sent = halmos_send(sock_client, file_buf + total_sent, n_read - total_sent, 0);
+                if (n_sent <= 0) break;
+                total_sent += n_sent;
+            }
+        }
+        free(file_buf);
+    } else {
         off_t offset = 0;
         size_t remaining = st.st_size;
         
@@ -110,8 +134,8 @@ void static_response(int sock_client, RequestHeader *req) {
             } else if (sent == 0) break;
             remaining -= (size_t)sent;
         }
-        close(fd);
     }
+    close(fd);
     free(safe_path);
 }
 
@@ -121,6 +145,7 @@ void static_response(int sock_client, RequestHeader *req) {
  ********************************************************************/
 
 void process_request_routing(int sock_client, RequestHeader *req) {
+    //fprintf(stderr, "[DEBUG-ROUTING-DECISION] Method: %s | URI: %s\n", req->method, req->uri);
     // A. Scripting (FastCGI)
     const char *target_ip = NULL;
     int target_port = 0;
@@ -136,9 +161,10 @@ void process_request_routing(int sock_client, RequestHeader *req) {
     }
 
     if (target_ip && target_port > 0) {
-        printf("[JALANKAN FASTCGI]\n");
+        write_log("[CGI] Proxying %s to %s:%d", req->uri, target_ip, target_port);
         if (halmos_fcgi_request_stream(req, sock_client, target_ip, target_port,
-            req->body_data, req->body_length, req->content_length) != 0) {
+            req->body_data, req->content_length) != 0) {
+            write_log_error("[CGI] Backend error on %s:%d for request %s", target_ip, target_port, req->uri);
             send_mem_response(sock_client, 502, "Bad Gateway", "<h1>502 Bad Gateway</h1>", req->is_keep_alive);
         }
         return;
@@ -185,6 +211,7 @@ void process_request_routing(int sock_client, RequestHeader *req) {
     if (strcmp(req->method, "GET") == 0) {
         static_response(sock_client, req);
     } else {
+        write_log("[HTTP] Method %s not allowed for static files", req->method);
         send_mem_response(sock_client, 405, "Method Not Allowed", "<h1>405</h1>", req->is_keep_alive);
     }
 }
@@ -204,16 +231,16 @@ void send_directory_listing(int sock_client, const char *path, const char *uri) 
                          "<html><head><style>body{font-family:sans-serif;padding:20px;}"
                          "table{width:100%;border-collapse:collapse;}th,td{padding:8px;border-bottom:1px solid #ddd;}"
                          "</style></head><body><h1>Index of ";
-    send(sock_client, header, strlen(header), 0);
-    send(sock_client, uri, strlen(uri), 0);
+    halmos_send(sock_client, header, strlen(header), 0);
+    halmos_send(sock_client, uri, strlen(uri), 0);
     const char *table_start = "</h1><hr><table><tr><th>Name</th><th>Size</th><th>Modified</th></tr>";
-    send(sock_client, table_start, strlen(table_start), 0);
+    halmos_send(sock_client, table_start, strlen(table_start), 0);
 
     struct dirent *dir;
     while ((dir = readdir(d)) != NULL) {
         if (strcmp(dir->d_name, ".") == 0) continue;
         struct stat st;
-        char fpath[1024];
+        char fpath[4096];
         snprintf(fpath, sizeof(fpath), "%s/%s", path, dir->d_name);
         stat(fpath, &st);
 
@@ -223,11 +250,39 @@ void send_directory_listing(int sock_client, const char *path, const char *uri) 
             uri, (uri[strlen(uri)-1] == '/' ? "" : "/"), dir->d_name,
             dir->d_name, (S_ISDIR(st.st_mode) ? "/" : ""), 
             (long)st.st_size/1024, ctime(&st.st_mtime));
-        send(sock_client, entry, e_len, 0);
+        halmos_send(sock_client, entry, e_len, 0);
     }
     closedir(d);
     const char *footer = "</table><hr><i>Halmos Savage Engine</i></body></html>";
-    send(sock_client, footer, strlen(footer), 0);
+    halmos_send(sock_client, footer, strlen(footer), 0);
+}
+
+// HELPER
+ssize_t halmos_send(int fd, const void *buf, size_t len, int flags) {
+    if (config.tls_enabled) {
+        SSL *ssl = get_ssl_for_fd(fd);
+        if (!ssl) return -1;
+
+        size_t total_sent = 0;
+        while (total_sent < len) {
+            int n_sent = SSL_write(ssl, (char*)buf + total_sent, (int)(len - total_sent));
+            
+            if (n_sent <= 0) {
+                int err = SSL_get_error(ssl, n_sent);
+                if (err == SSL_ERROR_WANT_WRITE || err == SSL_ERROR_WANT_READ) {
+                    // Buffer penuh, tunggu sebentar (Savage Mode: Poll)
+                    struct pollfd pfd = { .fd = fd, .events = POLLOUT };
+                    poll(&pfd, 1, 10); // Tunggu 10ms
+                    continue;
+                }
+                return -1; // Real error
+            }
+            total_sent += n_sent;
+        }
+        return total_sent;
+    }
+    // Untuk non-TLS tetap pakai send biasa
+    return send(fd, buf, len, flags);
 }
 
 /********************************************************************
@@ -241,5 +296,6 @@ void send_http1_headers(int client_fd, const HalmosResponse *res, bool keep_aliv
         res->status_code, res->status_message, res->mime_type, res->length, 
         keep_alive ? "keep-alive" : "close");
     
-    send(client_fd, header, len, MSG_NOSIGNAL);
+    //send(client_fd, header, len, MSG_NOSIGNAL);
+    halmos_send(client_fd, header, len, MSG_NOSIGNAL);
 }

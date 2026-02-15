@@ -14,7 +14,10 @@ void parse_multipart_body(RequestHeader *req) {
 
     // 1. Ekstrak Boundary
     char *boundary_ptr = strstr(req->content_type, "boundary=");
-    if (!boundary_ptr) return;
+    if (!boundary_ptr) {
+        write_log_error("[HTTP] Multipart boundary missing from %s", req->client_ip);
+        return;
+    }
     
     char boundary[256];
     int b_len = snprintf(boundary, sizeof(boundary), "--%s", boundary_ptr + 9);
@@ -35,7 +38,7 @@ void parse_multipart_body(RequestHeader *req) {
             if (!tmp) {
                 // Jika RAM penuh, kita berhenti parkir part baru tapi 
                 // data yang sudah masuk sebelumnya tidak hilang (tidak leak).
-                write_log("Error: Gagal realloc memory untuk multipart parts.");
+                write_log_error("[MEM] Failed to realloc multipart parts for %s", req->client_ip);
                 return; 
             }
             req->parts = tmp;
@@ -96,6 +99,14 @@ void parse_multipart_body(RequestHeader *req) {
             } else if (next_boundary) {
                 p->data_len = (size_t)(next_boundary - (char*)p->data);
             }
+
+            // LOG SETIAP PART YANG BERHASIL DI-PARSE
+            write_log("[UPLOAD] Part #%d parsed: name=\"%s\", file=\"%s\" (%zu bytes)", 
+                      req->parts_count + 1, 
+                      p->name ? p->name : "none", 
+                      p->filename ? p->filename : "none", 
+                      p->data_len);
+                      
             remaining_len -= (next_boundary - current_pos);
             current_pos = next_boundary;
             req->parts_count++;

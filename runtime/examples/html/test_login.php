@@ -6,7 +6,8 @@ $current_file = basename(__FILE__);
 
 if (isset($_GET['action']) && $_GET['action'] === 'logout') {
     session_destroy();
-    header("Location: $current_file");
+    // Gunakan URL relatif tanpa nama domain dulu untuk ngetes
+    header("Location: " . $_SERVER['PHP_SELF'], true, 302);
     exit;
 }
 

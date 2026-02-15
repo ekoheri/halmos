@@ -69,7 +69,7 @@ int enqueue(TaskQueue *q, int sock) {
     // 1. Safety Check: Kapasitas Parkir
     if (q->count >= q->max_queue_limit) {
         pthread_mutex_unlock(&q->lock);
-        // Tulis log sesekali saja agar tidak banjir log (Throttle logging)
+        write_log_error("[QUEUE] Capacity reached! Rejecting client FD %d", sock);
         return -1; 
     }
 
@@ -114,7 +114,7 @@ int enqueue(TaskQueue *q, int sock) {
                 }
             }
         }
-        write_log("[SCALING] High Load Detected! Upscaling to %d workers.", q->total_workers);
+        write_log("[SCALING] Load spike detected. Upscaling pool to %d workers", q->total_workers);
     }
 
     // 5. Bangunkan koki yang lagi tidur
@@ -157,14 +157,10 @@ int dequeue(TaskQueue *q, struct timeval *arrival) {
         // - Jumlah koki masih di atas batas minimal
         if (rc == ETIMEDOUT && q->head == NULL && q->total_workers > q->min_threads_limit) {
             q->total_workers--;
-            write_log("[INFO : halmos_queue.c] Dynamic Scaling: DOWNSCALING! Remaining: %d", 
-                q->total_workers);
+            write_log("[SCALING] Load subsided. Downscaling pool to %d workers", q->total_workers);
             pthread_mutex_unlock(&q->lock);
             pthread_exit(NULL); 
         }
-
-        // Jika rc == 0 (bel bunyi) tapi q->head masih NULL (spurious wakeup), 
-        // while loop akan otomatis mengulang tunggu lagi.
     }
 
     // 3. Ambil nota (Request) dari antrean
