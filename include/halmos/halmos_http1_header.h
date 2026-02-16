@@ -48,6 +48,9 @@ typedef struct {
     // Tempat penyimpanan hasil transformasi agar pointer di atas tetap valid
     char route_result[512];
     
+    //STATUS TLS/BUKAN
+    bool is_tls;
+
     // BODY ZERO-COPY
     void *body_data;        // Menunjuk langsung ke offset di buffer manager
     size_t body_length;

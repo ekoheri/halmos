@@ -2,6 +2,7 @@
 #define HALMOS_HTTP_BRIDGE_H
 
 #include <sys/types.h>
+#include <openssl/ssl.h>
 
 /**
  * Tipe Protokol yang didukung Halmos
@@ -21,7 +22,8 @@ typedef enum {
  * * @param client_fd : File descriptor milik client
  * @return halmos_protocol_t : Hasil deteksi (HTTP1 atau HTTP2)
  */
-halmos_protocol_t bridge_detect(int socket_client);
+
+halmos_protocol_t bridge_detect(int fd, SSL *ssl); 
 
 /**
  * halmos_bridge_dispatch

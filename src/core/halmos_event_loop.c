@@ -6,6 +6,7 @@
 #include "halmos_queue.h"
 #include "halmos_security.h"
 #include "halmos_route.h"
+#include "halmos_tls.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -35,11 +36,14 @@ volatile sig_atomic_t server_running = 1;
 
 void start_event_loop() {
     // 1. Inisialisasi TLS dulu sebelum perang
-    init_openssl_runtime();
-    init_ssl_mapping(g_queue_capacity + 2000);
+    if (config.tls_enabled) {
+        init_openssl_runtime();
+        // Mapping FD ke SSL agar Worker bisa nyari objek SSL-nya nanti
+        init_ssl_mapping(g_queue_capacity + 2000); 
+    }
     
     // 2. aktifkan epoll
-    // menghitung berapa jumah core untuk 
+    // menghitung berapa jumlah core untuk 
     // patokan berapa jumlah event pool yang cocok
     events = malloc(sizeof(struct epoll_event) * g_event_batch_size);
 
@@ -105,21 +109,6 @@ void run_event_loop() {
                     // Set tamu jadi non-blocking agar tidak bikin thread pool macet
                     set_nonblocking(sock_client);
 
-                    // --- SET SSL ---
-                    if (config.tls_enabled) {
-                        SSL *ssl = SSL_new(halmos_tls_ctx);
-                        if(ssl) {
-                            SSL_set_fd(ssl, sock_client);
-                            set_ssl_for_fd(sock_client, ssl);
-                        } else {
-                            close(sock_client);
-                            global_telemetry.active_connections--;
-                            continue;
-                        }
-                    }
-                    // --- END SSL ---
-
-                    // -------------------------------------
                     struct epoll_event ev_client;
                     ev_client.data.fd = sock_client;
                     // EPOLLONESHOT = Begitu resepsionis minta satu pelayan (worker thread) 
@@ -150,7 +139,10 @@ void run_event_loop() {
                     write_log_error("[NET] Closing FD %d (EPOLLERR/HUP)", client_fd);
                     
                     global_telemetry.active_connections--; // <--- TAMBAHKAN INI! Tamu batal masuk.
-
+                    // PENTING: Bersihkan sisa-sisa SSL di mapping table sebelum FD ditutup!
+                    if (config.tls_enabled) {
+                        cleanup_connection_properly(client_fd);
+                    }
                     close(client_fd);
                     continue;
                 }
@@ -185,7 +177,14 @@ void run_event_loop() {
     free(events);
 
     // bersihkan resource SSL jika aktif
-    cleanup_openssl();
+    if (config.tls_enabled) {
+        // Hapus mapping FD-ke-SSL
+        // cleanup_ssl_mapping(); 
+        
+        // Matikan engine OpenSSL secara global
+        cleanup_openssl();
+        write_log("[CORE] TLS Resources cleaned up.");
+    }
     write_log("[CORE] Server stopped. Resource cleanup complete."); 
 }
 
