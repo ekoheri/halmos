@@ -1,103 +1,151 @@
-#include "halmos_http_bridge.h"
-#include "halmos_global.h"
-#include "halmos_http1_manager.h"
-#include "halmos_security.h"
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 
+#include "halmos_global.h"
+#include "halmos_config.h" 
+#include "halmos_http1_manager.h"
+#include "halmos_http_bridge.h"
+#include "halmos_event_loop.h"
+#include "halmos_log.h"
+#include "halmos_tls.h"
+
+#include <stdbool.h>
+#include <openssl/ssl.h>
+#include <openssl/err.h>
 #include <sys/socket.h>
 #include <string.h>
-#include <stdio.h>
 #include <errno.h>
+#include <unistd.h>
+#include <stdio.h>
 
 /**
- * Logika "Mengintip" Protokol
+ * Deteksi Protokol (Support Plaintext & TLS)
  */
-
-
-halmos_protocol_t bridge_detect(int sock_client) {
-    char buffer[32]; 
-    memset(buffer, 0, sizeof(buffer)); 
+halmos_protocol_t bridge_detect(int fd, SSL *ssl) {
+    char buf[4];
     ssize_t n;
 
-    if (config.tls_enabled) {
-        SSL *ssl = get_ssl_for_fd(sock_client);
-        if (!ssl) {
-            return PROTOCOL_ERROR;
-        }
-
-        n = SSL_peek(ssl, buffer, sizeof(buffer) - 1);
-        
+    // Jika pakai TLS, kita peek lewat OpenSSL
+    if (ssl) {
+        n = SSL_peek(ssl, buf, 4);
         if (n <= 0) {
             int err = SSL_get_error(ssl, n);
             if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) return PROTOCOL_RETRY;
-            return PROTOCOL_ERROR;
+            return PROTOCOL_UNKNOWN;
         }
     } else {
-        n = recv(sock_client, buffer, sizeof(buffer) - 1, MSG_PEEK | MSG_DONTWAIT);
-        if (n <= 0) {
+        // Plaintext peek
+        n = recv(fd, buf, 4, MSG_PEEK | MSG_DONTWAIT);
+        if (n < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) return PROTOCOL_RETRY;
-            return PROTOCOL_ERROR;
+            return PROTOCOL_UNKNOWN;
         }
     }
 
-    if (n < 8) {
-        return PROTOCOL_RETRY;
-    }
+    if (n < 4) return PROTOCOL_RETRY;
 
-    if (strstr(buffer, "HTTP/1.")) {
+    // Deteksi HTTP Methods
+    if (memcmp(buf, "GET ", 4) == 0 || memcmp(buf, "POST", 4) == 0 || 
+        memcmp(buf, "HTTP", 4) == 0 || memcmp(buf, "PUT ", 4) == 0 ||
+        memcmp(buf, "HEAD", 4) == 0) {
         return PROTOCOL_HTTP1;
-    }
-
-    if (strncmp(buffer, "PRI * HTTP/2", 12) == 0) {
-        return PROTOCOL_HTTP2;
     }
 
     return PROTOCOL_UNKNOWN;
 }
 
 /**
- * Logika Pengalihan Aliran (Multiplexer)
+ * Multiplexer Utama: Jembatan antara Core FD dan Protocol Manager
  */
-
 int bridge_dispatch(int sock_client) {
-    // JANGAN PEEK kalau TLS aktif! 
-    // OpenSSL itu sensitif, kalau diintip doang sisa datanya sering nyangkut.
-    if (config.tls_enabled) {
-        return handle_http1_session(sock_client); 
+    char peek_buf[1];
+    
+    // 1. Ambil state SSL jika ada
+    SSL *ssl = get_ssl_for_fd(sock_client);
+    bool is_actually_tls = (ssl != NULL);
+
+    // 2. DETEKSI AWAL: Intip byte pertama kalau belum yakin ini TLS
+    if (!is_actually_tls) {
+        ssize_t n = recv(sock_client, peek_buf, 1, MSG_PEEK | MSG_DONTWAIT);
+        
+        if (n < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                rearm_epoll_oneshot(sock_client);
+                return 1; 
+            }
+            return 0; 
+        }
+        if (n == 0) return 0; 
+
+        // 0x16 adalah Handshake Record Header di TLS
+        if (peek_buf[0] == 0x16) {
+            is_actually_tls = true;
+            
+            // Lazy Allocation: Baru bikin objek SSL di sini! Core jadi bersih.
+            if (config.tls_enabled) {
+                ssl = SSL_new(halmos_tls_ctx);
+                SSL_set_fd(ssl, sock_client);
+                set_ssl_for_fd(sock_client, ssl);
+            }
+        }
     }
 
-    // Kalau HTTP biasa, silakan intip sesukamu
-    halmos_protocol_t proto = bridge_detect(sock_client);
+    // 3. EKSEKUSI JALUR TLS
+    if (is_actually_tls) {
+        if (!config.tls_enabled) {
+            write_log_error("[BRIDGE] Reject: TLS request on HTTP-only server. FD %d", sock_client);
+            char *msg = "HTTP/1.1 400 Bad Request\r\n"
+                            "Content-Type: text/plain\r\n"
+                            "Connection: close\r\n\r\n"
+                            "This server only speaks HTTP, Boss!";
+            
+            send(sock_client, msg, strlen(msg), MSG_NOSIGNAL);
 
-    if (proto == PROTOCOL_RETRY) return 1;
+            return 0; 
+        }
 
-    if (proto == PROTOCOL_HTTP1) {
-        return handle_http1_session(sock_client);
+        if (!ssl) return 0;
+
+        // Pastikan Handshake Selesai
+        if (!SSL_is_init_finished(ssl)) {
+            int r = SSL_accept(ssl);
+            if (r <= 0) {
+                int err = SSL_get_error(ssl, r);
+                if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
+                    rearm_epoll_oneshot(sock_client);
+                    return 1;
+                }
+                return 0; // Handshake gagal
+            }
+        }
+    } 
+    // 4. EKSEKUSI JALUR PLAIN (Kalau TLS aktif tapi user maksa HTTP)
+    else if (config.tls_enabled) {
+        char *msg = "HTTP/1.1 400 Bad Request\r\n"
+                                "Content-Type: text/html\r\n"
+                                "Connection: close\r\n\r\n"
+                                "<html><head><title>400 Bad Request</title></head>"
+                                "<body style='font-family:sans-serif; text-align:center; padding-top:50px;'>"
+                                "<h1>HTTPS Required</h1>"
+                                "<p>Halmos Server only accepts <b>HTTPS</b> connections, Boss!</p>"
+                                "<hr><i style='color:gray;'>Halmos Core Engine</i>"
+                                "</body></html>";
+        send(sock_client, msg, strlen(msg), MSG_NOSIGNAL);
+        return 0; 
     }
 
-    return 0; // Unknown or unsupported
-}
-
-int bridge_dispatch_lama(int sock_client) {
-    halmos_protocol_t proto = bridge_detect(sock_client);
+    // 5. PENYERAHAN KE PROTOCOL MANAGER
+    halmos_protocol_t proto = bridge_detect(sock_client, ssl);
 
     if (proto == PROTOCOL_RETRY) {
+        rearm_epoll_oneshot(sock_client);
         return 1;
     }
 
-    int result = 0;
-
-    switch (proto) {
-        case PROTOCOL_HTTP1:
-            result = handle_http1_session(sock_client);
-            break;
-
-        case PROTOCOL_HTTP2:
-            result = 0;
-            break;
-
-        default:
-            result = 0; 
-            break;
+    if (proto == PROTOCOL_HTTP1) {
+        return handle_http1_session(sock_client, is_actually_tls);
     }
-    return result;
+
+    return 0;
 }

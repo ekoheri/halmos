@@ -3,26 +3,13 @@
 
 #include <stddef.h>
 #include <stdbool.h>
-#include "halmos_http1_header.h"            // Butuh HalmosResponse
+#include "halmos_http1_header.h"
 
-/**
- * Mengirimkan respon HTTP/1.1 lengkap ke client.
- * Fungsi ini akan merangkai status line, headers, dan body.
- */
-void send_halmos_response(int sock_client, HalmosResponse res, bool keep_alive);
+// Nama fungsi harus persis dengan yang ada di response.c ente
+void send_mem_response_plain(int client_fd, int status_code, const char *status_text, const char *content, bool keep_alive);
 
-/**
- * Fungsi shortcut untuk mengirim respon cepat dari memori (seperti 404 atau 400).
- */
-void send_mem_response(int sock_client, int status, const char *msg, const char *content, bool keep_alive);
-
-/**
- * Fungsi khusus untuk melayani permintaan file statis dari disk.
- */
 void process_request_routing(int sock_client, RequestHeader *req);
 
-void static_response(int sock_client, RequestHeader *req);
-
-void dynamic_response(int sock_client, RequestHeader *req_header);
+void static_response_zerocopy(int sock_client, RequestHeader *req);
 
 #endif

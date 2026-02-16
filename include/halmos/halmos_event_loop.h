@@ -9,6 +9,8 @@
 void start_event_loop();
 void run_event_loop();
 void stop_event_loop(int sig);
+
+//dipanggil di thread pool dan bridge
 void rearm_epoll_oneshot(int fd); 
 
 #endif

@@ -35,14 +35,20 @@ static char* fast_trim(char *s) {
 }
 
 bool parse_http_request(char *raw_data, size_t total_received, RequestHeader *req) {
+    bool saved_tls = req->is_tls;
     // 0. RESET: Bersihkan struct agar tidak ada sisa data dari request sebelumnya
     memset(req, 0, sizeof(RequestHeader));
-
+    req->is_tls = saved_tls;
+    
     req->is_keep_alive = true;
 
     // 1. CARI BATAS HEADER (\r\n\r\n)
     char *header_end = strstr(raw_data, "\r\n\r\n");
-    if (!header_end) return false;
+    //if (!header_end) return false;
+    if (!header_end) {
+        //fprintf(stderr, "[DEBUG-PARSE-ERR] Header end not found!\n");
+        return false;
+    }
     char *line_start = raw_data;
     char *line_end = strstr(line_start, "\r\n");
     if (!line_end || line_end > header_end) return false;
@@ -71,6 +77,8 @@ bool parse_http_request(char *raw_data, size_t total_received, RequestHeader *re
 
             // 3. Isolasi URI (Tebas spasi akhir)
             *u_end = '\0'; 
+
+            // --- DEBUG URI AWAL ---
 
             // 4. Pisahkan Query String
             char *q = strchr(u_start, '?');
@@ -225,6 +233,19 @@ bool parse_http_request(char *raw_data, size_t total_received, RequestHeader *re
         req->body_length = 0;
     }
 
+    // --- SATU BLOK DEBUG TERPUSAT (REKAP PARSER) ---
+    /*
+    fprintf(stderr, "\n=== [HALMOS PARSER DEBUG RECAP] ===\n");
+    fprintf(stderr, " Method      : %s\n", req->method);
+    fprintf(stderr, " Final URI   : %s\n", req->uri ? req->uri : "NULL");
+    fprintf(stderr, " QueryString : %s\n", req->query_string ? req->query_string : "NULL");
+    fprintf(stderr, " Path Info   : %s\n", req->path_info ? req->path_info : "NULL");
+    fprintf(stderr, " Host        : %s\n", req->host ? req->host : "NULL");
+    fprintf(stderr, " Body Length : %zu\n", req->body_length);
+    fprintf(stderr, " Backend     : %s\n", (req->backend_type == FCGI_PHP) ? "PHP-FPM" : "STATIC/OTHER");
+    fprintf(stderr, " Keep-Alive  : %s\n", req->is_keep_alive ? "YES" : "NO");
+    fprintf(stderr, "====================================\n\n");
+    */
     // 5. LOGIKA MULTIPART
     if (req->content_type && strstr(req->content_type, "multipart/form-data")) {
         // Panggil fungsi multipart dari halmos_multipart.c

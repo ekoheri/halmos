@@ -1,3 +1,7 @@
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
 #include "halmos_http1_manager.h"
 #include "halmos_global.h"
 #include "halmos_http1_header.h"
@@ -6,213 +10,300 @@
 #include "halmos_multipart.h"
 #include "halmos_http_utils.h"
 #include "halmos_security.h"
+#include "halmos_tls.h"
 #include "halmos_config.h"
 #include "halmos_log.h"
 
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
-#include <sys/socket.h>
-#include <poll.h>
+#include <string.h>    // Buat memset, strstr
+#include <unistd.h>    // Buat usleep, read, close
+#include <sys/socket.h> // Buat recv, send
 #include <errno.h>
-#include <arpa/inet.h>
+#include <stdbool.h>   // Buat tipe data bool
+#include <openssl/ssl.h> // Pastikan ini ada kalau Boss panggil SSL_read/write
+#include <poll.h>
+#include <sys/stat.h>  // Biar kenal 'struct stat' dan 'stat()'
+#include <fcntl.h>     // Biar kenal 'open()' dan 'O_RDONLY'
 
-static ssize_t halmos_recv(int fd, void *buf, size_t len, int flags) {
-    if (config.tls_enabled) {
+/* --- FUNGSI INTERNAL (STATIC) --- */
+
+/**
+ * halmos_recv: Wrapper cerdas untuk baca data.
+ * Di sinilah "Dapur Dekripsi" berada.
+ */
+static ssize_t halmos_recv(int fd, void *buf, size_t len, bool is_tls) {
+    if (is_tls) {
         SSL *ssl = get_ssl_for_fd(fd);
         if (!ssl) return -1;
+        // SSL_read melakukan dekripsi internal sebelum masuk ke buf
         return SSL_read(ssl, buf, (int)len);
     }
-    return recv(fd, buf, len, flags);
+    return recv(fd, buf, len, 0);
 }
 
-int handle_http1_session(int sock_client) {
-    char client_ip[INET_ADDRSTRLEN] = "Unknown";
-    struct sockaddr_in addr;
-    socklen_t addr_len = sizeof(addr);
-    if (getpeername(sock_client, (struct sockaddr *)&addr, &addr_len) == 0) {
-        inet_ntop(AF_INET, &addr.sin_addr, client_ip, INET_ADDRSTRLEN);
-    }
+/**
+ * Tunggu data dengan Poll agar tidak memakan CPU (Busy-wait)
+ */
+static bool wait_for_data(int fd, int timeout_ms) {
+    struct pollfd pfd = {.fd = fd, .events = POLLIN};
+    return poll(&pfd, 1, timeout_ms) > 0;
+}
 
-    int keep_alive_status = 1;
+/**
+ * Geser semua pointer di req_header setelah buffer di-realloc.
+ * Menjaga agar Zero-Copy parser tidak crash.
+ */
+static void update_header_pointers(RequestHeader *req, ptrdiff_t diff) {
+    if (req->uri)          req->uri += diff;
+    if (req->directory)    req->directory += diff;
+    if (req->query_string) req->query_string += diff;
+    if (req->host)         req->host += diff;
+    if (req->content_type) req->content_type += diff;
+    if (req->cookie_data)  req->cookie_data += diff;
+    if (req->body_data)    req->body_data = (void*)((char*)req->body_data + diff);
+    if (req->path_info)    req->path_info += diff;
+}
 
-    size_t current_buf_limit = (config.request_buffer_size > 0) ? config.request_buffer_size : 8192;
-    char *buffer = (char *)malloc(current_buf_limit);
-    if (!buffer) {
-        write_log_error("[MEM] Failed to allocate initial HTTP buffer for FD %d", sock_client);
-        close(sock_client);
-        return -1;
-    }
+/**
+ * Fungsi khusus menarik Header sampai ketemu \r\n\r\n
+ */
+static ssize_t recv_until_header_end(int sock, char *buf, size_t limit, bool is_tls) {
+    ssize_t total = 0;
+    int retries = 0;
 
-    while (keep_alive_status) {
-        RequestHeader req_header;
-        memset(&req_header, 0, sizeof(RequestHeader));
+    while (total < (ssize_t)limit - 1) {
+        ssize_t n = halmos_recv(sock, buf + total, limit - total - 1, is_tls);
         
-        buffer[0] = '\0';
+        if (n > 0) {
+            total += n;
+            buf[total] = '\0';
+            if (strstr(buf, "\r\n\r\n")) return total;
+            retries = 0;
+        } else if (n < 0) {
+            // Cek Non-Blocking
+            bool retry_it = false;
+            if (is_tls) {
+                int err = SSL_get_error(get_ssl_for_fd(sock), (int)n);
+                if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) retry_it = true;
+            } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                retry_it = true;
+            }
 
-        // --- 2. PERBAIKAN TERIMA HEADER (LOOPING + DEBUG) ---
-        ssize_t total_received = 0;
-        int timeout_retry = 0;
+            if (retry_it && ++retries < 500) {
+                usleep(1000); continue;
+            }
+            break;
+        } else break; // Connection closed
+    }
+    return (total > 0) ? total : -1;
+}
 
-        while (total_received < (ssize_t)current_buf_limit - 1) {
-            ssize_t n = halmos_recv(sock_client, buffer + total_received, current_buf_limit - total_received - 1, 0);
-            
-            if (n > 0) {
-                total_received += n;
-                buffer[total_received] = '\0';
-                timeout_retry = 0; // Reset kalau ada progress
-                if (strstr(buffer, "\r\n\r\n")) break; // HEADER LENGKAP!
-            } 
-            else {
-                // Cek apakah ini cuma masalah Non-Blocking
-                if (config.tls_enabled) {
-                    SSL *ssl = get_ssl_for_fd(sock_client);
-                    int ssl_err = SSL_get_error(ssl, (int)n);
-                    if (ssl_err == SSL_ERROR_WANT_READ || ssl_err == SSL_ERROR_WANT_WRITE) {
-                        usleep(1000); // Tunggu 1ms
-                        if (++timeout_retry < 500) continue; // Coba lagi sampai 0.5 detik
-                    }
-                } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                    usleep(1000);
-                    if (++timeout_retry < 500) continue;
-                }
-                
-                // Kalau beneran 0 atau error fatal
-                if (total_received == 0) goto exit_session;
+/**
+ * Fungsi khusus menarik sisa Body berdasarkan Content-Length
+ */
+static bool recv_http_body(int sock, RequestHeader *req, char **buf_ptr, size_t *limit, bool is_tls) {
+    size_t header_len = (char*)req->body_data - *buf_ptr;
+    size_t total_needed = header_len + req->content_length;
+
+    // Ekspansi buffer jika body lebih besar dari buffer awal
+    if (total_needed > *limit) {
+        char *new_buf = realloc(*buf_ptr, total_needed + 1);
+        if (!new_buf) return false;
+        
+        update_header_pointers(req, new_buf - *buf_ptr);
+        *buf_ptr = new_buf;
+        *limit = total_needed + 1;
+    }
+
+    char *ptr = (char *)req->body_data + req->body_length;
+    size_t to_recv = req->content_length - req->body_length;
+    
+    while (to_recv > 0) {
+        ssize_t n = halmos_recv(sock, ptr, to_recv, is_tls);
+        if (n > 0) {
+            ptr += n; to_recv -= n; req->body_length += n;
+        } else {
+            if (n < 0 && wait_for_data(sock, 100)) continue;
+            return false; 
+        }
+    }
+    return true;
+}
+
+/* --- FUNGSI UTAMA (PUBLIC) --- */
+
+int handle_http1_session(int sock_client, bool is_tls) {
+    // CCTV 1: Cek apakah sesi dimulai
+    //fprintf(stderr, "[DEBUG] Sesi dimulai. FD: %d, TLS: %s\n", sock_client, is_tls ? "YES" : "NO");
+    int keep_alive = 1;
+    size_t buf_limit = (config.request_buffer_size > 0) ? config.request_buffer_size : 8192;
+    char *buffer = malloc(buf_limit);
+    if (!buffer) return 0;
+
+    while (keep_alive) {
+        RequestHeader req;
+        memset(&req, 0, sizeof(RequestHeader));
+        req.is_tls = is_tls; // Simpan status "KTP" TLS
+
+        // 1. Tarik Header
+        ssize_t received = recv_until_header_end(sock_client, buffer, buf_limit, is_tls);
+        // CCTV 2: Cek data yang masuk
+        //fprintf(stderr, "[DEBUG] Header diterima: %ld bytes\n", received);
+        if (received <= 0) break;
+
+        // 2. Parsing (Data sudah didekripsi oleh halmos_recv)
+        if (!parse_http_request(buffer, received, &req) || !req.is_valid) {
+            //fprintf(stderr, "[DEBUG] Parser GAGAL! Mengirim 400 Bad Request...\n");
+            send_mem_response_plain(sock_client, 400, "Bad Request", "400 Bad Request", is_tls);
+            free_request_header(&req);
+            break;
+        }
+
+        // CCTV 3: Kalau sampai sini, berarti sukses masuk ke routing
+        //fprintf(stderr, "[DEBUG] Parser Sukses. Mengarahkan ke routing...\n");
+
+        // 3. Tarik Body jika ada (Misal: POST/PUT)
+        if (req.content_length > 0) {
+            if (!recv_http_body(sock_client, &req, &buffer, &buf_limit, is_tls)) {
+                free_request_header(&req);
                 break;
             }
         }
 
-        // --- DEBUG PRINT UNTUK BOSS ---
-        //fprintf(stderr, "\n[DEBUG-RAW-HEADER] FD: %d | Total: %zd bytes\n%s\n", sock_client, total_received, buffer);
+        // 4. Kirim Response (is_tls diteruskan di dalam req)
+        process_request_routing(sock_client, &req);
 
-        // --- 3. Parsing (Zero-Copy) ---
-        if (!parse_http_request(buffer, (size_t)total_received, &req_header) || !req_header.is_valid) {
-            write_log_error("[HTTP] Bad Request from %s: Invalid protocol/header", client_ip);
-            send_mem_response(sock_client, 400, "Bad Request", "<h1>400 Bad Request</h1>", false);
-            free_request_header(&req_header);
-            break; 
-        }
+        keep_alive = req.is_keep_alive;
+        free_request_header(&req);
+    }
 
-        // TAMBAHKAN INI BUAT CEK:
-        //fprintf(stderr, "[DEBUG-BODY-CHECK] Content-Length: %ld | Body Length Already Read: %zu\n", 
-        //(long)req_header.content_length, req_header.body_length);
+    free(buffer);
+    //fprintf(stderr, "[DEBUG] Sesi ditutup.\n");
+    return keep_alive;
+}
 
-        // --- 4. Dynamic Body Expansion (Tetap Sama) ---
-        bool body_error = false;
-        if (req_header.content_length > 0) {
-            size_t max_allowed = config.max_body_size > 0 ? config.max_body_size : (10 * 1024 * 1024);
-            
-            if ((size_t)req_header.content_length > max_allowed) {
-                write_log_error("[HTTP] Payload too large from %s: %ld bytes", client_ip, (long)req_header.content_length);
-                send_mem_response(sock_client, 413, "Payload Too Large", "<h1>413</h1>", false);
-                body_error = true;
+/**
+ * handle_ssl_response_logic
+ * Iki lho fungsine, Boss! Taruh di Manager.c biar satu rumah sama SSL.
+ */
+
+static void wait_for_ssl_write(int fd) {
+    struct pollfd pfd = {.fd = fd, .events = POLLOUT};
+    poll(&pfd, 1, 100); // Tunggu 100ms sampai socket siap nulis
+}
+
+/**
+ * handle_ssl_response_logic - FULL VERSION
+ * Menangani File Statis & Auto-Index via SSL/TLS
+ */
+void handle_ssl_response_logic(int sock_client, RequestHeader *req) {
+    //fprintf(stderr, "[SSL DEBUG] Memulai respons SSL untuk URI: %s\n", req->uri ? req->uri : "NULL");
+    
+    const char *active_root = get_active_root(req->host);
+    char *safe_path = sanitize_path(active_root, req->uri);
+    struct stat st;
+
+    // 1. VALIDASI AWAL & PENGECEKAN DIREKTORI
+    if (!safe_path || stat(safe_path, &st) != 0) {
+        goto send_404;
+    }
+
+    // --- LOGIKA AUTO-INDEX (Jika URI menunjuk ke Folder) ---
+    if (S_ISDIR(st.st_mode)) {
+        //fprintf(stderr, "[SSL DEBUG] URI adalah direktori, mencari index...\n");
+        char index_path[4096];
+        
+        // A. Prioritas 1: index.html (Tetap di jalur SSL statis)
+        snprintf(index_path, sizeof(index_path), "%s/index.html", safe_path);
+        if (access(index_path, F_OK) == 0) {
+            free(safe_path);
+            safe_path = strdup(index_path);
+            stat(safe_path, &st); // Perbarui stat untuk file index.html
+            //fprintf(stderr, "[SSL DEBUG] Auto-index ditemukan: index.html\n");
+        } 
+        // B. Prioritas 2: index.php (Lempar balik ke routing agar diproses FastCGI)
+        else {
+            snprintf(index_path, sizeof(index_path), "%s/index.php", safe_path);
+            if (access(index_path, F_OK) == 0) {
+                //fprintf(stderr, "[SSL DEBUG] Auto-index ditemukan: index.php. Mengalihkan ke FastCGI...\n");
+                strcat(req->uri, "index.php"); // Update URI di struct
+                free(safe_path);
+                process_request_routing(sock_client, req); // RE-ROUTE!
+                return; // KELUAR, karena akan ditangani oleh halmos_fcgi_request_stream
             } else {
-                size_t header_len = (char*)req_header.body_data - buffer;
-                size_t total_needed_size = header_len + req_header.content_length;
+                goto send_404; // Folder ada, tapi index kosong
+            }
+        }
+    }
 
-                if (total_needed_size > current_buf_limit) {
-                    char *old_buf = buffer; 
-                    char *new_buf = (char *)realloc(buffer, total_needed_size + 1);
-                    
-                    if (!new_buf) {
-                        write_log_error("[MEM] Failed to expand buffer");
-                        body_error = true;
-                    } else {
-                        buffer = new_buf;
-                        current_buf_limit = total_needed_size + 1;
-                        ptrdiff_t diff = new_buf - old_buf;
-                        
-                        // 1. Geser semua pointer utama
-                        if (req_header.uri)          req_header.uri += diff;
-                        if (req_header.directory)    req_header.directory += diff;
-                        if (req_header.query_string) req_header.query_string += diff;
-                        if (req_header.host)         req_header.host += diff;
-                        if (req_header.content_type) req_header.content_type += diff;
-                        if (req_header.cookie_data)  req_header.cookie_data += diff;
-                        if (req_header.body_data)    req_header.body_data = (void*)((char*)req_header.body_data + diff);
+    // 2. CEK APAKAH FILE REGULER
+    if (!S_ISREG(st.st_mode)) {
+        //fprintf(stderr, "[SSL DEBUG] Bukan file reguler: %s\n", safe_path);
+        goto send_404;
+    }
 
-                        // 2. KHUSUS PATH_INFO: Jika dia tidak NULL, geser. 
-                        // Jika log masih ngaco, paksa NULL dulu buat ngetes!
-                        if (req_header.path_info) {
-                            req_header.path_info += diff;
-                        } else {
-                            req_header.path_info = NULL; 
-                        }
-                                                
-                        // FIX: Hapus baris 'ptr = ...' di sini karena belum dideklarasikan
+    //fprintf(stderr, "[SSL DEBUG] Membuka file: %s (Size: %ld bytes)\n", safe_path, st.st_size);
+    int fd = open(safe_path, O_RDONLY);
+    if (fd == -1) {
+        //fprintf(stderr, "[SSL DEBUG] Gagal open() file: %s (errno: %d)\n", safe_path, errno);
+        if (safe_path) free(safe_path);
+        return;
+    }
+
+    // 3. KIRIM HEADER VIA SSL
+    char header[1024];
+    int h_len = snprintf(header, sizeof(header),
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: %s\r\n"
+        "Content-Length: %ld\r\n"
+        "Server: Halmos-Savage/2.1\r\n"
+        "Connection: %s\r\n\r\n",
+        get_mime_type(req->uri), st.st_size, req->is_keep_alive ? "keep-alive" : "close");
+    
+    if (halmos_send_ssl(sock_client, header, h_len) <= 0) {
+        close(fd);
+        if (safe_path) free(safe_path);
+        return;
+    }
+
+    // 4. KIRIM BODY DENGAN FLOW CONTROL (ANTI-MUTER)
+    char *f_buf = malloc(32768);
+    if (f_buf) {
+        ssize_t n_read;
+        while ((n_read = read(fd, f_buf, 32768)) > 0) {
+            ssize_t total_sent = 0;
+            while (total_sent < n_read) {
+                ssize_t n_sent = halmos_send_ssl(sock_client, f_buf + total_sent, n_read - total_sent);
+                
+                if (n_sent > 0) {
+                    total_sent += n_sent;
+                } else {
+                    // Handling Non-Blocking & SSL Buffer
+                    SSL *ssl = get_ssl_for_fd(sock_client);
+                    int err = SSL_get_error(ssl, (int)n_sent);
+                    if (err == SSL_ERROR_WANT_WRITE || err == SSL_ERROR_WANT_READ) {
+                        wait_for_ssl_write(sock_client); // Fungsi poll()
+                        continue; 
                     }
-                }
-
-                if (!body_error) {
-                    // POSISI START: Awal data body yang belum terbaca
-                    char *ptr = (char *)req_header.body_data + req_header.body_length;
-                    size_t total_needed_recv = req_header.content_length - req_header.body_length;
-                    int body_retry = 0;
-
-                    //fprintf(stderr, "[DEBUG-RECV-START] Menarik sisa: %zu bytes\n", total_needed_recv);
-
-                    while (total_needed_recv > 0) {
-                        ssize_t n = halmos_recv(sock_client, ptr, total_needed_recv, 0);
-                        
-                        if (n > 0) {
-                            ptr += n;
-                            total_needed_recv -= n;
-                            req_header.body_length += n;
-                            body_retry = 0; 
-                        } else if (n < 0) {
-                            int err_code = 0;
-                            bool retry_it = false;
-
-                            if (config.tls_enabled) {
-                                SSL *ssl = get_ssl_for_fd(sock_client);
-                                err_code = SSL_get_error(ssl, (int)n);
-                                if (err_code == SSL_ERROR_WANT_READ || err_code == SSL_ERROR_WANT_WRITE) retry_it = true;
-                            } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                                retry_it = true;
-                            }
-
-                            if (retry_it) {
-                                struct pollfd pfd = {.fd = sock_client, .events = POLLIN};
-                                // TUNGGU SAMPAI DATA READY (100ms)
-                                if (poll(&pfd, 1, 100) <= 0) {
-                                    body_retry++;
-                                }
-                                if (body_retry < 500) continue; // Jangan menyerah dulu
-                            }
-                            
-                            write_log_error("[RECV] Gagal narik body: %s", config.tls_enabled ? "SSL Error" : strerror(errno));
-                            body_error = true;
-                            break;
-                        } else {
-                            // n == 0 (Koneksi diputus peer)
-                            write_log_error("[RECV] Koneksi putus saat upload");
-                            body_error = true;
-                            break;
-                        }
-                    }
-                    
-                    //if (!body_error) {
-                    //    fprintf(stderr, "[DEBUG-RECV-SUCCESS] Berhasil narik %zu bytes body\n", req_header.body_length);
-                    //}
+                    goto end_ssl_send; // Gagal total
                 }
             }
         }
-
-        // --- 5. Routing & Response ---
-        if (!body_error) {
-            process_request_routing(sock_client, &req_header);
-        }
-
-        keep_alive_status = req_header.is_keep_alive;
-        free_request_header(&req_header);
-
-        if (!keep_alive_status || body_error) break;
     }
 
-exit_session:
-    if (buffer) free(buffer);
-    return keep_alive_status;
-}
+end_ssl_send:
+    if (f_buf) free(f_buf);
+    close(fd);
+    if (safe_path) free(safe_path);
+    //fprintf(stderr, "[SSL DEBUG] Respons Selesai.\n---\n");
+    return;
 
+send_404:
+    {
+        //fprintf(stderr, "[SSL DEBUG] Mengirim 404 Not Found\n");
+        const char *nf = "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: 13\r\nConnection: close\r\n\r\n404 Not Found";
+        halmos_send_ssl(sock_client, nf, strlen(nf));
+        if (safe_path) free(safe_path);
+    }
+}
