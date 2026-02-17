@@ -23,7 +23,7 @@ typedef enum {
  * @return halmos_protocol_t : Hasil deteksi (HTTP1 atau HTTP2)
  */
 
-halmos_protocol_t bridge_detect(int fd, SSL *ssl); 
+//halmos_protocol_t bridge_detect(int fd, SSL *ssl); 
 
 /**
  * halmos_bridge_dispatch

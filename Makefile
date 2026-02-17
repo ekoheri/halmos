@@ -43,11 +43,10 @@ install: all
 	sudo install -d $(DEST_WWW)
 	sudo install -m 755 $(TARGET) $(DEST_BIN)
 	sudo install -m 644 $(RUNTIME_DIR)/configs/halmos.conf $(DEST_CONF)/
-	sudo install -m 644 $(RUNTIME_DIR)/configs/route.conf $(DEST_CONF)/
 	sudo install -m 644 $(RUNTIME_DIR)/configs/$(SERVICE_NAME) $(DEST_SERVICE)
 	sudo cp -r $(RUNTIME_DIR)/examples/* $(DEST_WWW)/
 	sudo systemctl daemon-reload
-	@echo "[OK] File terpasang. Gunakan 'make run' untuk menyalakan background."
+	@echo "[OK] File terpasang. Gunakan 'make run' untuk menjalankan di background.Atau 'make debug' untuk menjalankan terminal."
 
 # ---------------------------------------------------------
 # 2. RUN: Jalankan sebagai service background (Systemd)
@@ -74,7 +73,7 @@ debug: all
 	fi
 	@if pgrep -x "$(TARGET_NAME)" > /dev/null; then \
 		echo "WARNING: Ada proses Halmos liar (zombie) ditemukan!"; \
-		echo "Gue sembelih dulu ya..."; \
+		echo "Gue bersihin dulu ya..."; \
 		sudo killall -9 $(TARGET_NAME); \
 	fi
 	@echo "[DEBUG] Memulai Halmos v$(VERSION) di terminal..."
@@ -91,8 +90,7 @@ clean:
 	sudo rm -f $(DEST_BIN)
 	sudo rm -f $(DEST_SERVICE)
 	sudo rm -f $(DEST_CONF)/halmos.conf
-	sudo rm -f $(DEST_CONF)/route.conf
 	sudo systemctl daemon-reload
-	@echo "[OK] Bersih total, CUK!"
+	@echo "[OK] Program Bersih total!"
 
 .PHONY: all install run debug clean
