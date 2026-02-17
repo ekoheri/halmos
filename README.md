@@ -33,10 +33,17 @@ git clone https://github.com/ekoheri/halmos.git
 cd halmos
 ```
 ### Memasang ke Sistem
-Perintah ini akan menyalin binary ke /usr/bin, konfigurasi ke /etc/halmos, dan mendaftarkan service ke systemd..
+Perintah ini akan menyalin binary ke /usr/bin, konfigurasi ke /etc/halmos, dan mendaftarkan service ke systemd.
 ```bash
 sudo make install
 ```
+### Konfigurasi Sistem
+Lakukan konfigurasi sistem, sebelum web server dijalankan. Sesuaikan dengan environment system anda. Konfigurasi terletak di folder /etc/halmos/halmos.conf, dan ikuti petunjuk yang ada.
+```bash
+nano /etc/halmos/halmos.conf
+```
+Simpan perubahan konfigurasinya, dan sistem siap dijalankan.
+
 ## 4. Cara Menjalankan
 Tersedia dua mode utama untuk menjalankan Halmos:
 
@@ -66,7 +73,9 @@ Setelah service berjalan, Anda dapat memverifikasi hasilnya dengan beberapa cara
 curl -l http://localhost:8080
 ```
 ### Cek via Browser
-Buka browser dan akses: http://localhost:8080 atau http://ip-server-anda:8080. Pastikan file index sudah tersedia di direktori /var/www/halmos/html.
+Buka browser dan akses: http://localhost:8080 atau http://ip-server-anda:8080. 
+
+Pastikan file index sudah tersedia di direktori /var/www/halmos/html, dan pastikan port sesuai dengan konfigurasi port anda.
 
 ## 7. Pembersihan (Uninstall)
 Untuk menghapus seluruh file build dan menghapus Halmos dari sistem secara total:
