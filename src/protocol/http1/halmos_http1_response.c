@@ -140,15 +140,24 @@ void process_request_routing(int sock_client, RequestHeader *req) {
     //        req->uri, req->is_tls ? "YES" : "NO");
 
     // A. JALUR SSL: Balikkan ke Manager untuk diproses dengan SSL_write
+
+    const char *t_ip = "";
+    int t_port = 0; 
     if (has_extension(req->uri, req->path_info, ".php")) {
-        const char *t_ip = config.php_server;
-        int t_port = config.php_port;
-        
-        if (t_ip && t_port > 0) {
+        t_ip = config.php_server;
+        t_port = config.php_port;
+    } else if (has_extension(req->uri, req->path_info, config.rust_ext)) {
+        t_ip = config.rust_server;
+        t_port = config.rust_port;
+    } else if (has_extension(req->uri, req->path_info, config.python_ext)) {
+        t_ip = config.python_server;
+        t_port = config.python_port;
+    }
+
+    if (t_ip && t_port > 0) {
             // Pastikan halmos_fcgi_request_stream di dalamnya sudah pakai halmos_send_ssl jika req->is_tls == true
             halmos_fcgi_request_stream(req, sock_client, t_ip, t_port, req->body_data, req->content_length);
             return;
-        }
     }
 
     // 2. JALUR TLS (Hanya untuk File Statis, karena PHP sudah di-handle di atas)
