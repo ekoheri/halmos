@@ -1,5 +1,8 @@
 #include "halmos_route.h"
 #include "halmos_log.h"
+#include "halmos_config.h"
+#include "halmos_global.h"
+#include "halmos_http_utils.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -9,7 +12,7 @@
 #include <errno.h>
 #include <time.h>
 
-#define route_config_filename "/etc/halmos/route.conf"
+// #define route_config_filename "/etc/halmos/route.conf"
 
 // Definisi variabel global
 RouteTable g_routes[MAX_ROUTES];
@@ -29,11 +32,24 @@ FcgiBackend parse_fcgi_type(const char *s) {
     return FCGI_PHP;
 }
 
-void load_routes() {
-    FILE *fp = fopen(route_config_filename, "r");
+void load_routes(const char *path_route) {
+    FILE *fp = fopen(path_route, "r");
     if (!fp) {
-        write_log_error("[ROUTER] Configuration file not found: %s", route_config_filename);
-        return;
+        // Jika file tidak ditemukan (errno == ENOENT), buat file baru yang kosong
+        if (errno == ENOENT) {
+            fp = fopen(path_route, "w");
+            if (fp) {
+                fprintf(fp, "# Halmos Dynamic Route Configuration\n");
+                fclose(fp);
+                write_log("[ROUTER] Created new empty config file: %s", path_route);
+            }
+            // Setelah dibuat, g_total_routes tetap 0 karena file kosong
+            g_total_routes = 0;
+            return;
+        } else {
+            write_log_error("[ROUTER] Cannot access config file: %s", path_route);
+            return;
+        }
     }
 
     g_total_routes = 0;
@@ -88,14 +104,42 @@ void halmos_router_auto_reload() {
     if (now - last_check < 5) return;
     last_check = now;
 
+    char doc_root_clean[256];
+    snprintf(doc_root_clean, sizeof(doc_root_clean), "%s", config.document_root);
+    
+    // Pakai fungsi trim kamu di sini
+    trim_whitespace(doc_root_clean); 
+
+    char path_route[512];
+    size_t len = strlen(doc_root_clean);
+    
+    // Gabungkan path (menangani slash di ujung)
+    if (len > 0 && doc_root_clean[len - 1] == '/') {
+        snprintf(path_route, sizeof(path_route), "%s.htroute", doc_root_clean);
+    } else {
+        snprintf(path_route, sizeof(path_route), "%s/.htroute", doc_root_clean);
+    }
+
     struct stat st;
-    if (stat(route_config_filename, &st) == 0) {
+    int res = stat(path_route, &st);
+    
+    if (res == 0) {
         if (st.st_mtime > last_file_mtime) {
-            load_routes();
+            load_routes(path_route);
             last_file_mtime = st.st_mtime;
         }
     } else {
-        write_log_error("[ROUTER] Access lost to config file: %s", route_config_filename);
+        // INI BAGIAN PENTING: Apa alasan sebenarnya?
+        int err_code = errno;
+        if (err_code == ENOENT) {
+            // File tidak ada, panggil load_routes untuk buat baru
+            write_log("[ROUTER] File .htroute not found, attempting to create...");
+            load_routes(path_route);
+        } else {
+            // Jika bukan ENOENT, maka ini adalah masalah Izin atau Path Rusak
+            write_log_error("[ROUTER] SYSTEM ERROR on path: [%s]", path_route);
+            write_log_error("[ROUTER] REASON: %s (errno: %d)", strerror(err_code), err_code);
+        }
     }
 }
 
