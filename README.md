@@ -31,7 +31,6 @@ Gunakan perintah berikut untuk mengambil kode sumber dan memasangnya ke dalam si
 ```bash
 git clone https://github.com/ekoheri/halmos.git
 cd halmos
-make
 ```
 ### Memasang ke Sistem
 Perintah ini akan menyalin binary ke /usr/bin, konfigurasi ke /etc/halmos, dan mendaftarkan service ke systemd..
