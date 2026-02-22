@@ -7,7 +7,7 @@
 #include "halmos_security.h"
 #include "halmos_route.h"
 #include "halmos_tls.h"
-//#include "halmos_websocket.h"
+#include "halmos_ipc_bridge.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -28,6 +28,7 @@
 
 // Pemilik variable global
 int epoll_fd;
+int bridge_fd;
 struct epoll_event *events;
 
 //Variable Local
@@ -52,6 +53,16 @@ void start_event_loop() {
     ev.events = EPOLLIN; // Level Triggered untuk listen socket
     epoll_ctl(epoll_fd, EPOLL_CTL_ADD, sock_server, &ev);
 
+    //---------- Panggil IPC-Bridge
+
+    bridge_fd = setup_uds_bridge("/tmp/halmos_bridge.sock");
+
+    // 2. Tambahkan ke epoll
+    struct epoll_event ev_bridge;
+    ev_bridge.data.fd = bridge_fd;
+    ev_bridge.events = EPOLLIN; // Cukup EPOLLIN, tidak perlu ONESHOT
+    epoll_ctl(epoll_fd, EPOLL_CTL_ADD, bridge_fd, &ev_bridge);
+
     write_log("[CORE] Server listening on %s:%d", config.server_name, config.server_port);
 }
 
@@ -68,7 +79,8 @@ void run_event_loop() {
         }
 
         for (int i = 0; i < num_fds; i++) {
-            if (events[i].data.fd == sock_server) {
+            int current_fd = events[i].data.fd;
+            if (current_fd == sock_server) {
                 // LOOP ACCEPT: Ambil semua tamu yang antre sampai ludes
                 while (1) {
                     struct sockaddr_in client_addr;
@@ -124,6 +136,8 @@ void run_event_loop() {
                         }
                     }
                 }
+            } else if(current_fd == bridge_fd) {
+                handle_bridge_request(bridge_fd);
             } else {
                 // --- BAGIAN YANG DIUBAH (RAMPING & AMAN) ---
                 int client_fd = events[i].data.fd;

@@ -57,6 +57,8 @@ int ws_upgrade_handshake(int sock_client, RequestHeader *req);
 // Return 1 untuk lanjut (rearm), 0 untuk tutup (cleanup)
 int halmos_ws_dispatch(int sock_client);
 
+void halmos_ws_internal_dispatch(const char *json_raw);
+
 // Fungsi untuk mengirim pesan teks (Otomatis bungkus frame)
 int halmos_ws_send_text(int sock_client, const char *text);
 
