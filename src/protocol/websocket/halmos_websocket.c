@@ -30,11 +30,6 @@
 // halmos_global.c atau di tempat yang sesuai
 static bool ws_fd_map[65536]; 
 
-/* ===================================================================
- * 1. INTERNAL HELPERS (STATIC)
- * Fungsi-fungsi pembantu yang hanya dikenal di dalam file ini.
- * =================================================================== */
-
 /**
  * Base64 encode manual agar tidak ketergantungan OpenSSL BIO yang lambat.
  */
@@ -56,6 +51,56 @@ static void* halmos_ws_maintenance_run(void *arg);
 
 static void halmos_ws_start_maintenance();
 
+/* ===================================================================
+ * 1. Level 1: System Entry & Lifecycle (The Master Switches)
+ * Ini adalah fungsi yang dipanggil dari luar
+ * =================================================================== */
+
+void halmos_ws_system_init() {
+    // 1. Siapin Buku Alamat (Cuma sekali!)
+    ws_registry_init();
+    
+    // 2. Nyalakan Tukang Pukul Lonceng (Thread Maintenance)
+    halmos_ws_start_maintenance();
+    
+    write_log("[WS] Infrastructure Ready.");
+}
+
+// Tambahkan di halmos_websocket.c
+void halmos_ws_system_destroy() {
+    // 1. Matikan registry dan free semua memori client
+    ws_registry_destroy();
+    
+    // (Opsional) Jika nanti ada thread maintenance yang butuh dimatikan manual, 
+    // taruh logikanya di sini.
+    
+    write_log("[WS] System resources destroyed.");
+}
+
+void halmos_ws_cleanup_fd(int fd) {
+    // Di sini kita cek dulu, apakah FD ini memang WebSocket?
+    if (halmos_is_websocket_fd(fd)) {
+        // Hapus dari buku alamat
+        ws_registry_remove(fd);
+        // Reset flag-nya
+        halmos_set_websocket_fd(fd, false);
+        
+        write_log("[WS] Cleanup complete for FD %d", fd);
+    }
+}
+
+/**
+ * Fungsi Starter Publik.
+ * Inilah yang dipanggil satu kali di main/event_loop.
+ */
+void halmos_ws_start_maintenance() {
+    pthread_t tid;
+    if (pthread_create(&tid, NULL, halmos_ws_maintenance_run, NULL) == 0) {
+        pthread_detach(tid); // Lepas agar resource otomatis bebas saat thread selesai
+    } else {
+        write_log_error("[WS-SYSTEM] Failed to start maintenance thread!");
+    }
+}
 /* ===================================================================
  * 2. HANDSHAKE & UPGRADE
  * Bagian yang mengubah koneksi HTTP menjadi WebSocket.
@@ -327,6 +372,79 @@ int halmos_ws_dispatch(int sock_client) {
 }
 
 /**
+ * Jalur VIP untuk Backend (PHP/Rust).
+ * Tidak perlu unmasking, tidak perlu TLS. Langsung to-the-point.
+ */
+void halmos_ws_internal_dispatch(const char *json_raw) {
+    if (!json_raw) return;
+
+    struct json_tokener *tok = json_tokener_new();
+    struct json_object *parsed_json = json_tokener_parse_ex(tok, json_raw, strlen(json_raw));
+    if (!parsed_json) {
+        write_log_error("[WS-IPC] Malformed Internal JSON!");
+        json_tokener_free(tok);
+        return;
+    }
+
+    struct json_object *header_obj = NULL;
+    // Ambil "header" sesuai config
+    if (json_object_object_get_ex(parsed_json, ws_cfg.envelope.header, &header_obj)) {
+        
+        struct json_object *type_obj = NULL;
+        // Ambil "type" sesuai config (ws_cfg.keys.action)
+        json_object_object_get_ex(header_obj, ws_cfg.keys.action, &type_obj);
+        const char *type = type_obj ? json_object_get_string(type_obj) : "";
+
+        // --- LOGIKA SET_IDENTITY (JANGAN DIHAPUS!) ---
+        if (strcmp(type, "SET_IDENTITY") == 0) {
+            struct json_object *fd_obj = NULL;
+            struct json_object *uid_obj = NULL;
+            
+            // Kita tetap pakai "target_fd" dan "user_id" sebagai key internal
+            json_object_object_get_ex(header_obj, "target_fd", &fd_obj);
+            json_object_object_get_ex(header_obj, "user_id", &uid_obj);
+
+            if (fd_obj && uid_obj) {
+                int target_fd = json_object_get_int(fd_obj);
+                const char *user_id = json_object_get_string(uid_obj);
+                
+                ws_registry_set_user_id(target_fd, user_id);
+                write_log("[WS-IPC] Identity Linked: FD %d => User %s", target_fd, user_id);
+            }
+        } 
+        // --- LOGIKA ROUTING (PRIVATE/BROADCAST) ---
+        else {
+            struct json_object *dst_obj = NULL;
+            struct json_object *src_obj = NULL;
+            
+            // Pakai ws_cfg.keys.to (isinya "dst") dan ws_cfg.keys.from (isinya "src")
+            json_object_object_get_ex(header_obj, ws_cfg.keys.to, &dst_obj);
+            json_object_object_get_ex(header_obj, ws_cfg.keys.from, &src_obj);
+
+            const char *target = dst_obj ? json_object_get_string(dst_obj) : NULL;
+            const char *source = src_obj ? json_object_get_string(src_obj) : NULL;
+
+            // Pastikan source ada dan punya prefix internal (misal: "HALMOS_")
+            if (source && strncmp(source, ws_cfg.policy.internal_prefix, strlen(ws_cfg.policy.internal_prefix)) == 0 && target) {
+                if (strcmp(target, "BROADCAST") == 0) {
+                    ws_registry_broadcast(json_raw);
+                } else {
+                    // Cari FD berdasarkan nama target ("Eko")
+                    int target_fd = ws_registry_get_fd_by_name(target); 
+                    if (target_fd > 0) {
+                        halmos_ws_send_text(target_fd, json_raw);
+                    } else {
+                        write_log("[WS-IPC] Target %s not found or offline.", target);
+                    }
+                }
+            }
+        }
+    }
+
+    json_object_put(parsed_json);
+    json_tokener_free(tok);
+}
+/**
  * halmos_ws_on_message
  * Di sinilah logika aplikasi berjalan. 
  * Menerima string/payload yang sudah di-unmask dan siap diproses.
@@ -334,11 +452,15 @@ int halmos_ws_dispatch(int sock_client) {
 void halmos_ws_on_message(int sock_client, unsigned char *data, size_t len) {
     if (len == 0 || data == NULL) return;
 
+    // DEBUG: Intip data mentah yang masuk dari socket
+    //fprintf(stderr, "\n[DEBUG-RAW] FD %d received: %s\n", sock_client, data);
+
     // 1. Parsing JSON menggunakan Tokener (Lebih aman untuk data stream)
     struct json_tokener *tok = json_tokener_new();
     struct json_object *parsed_json = json_tokener_parse_ex(tok, (const char *)data, len);
 
     if (parsed_json == NULL) {
+        //fprintf(stderr, "[DEBUG-ERROR] FD %d: Malformed JSON!\n", sock_client);
         write_log_error("[WS-JSON] Malformed JSON received on FD %d", sock_client);
         json_tokener_free(tok);
         return;
@@ -353,10 +475,18 @@ void halmos_ws_on_message(int sock_client, unsigned char *data, size_t len) {
         struct json_object *app_obj = NULL;
 
         // Ambil field rute dari dalam header
+        // ws_cfg.keys.action = "type"
+        // ws_cfg.keys.to     = "dst"
+        // ws_cfg.keys.app    = "app" (atau sesuai config lu)
         json_object_object_get_ex(header_obj, ws_cfg.keys.action, &action_obj);
         json_object_object_get_ex(header_obj, ws_cfg.keys.to, &dst_obj);
         json_object_object_get_ex(header_obj, ws_cfg.keys.app, &app_obj);
 
+        // DEBUG: Cek apakah key-nya ketemu atau NULL
+        /*fprintf(stderr, "[DEBUG-INFO] Searching keys -> ActionKey: '%s' (%s), TargetKey: '%s' (%s)\n", 
+                ws_cfg.keys.action, (action_obj ? "FOUND" : "NULL"),
+                ws_cfg.keys.to, (dst_obj ? "FOUND" : "NULL"));
+        */
         // VALIDASI: Pastikan action dan target ada isinya sebelum diproses
         if (action_obj && dst_obj) {
             const char *action = json_object_get_string(action_obj);
@@ -367,8 +497,20 @@ void halmos_ws_on_message(int sock_client, unsigned char *data, size_t len) {
 
             write_log("[WS] Route: App=%s, Action=%s, Target=%s", app_id, action, target);
 
-            // 3. LOGIKA EKSEKUSI
-            if (strcmp(action, "PUB") == 0) {
+            // 3. LOGIKA EKSEKUSI (Tetap utuh sesuai permintaan)
+            if (strcmp(action, "AUTH") == 0) {
+                // Browser kirim: {"header":{"type":"AUTH", "dst":"server"}, "payload":"Eko"}
+                struct json_object *pay_obj = NULL;
+                json_object_object_get_ex(parsed_json, ws_cfg.envelope.payload, &pay_obj);
+                if (pay_obj) {
+                    const char *user_id = json_object_get_string(pay_obj);
+                    //fprintf(stderr, "[DEBUG-AUTH] Attempting to link FD %d to User: %s\n", sock_client, user_id);
+                    ws_registry_set_user_id(sock_client, user_id);
+                    write_log("[WS-AUTH] Client FD %d identified as %s", sock_client, user_id);
+                } else {
+                    fprintf(stderr, "[DEBUG-AUTH] FAILED: Payload (user_id) not found!\n");
+                }
+            } else if (strcmp(action, "PUB") == 0) {
                 // Publish pesan ke topik/grup
                 ws_registry_publish(app_id, target, (const char *)data); 
             } 
@@ -381,13 +523,18 @@ void halmos_ws_on_message(int sock_client, unsigned char *data, size_t len) {
                 struct json_object *payload_obj = NULL;
                 json_object_object_get_ex(parsed_json, ws_cfg.envelope.payload, &payload_obj);
                 
-                // Lempar ke fungsi backend FastCGI lu
+                // Lempar ke fungsi backend FastCGI lu (jika diaktifkan)
                 // halmos_bridge_to_fastcgi(sock_client, app_id, target, payload_obj);
+                write_log("[WS-REQ] Request received for App %s, Target %s", app_id, target);
             }
         } else {
-            write_log_error("[WS] Missing routing keys in header on FD %d", sock_client);
+            //fprintf(stderr, "[DEBUG-WARN] Missing routing keys! Make sure JSON uses '%s' and '%s'\n", 
+            //        ws_cfg.keys.action, ws_cfg.keys.to);
+            write_log_error("[WS] Missing routing keys in header on FD %d. Key expected: %s and %s", 
+                            sock_client, ws_cfg.keys.action, ws_cfg.keys.to);
         }
     } else {
+        //fprintf(stderr, "[DEBUG-WARN] Header '%s' not found in JSON!\n", ws_cfg.envelope.header);
         write_log_error("[WS] Envelope header '%s' not found on FD %d", ws_cfg.envelope.header, sock_client);
     }
 
@@ -395,7 +542,6 @@ void halmos_ws_on_message(int sock_client, unsigned char *data, size_t len) {
     json_object_put(parsed_json);
     json_tokener_free(tok);
 }
-
 
 /* ===================================================================
  * 5. SENDER
@@ -459,38 +605,7 @@ int halmos_ws_send_text(int sock_client, const char *text) {
  * 6. BACKGROUND MAINTENANCE (HEARTBEAT & REAPER)
  * =================================================================== */
 
-void halmos_ws_system_init() {
-    // 1. Siapin Buku Alamat (Cuma sekali!)
-    ws_registry_init();
-    
-    // 2. Nyalakan Tukang Pukul Lonceng (Thread Maintenance)
-    halmos_ws_start_maintenance();
-    
-    write_log("[WS] Infrastructure Ready.");
-}
 
-void halmos_ws_cleanup_fd(int fd) {
-    // Di sini kita cek dulu, apakah FD ini memang WebSocket?
-    if (halmos_is_websocket_fd(fd)) {
-        // Hapus dari buku alamat
-        ws_registry_remove(fd);
-        // Reset flag-nya
-        halmos_set_websocket_fd(fd, false);
-        
-        write_log("[WS] Cleanup complete for FD %d", fd);
-    }
-}
-
-// Tambahkan di halmos_websocket.c
-void halmos_ws_system_destroy() {
-    // 1. Matikan registry dan free semua memori client
-    ws_registry_destroy();
-    
-    // (Opsional) Jika nanti ada thread maintenance yang butuh dimatikan manual, 
-    // taruh logikanya di sini.
-    
-    write_log("[WS] System resources destroyed.");
-}
 /*
 FUNGSI HELPER
 */
@@ -607,15 +722,3 @@ void* halmos_ws_maintenance_run(void *arg) {
     return NULL;
 }
 
-/**
- * Fungsi Starter Publik.
- * Inilah yang dipanggil satu kali di main/event_loop.
- */
-void halmos_ws_start_maintenance() {
-    pthread_t tid;
-    if (pthread_create(&tid, NULL, halmos_ws_maintenance_run, NULL) == 0) {
-        pthread_detach(tid); // Lepas agar resource otomatis bebas saat thread selesai
-    } else {
-        write_log_error("[WS-SYSTEM] Failed to start maintenance thread!");
-    }
-}

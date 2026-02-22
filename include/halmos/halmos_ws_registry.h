@@ -11,23 +11,6 @@
 #define HASH_SIZE 1024        // Ukuran tabel hash untuk topik
 #define MAX_TOPICS_PER_USER 5 // Maksimal grup yang bisa diikuti satu user
 
-/* * 1. STRUKTUR LOW-LEVEL (Linked List untuk Hash Table)
- * Digunakan untuk menyimpan daftar FD yang langganan topik tertentu.
- */
-typedef struct ws_subscriber {
-    int fd;
-    struct ws_subscriber *next;
-} ws_subscriber_t;
-
-/* * 2. STRUKTUR TOPIC BUCKET
- * Merepresentasikan satu "Kamar" atau "Grup" pesan.
- */
-typedef struct {
-    char topic_name[128];      // Format: "app_id:topic_name"
-    ws_subscriber_t *head;     // List FD yang ada di grup ini
-    pthread_mutex_t topic_lock; // Lock per-topik (Granular Locking)
-} ws_topic_bucket_t;
-
 /* * 3. STRUKTUR CLIENT (Dunia Array)
  * Menyimpan metadata lengkap setiap koneksi.
  */
@@ -39,9 +22,30 @@ typedef struct {
     pthread_mutex_t client_lock; 
     
     // Catatan internal agar saat disconnect bisa langsung hapus di Hash Table
+    char user_id[64];
     char subscribed_topics[MAX_TOPICS_PER_USER][64]; 
     int topic_count;
 } HalmosWSClient;
+
+
+/* * 1. STRUKTUR LOW-LEVEL (Linked List untuk Hash Table)
+ * Digunakan untuk menyimpan daftar FD yang langganan topik tertentu.
+ */
+typedef struct ws_subscriber {
+    //int fd;
+    HalmosWSClient *client;
+    struct ws_subscriber *next;
+} ws_subscriber_t;
+
+
+/* * 2. STRUKTUR TOPIC BUCKET
+ * Merepresentasikan satu "Kamar" atau "Grup" pesan.
+ */
+typedef struct {
+    char topic_name[128];      // Format: "app_id:topic_name"
+    ws_subscriber_t *head;     // List FD yang ada di grup ini
+    pthread_mutex_t topic_lock; // Lock per-topik (Granular Locking)
+} ws_topic_bucket_t;
 
 /* * 4. PUSAT KOMANDO REGISTRY (Hybrid Structure)
  */
@@ -100,6 +104,9 @@ void ws_registry_add_to_topic(int fd, const char *app_id, const char *topic);
  */
 void ws_registry_publish(const char *app_id, const char *topic, const char *message);
 
+void ws_registry_set_user_id(int fd, const char *user_id);
+
+int ws_registry_get_fd_by_name(const char *name);
 /**
  * BROADCAST: Kirim ke seluruh koneksi tanpa peduli topik (Sapu Jagat).
  */

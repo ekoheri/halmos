@@ -35,7 +35,6 @@ cd halmos
 # Kompilasi & Make Install
 Perintah ini akan mengompilasi binary dan meletakkan file konfigurasi ke /etc/halmos serta service ke /etc/systemd/system/.
 ```bash
-make
 sudo make install
 ```
 ## 4. Menjalankan Service Halmos
