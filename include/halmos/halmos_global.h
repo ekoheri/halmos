@@ -4,6 +4,7 @@
 #include "halmos_global.h"
 #include "halmos_config.h"
 #include "halmos_queue.h"
+#include "halmos_ws_config.h"
 
 // --- Penampung Hasil Adaptive ---
 extern int g_event_batch_size;  // Untuk epoll_wait
@@ -33,4 +34,5 @@ extern TaskQueue global_queue;
 // yang ada di halmos_queue.c
 extern void *worker_thread_pool(void *arg);
 
+extern halmos_ws_proto_t ws_cfg;
 #endif

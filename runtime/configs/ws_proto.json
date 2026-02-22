@@ -1,0 +1,23 @@
+{
+    "protocol": {
+      "version": "1.0",
+      "envelope_structure": {
+        "header": "header",
+        "body": "payload"
+      },
+      "routing_keys": {
+        "action": "type",
+        "from": "src",
+        "to": "dst"
+      }
+    },
+    "routing_policy": {
+      "allow_anonymous_topics": false,
+      "max_topics_per_client": 10,
+      "internal_prefix": "HALMOS_"
+    },
+    "limits": {
+      "global_max_payload": 10485760,
+      "strict_mode": true
+    }
+  }

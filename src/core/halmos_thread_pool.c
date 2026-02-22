@@ -4,6 +4,7 @@
 #include "halmos_log.h"
 #include "halmos_tls.h"
 #include "halmos_event_loop.h"
+#include "halmos_ws_registry.h"
 
 #include <pthread.h>
 #include <sys/epoll.h>
@@ -46,11 +47,11 @@ void *worker_thread_pool(void *arg) {
             rearm_epoll_oneshot(sock_client);
         } else {
             // Status 0 atau -1: Koneksi selesai atau Error
-            // cleanup_connection_properly ada di halmos_security.c
+            // cleanup_connection_properly ada di halmos_tls.c
             // Ambil dari tls.c
-            cleanup_connection_properly(sock_client);
-            
+
             global_telemetry.active_connections--;
+            cleanup_connection_properly(sock_client);
         }
 
         // --- TELEMETRY & LOGGING ---

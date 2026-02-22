@@ -7,6 +7,7 @@
 #include "halmos_security.h"
 #include "halmos_route.h"
 #include "halmos_tls.h"
+//#include "halmos_websocket.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -35,14 +36,7 @@ int sock_server;
 volatile sig_atomic_t server_running = 1;
 
 void start_event_loop() {
-    // 1. Inisialisasi TLS dulu sebelum perang
-    if (config.tls_enabled) {
-        init_openssl_runtime();
-        // Mapping FD ke SSL agar Worker bisa nyari objek SSL-nya nanti
-        init_ssl_mapping(g_queue_capacity + 2000); 
-    }
-    
-    // 2. aktifkan epoll
+    // 1. aktifkan epoll
     // menghitung berapa jumlah core untuk 
     // patokan berapa jumlah event pool yang cocok
     events = malloc(sizeof(struct epoll_event) * g_event_batch_size);
@@ -137,12 +131,12 @@ void run_event_loop() {
                 // CEK ERROR: Jika socket bermasalah, jangan masukkan ke antrean
                 if ((events[i].events & EPOLLERR) || (events[i].events & EPOLLHUP)) {
                     write_log_error("[NET] Closing FD %d (EPOLLERR/HUP)", client_fd);
-                    
+
                     global_telemetry.active_connections--; // <--- TAMBAHKAN INI! Tamu batal masuk.
                     // PENTING: Bersihkan sisa-sisa SSL di mapping table sebelum FD ditutup!
-                    if (config.tls_enabled) {
-                        cleanup_connection_properly(client_fd);
-                    }
+
+                    cleanup_connection_properly(client_fd);
+                    
                     close(client_fd);
                     continue;
                 }
@@ -176,15 +170,6 @@ void run_event_loop() {
     close(epoll_fd);
     free(events);
 
-    // bersihkan resource SSL jika aktif
-    if (config.tls_enabled) {
-        // Hapus mapping FD-ke-SSL
-        // cleanup_ssl_mapping(); 
-        
-        // Matikan engine OpenSSL secara global
-        cleanup_openssl();
-        write_log("[CORE] TLS Resources cleaned up.");
-    }
     write_log("[CORE] Server stopped. Resource cleanup complete."); 
 }
 

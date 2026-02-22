@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Halmos Savage WS Test</title>
+    <style>
+        body { font-family: sans-serif; background: #1a1a1a; color: #eee; padding: 20px; }
+        #log { background: #000; height: 300px; overflow-y: scroll; padding: 10px; border: 1px solid #444; margin-bottom: 10px; }
+        .msg { color: #0f0; margin-bottom: 5px; }
+        .err { color: #f00; }
+        .info { color: #aaa; }
+        input, button { padding: 10px; background: #333; color: #fff; border: 1px solid #555; }
+        button:hover { background: #555; cursor: pointer; }
+    </style>
+</head>
+<body>
+    <h2>🚀 Halmos WS Console</h2>
+    <div id="log"></div>
+    
+    <div style="margin-bottom: 10px;">
+        <input type="text" id="topicInput" placeholder="Topic (e.g. room1)">
+        <button onclick="subscribe()">Subscribe</button>
+    </div>
+
+    <div>
+        <input type="text" id="msgInput" style="width: 300px;" placeholder="Tulis pesan...">
+        <button onclick="publish()">Kirim ke Topik</button>
+    </div>
+
+    <script src="test_socket_client.js"></script>
+</body>
+</html>

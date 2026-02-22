@@ -198,16 +198,34 @@ bool parse_http_request(char *raw_data, size_t total_received, RequestHeader *re
             char *key = p;
             char *val = fast_trim(colon + 1);
 
-            if (strcasecmp(key, "Host") == 0) req->host = val;
-            else if (strcasecmp(key, "Content-Type") == 0) req->content_type = val;
+            if (strcasecmp(key, "Host") == 0) {
+                req->host = val;
+            }
+            else if (strcasecmp(key, "Content-Type") == 0) {
+                req->content_type = val;
+            }
             else if (strcasecmp(key, "Content-Length") == 0) {
                 // FIX BUG: Digunakan strtol agar tidak overflow/negatif
                 req->content_length = strtol(val, NULL, 10);
                 if (req->content_length < 0) req->content_length = 0;
             }
-            else if (strcasecmp(key, "Cookie") == 0) req->cookie_data = val;
+            else if (strcasecmp(key, "Cookie") == 0) {
+                req->cookie_data = val;
+            }
+            else if (strcasecmp(key, "Upgrade") == 0) {
+                req->is_upgrade = true; 
+                // Jangan cuma cari "websocket", pastikan val ada isinya
+                if (strcasestr(val, "websocket")) {
+                    req->is_upgrade = true;
+                }
+            } 
+            else if (strcasecmp(key, "Sec-WebSocket-Key") == 0) {
+                req->ws.key = val; // Menunjuk langsung ke buffer asli (Zero-copy)
+            }
             else if (strcasecmp(key, "Connection") == 0) {
-                // UPDATE: Cek "close" secara eksplisit
+                if (strcasestr(val, "Upgrade")) {
+                    req->is_upgrade = true; // Tandai juga di sini untuk jaga-jaga
+                }
                 if (strcasestr(val, "close")) {
                     req->is_keep_alive = false;
                 } else if (strcasestr(val, "keep-alive")) {
@@ -246,6 +264,7 @@ bool parse_http_request(char *raw_data, size_t total_received, RequestHeader *re
     fprintf(stderr, " Keep-Alive  : %s\n", req->is_keep_alive ? "YES" : "NO");
     fprintf(stderr, "====================================\n\n");
     */
+
     // 5. LOGIKA MULTIPART
     if (req->content_type && strstr(req->content_type, "multipart/form-data")) {
         // Panggil fungsi multipart dari halmos_multipart.c

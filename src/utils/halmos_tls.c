@@ -6,6 +6,7 @@
 #include "halmos_global.h"
 #include "halmos_log.h"
 #include "halmos_config.h"
+#include "halmos_websocket.h"
 
 #include <openssl/ssl.h>
 #include <openssl/err.h>
@@ -134,7 +135,7 @@ void nullify_ssl_ptr(int fd) {
 ssize_t halmos_send_ssl(int fd, const void *buf, size_t len) {
     SSL *ssl = get_ssl_for_fd(fd);
     if (!ssl) {
-        fprintf(stderr, "[SSL ERROR] Tidak nemu objek SSL untuk FD: %d\n", fd);
+        //fprintf(stderr, "[SSL ERROR] Tidak nemu objek SSL untuk FD: %d\n", fd);
         return -1;
     }
 
@@ -151,7 +152,7 @@ ssize_t halmos_send_ssl(int fd, const void *buf, size_t len) {
         }
 
         // Kalau kodenya bukan WANT_WRITE/READ, baru ini error beneran (koneksi putus, dll)
-        fprintf(stderr, "[SSL ERROR] SSL_write GAGAL FATAL, code: %d\n", err);
+        //fprintf(stderr, "[SSL ERROR] SSL_write GAGAL FATAL, code: %d\n", err);
         return -1;
     }
 
@@ -159,6 +160,10 @@ ssize_t halmos_send_ssl(int fd, const void *buf, size_t len) {
 }
 
 void cleanup_connection_properly(int sock_client) {
+    // --- [ TAMBAHAN UNTUK WEBSOCKET ] ---
+    // Pastikan flag WS dihapus sebelum FD ini dipakai ulang oleh kernel
+    halmos_ws_cleanup_fd(sock_client);
+
     // 1. Ambil SSL-nya (kalau ada)
     SSL *ssl = get_ssl_for_fd(sock_client);
 
