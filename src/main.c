@@ -8,6 +8,10 @@
 #include "halmos_config.h"
 #include "halmos_security.h"
 #include "halmos_fcgi.h"
+#include "halmos_tls.h"
+#include "halmos_websocket.h"
+#include "halmos_ws_config.h"
+
 
 #include <signal.h>
 #include <stdlib.h>
@@ -25,11 +29,24 @@ int main() {
     setup_signals();
 
     load_config("/etc/halmos/halmos.conf");
+    halmos_ws_config_load("/etc/halmos/ws_proto.json");
 
     halmos_adaptive_init_all();
 
     // 2. Aktifkan Logger Asynchronous (Thread Terpisah)
     start_thread_logger();
+
+    // 3. Inisialisasi Layanan Global (PINDAHAN DARI EVENT LOOP)
+    if (config.tls_enabled) {
+        init_openssl_runtime();
+        // Mapping FD ke SSL (Ukuran g_queue_capacity + buffer aman)
+        init_ssl_mapping(g_queue_capacity + 2000); 
+        write_log("[INIT] TLS Engine & Mapping ready.");
+    }
+    
+    // Inisialisasi Registry & Hash Table WebSocket
+    halmos_ws_system_init();
+    write_log("[INIT] WebSocket Registry & Subsystems ready.");
 
     // 4. Inisialisasi Antrean (Dapur) & Thread Pool Dinamis
     // Menggunakan batas antrean dari config
@@ -61,5 +78,11 @@ int main() {
 
     stop_thread_logger();
     
+    halmos_ws_system_destroy();
+    // bersihkan resource SSL jika aktif
+    if (config.tls_enabled) {
+        cleanup_openssl();
+        write_log("[CORE] TLS Resources cleaned up.");
+    }
     return 0;
 }

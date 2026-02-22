@@ -13,6 +13,7 @@
 #include "halmos_tls.h"
 #include "halmos_config.h"
 #include "halmos_log.h"
+#include "halmos_websocket.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -68,35 +69,72 @@ static void update_header_pointers(RequestHeader *req, ptrdiff_t diff) {
 /**
  * Fungsi khusus menarik Header sampai ketemu \r\n\r\n
  */
+
 static ssize_t recv_until_header_end(int sock, char *buf, size_t limit, bool is_tls) {
     ssize_t total = 0;
-    int retries = 0;
+    int timeout_ms = 3000; 
+    struct timeval start_time, current_time;
+    gettimeofday(&start_time, NULL);
+
+    //fprintf(stderr, "[RECV-START] FD %d: Mulai nunggu header...\n", sock);
 
     while (total < (ssize_t)limit - 1) {
         ssize_t n = halmos_recv(sock, buf + total, limit - total - 1, is_tls);
         
         if (n > 0) {
             total += n;
-            buf[total] = '\0';
-            if (strstr(buf, "\r\n\r\n")) return total;
-            retries = 0;
-        } else if (n < 0) {
-            // Cek Non-Blocking
+            buf[total] = '\0'; 
+            
+            // CCTV: Print potongan data yang baru masuk
+            //fprintf(stderr, "[RECV-DATA] FD %d: Dapet %zd bytes. Total skrg: %zd\n", sock, n, total);
+            
+            if (strstr(buf, "\r\n\r\n")) {
+                //fprintf(stderr, "[RECV-OK] FD %d: Ketemu \\r\\n\\r\\n! Header lengkap.\n", sock);
+                return total; 
+            }
+            continue; 
+        } 
+        
+        if (n < 0) {
             bool retry_it = false;
             if (is_tls) {
-                int err = SSL_get_error(get_ssl_for_fd(sock), (int)n);
-                if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) retry_it = true;
+                int err_code = SSL_get_error(get_ssl_for_fd(sock), (int)n);
+                if (err_code == SSL_ERROR_WANT_READ || err_code == SSL_ERROR_WANT_WRITE) retry_it = true;
             } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 retry_it = true;
             }
 
-            if (retry_it && ++retries < 500) {
-                usleep(1000); continue;
+            if (retry_it) {
+                gettimeofday(&current_time, NULL);
+                long elapsed = (current_time.tv_sec - start_time.tv_sec) * 1000 + 
+                               (current_time.tv_usec - start_time.tv_usec) / 1000;
+                
+                if (elapsed >= timeout_ms) {
+                    // CCTV: Kalau timeout, kita intip isi buffer terakhirnya apa
+                    //fprintf(stderr, "[RECV-TIMEOUT] FD %d: %ld ms berlalu. Buffer terakhir: [%.20s...]\n", 
+                    //        sock, elapsed, total > 0 ? buf : "KOSONG");
+                    break;
+                }
+
+                struct pollfd pfd = { .fd = sock, .events = POLLIN };
+                int res = poll(&pfd, 1, 100); 
+                if (res > 0) continue; 
+                if (res == 0) continue; 
+                //fprintf(stderr, "[RECV-ERR] FD %d: Poll error res=%d\n", sock, res);
+                break; 
             }
-            break;
-        } else break; // Connection closed
+            //fprintf(stderr, "[RECV-ERR] FD %d: recv error n=%zd, errno=%d\n", sock, n, errno);
+            break; 
+        } 
+        
+        if (n == 0) {
+            //fprintf(stderr, "[RECV-CLOSED] FD %d: Client tutup koneksi.\n", sock);
+            break; 
+        }
     }
-    return (total > 0) ? total : -1;
+
+    //fprintf(stderr, "[RECV-FAIL] FD %d: Gagal dapet header lengkap. Total data: %zd\n", sock, total);
+    return -1; 
 }
 
 /**
@@ -136,10 +174,14 @@ static bool recv_http_body(int sock, RequestHeader *req, char **buf_ptr, size_t 
 int handle_http1_session(int sock_client, bool is_tls) {
     // CCTV 1: Cek apakah sesi dimulai
     //fprintf(stderr, "[DEBUG] Sesi dimulai. FD: %d, TLS: %s\n", sock_client, is_tls ? "YES" : "NO");
+    //fprintf(stderr, "[DEBUG-MANAGER] FD %d: Memulai sesi HTTP1. TLS=%d\n", sock_client, is_tls);
     int keep_alive = 1;
     size_t buf_limit = (config.request_buffer_size > 0) ? config.request_buffer_size : 8192;
     char *buffer = malloc(buf_limit);
-    if (!buffer) return 0;
+    if (!buffer) {
+        //fprintf(stderr, "[DEBUG-MANAGER] FD %d: Gagal alokasi buffer!\n", sock_client);
+        return 0;
+    }
 
     while (keep_alive) {
         RequestHeader req;
@@ -147,11 +189,17 @@ int handle_http1_session(int sock_client, bool is_tls) {
         req.is_tls = is_tls; // Simpan status "KTP" TLS
 
         // 1. Tarik Header
+        //fprintf(stderr, "[DEBUG-MANAGER] FD %d: Menunggu header selesai...\n", sock_client);
         ssize_t received = recv_until_header_end(sock_client, buffer, buf_limit, is_tls);
         // CCTV 2: Cek data yang masuk
         //fprintf(stderr, "[DEBUG] Header diterima: %ld bytes\n", received);
-        if (received <= 0) break;
+        
+        if (received <= 0) {
+            //fprintf(stderr, "[DEBUG-MANAGER] FD %d: recv_until_header_end dapet %zd. Putus!\n", sock_client, received);
+            break;
+        }
 
+        //fprintf(stderr, "[DEBUG-MANAGER] FD %d: Header OK (%zd bytes). Cek WS Upgrade...\n", sock_client, received);
         // 2. Parsing (Data sudah didekripsi oleh halmos_recv)
         if (!parse_http_request(buffer, received, &req) || !req.is_valid) {
             //fprintf(stderr, "[DEBUG] Parser GAGAL! Mengirim 400 Bad Request...\n");
@@ -160,6 +208,16 @@ int handle_http1_session(int sock_client, bool is_tls) {
             break;
         }
 
+        if (ws_is_upgrade_request(&req)) {
+            //fprintf(stderr, "[DEBUG-MANAGER] FD %d: POSITIF WEBSOCKET UPGRADE!\n", sock_client);
+            if (ws_upgrade_handshake(sock_client, &req) == 0) {
+                //fprintf(stderr, "[DEBUG-MANAGER] FD %d: Handshake Sukses. Pindah ke WS Mode.\n", sock_client);
+                halmos_set_websocket_fd(sock_client, true); // NYALAKAN SAKLAR
+                free_request_header(&req);
+                free(buffer);
+                return 1; // Rearm epoll, tunggu frame WS pertama
+            }
+        }
         // CCTV 3: Kalau sampai sini, berarti sukses masuk ke routing
         //fprintf(stderr, "[DEBUG] Parser Sukses. Mengarahkan ke routing...\n");
 

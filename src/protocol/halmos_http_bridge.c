@@ -9,6 +9,7 @@
 #include "halmos_event_loop.h"
 #include "halmos_log.h"
 #include "halmos_tls.h"
+#include "halmos_websocket.h"
 
 #include <stdbool.h>
 #include <openssl/ssl.h>
@@ -69,6 +70,15 @@ static halmos_protocol_t bridge_detect(int fd, SSL *ssl);
  * Multiplexer Utama: Jembatan antara Core FD dan Protocol Manager
  */
 int bridge_dispatch(int sock_client) {
+    // --- [ LANGKAH 0: CEK STATUS WEBSOCKET ] ---
+    // Jika FD ini sudah terdaftar sebagai WebSocket, langsung lempar ke dispatcher WS.
+    // Kita nggak perlu peek-peek lagi, langsung gas pol.
+
+    //fprintf(stderr, "[DEBUG-BRIDGE] Thread %ld menangani FD %d\n", (long)pthread_self(), sock_client);
+    if (halmos_is_websocket_fd(sock_client)) {
+        return halmos_ws_dispatch(sock_client);
+    }
+
     char peek_buf[1];     // cukup diset 1 untuk kebutuhan jalannya sistem normal
     //char peek_buf[256]; // di set 256 untuk kebutuhan debug data
 
@@ -80,18 +90,32 @@ int bridge_dispatch(int sock_client) {
     if (!is_actually_tls) {
         ssize_t n = recv(sock_client, peek_buf, 1, MSG_PEEK | MSG_DONTWAIT);
         
+        // CCTV 1
+        //fprintf(stderr, "[DEBUG-BRIDGE] FD %d: recv peek result = %zd\n", sock_client, n);
         //di set 256 untuk kebutuhan debug data
         //ssize_t n = recv(sock_client, peek_buf, 256, MSG_PEEK | MSG_DONTWAIT);
         
         if (n < 0) {
+            // CCTV 2
+            //fprintf(stderr, "[DEBUG-BRIDGE] FD %d: recv error, errno = %d (%s)\n", 
+            //    sock_client, errno, strerror(errno));
+
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 rearm_epoll_oneshot(sock_client);
                 return 1; 
             }
             return 0; 
         }
-        if (n == 0) return 0; 
 
+        // CCTV 3
+        if (n == 0) {
+            //fprintf(stderr, "[DEBUG-BRIDGE] FD %d: recv returned 0 (Client closed prematurely)\n", sock_client);
+            return 0; 
+        }
+
+        // CCTV 4
+        //fprintf(stderr, "[DEBUG-BRIDGE] FD %d: Byte pertama terdeteksi: 0x%02X\n", 
+        //    sock_client, (unsigned char)peek_buf[0]);
         // ======================== DEBUG START ========================
         // Memanggil helper hex dump untuk ngintip data HTTP/HTTPS
         // hex_dump_debug(sock_client, peek_buf, n);
@@ -175,6 +199,8 @@ halmos_protocol_t bridge_detect(int fd, SSL *ssl) {
     char buf[4];
     ssize_t n;
 
+    // CCTV 1
+    //fprintf(stderr, "[DEBUG-DETECT] Mencoba deteksi protokol pada FD %d...\n", fd);
     // Jika pakai TLS, kita peek lewat OpenSSL
     if (ssl) {
         n = SSL_peek(ssl, buf, 4);
@@ -192,12 +218,18 @@ halmos_protocol_t bridge_detect(int fd, SSL *ssl) {
         }
     }
 
-    if (n < 4) return PROTOCOL_RETRY;
-
+    if (n < 4) {
+        //fprintf(stderr, "[DEBUG-DETECT] FD %d: Data kurang dari 4 byte (n=%zd). Retry.\n", fd, n);
+        return PROTOCOL_RETRY;
+    }
     // Deteksi HTTP Methods
+
+    //fprintf(stderr, "[DEBUG-DETECT] FD %d: 4 byte pertama: [%.4s]\n", fd, buf);
     if (memcmp(buf, "GET ", 4) == 0 || memcmp(buf, "POST", 4) == 0 || 
         memcmp(buf, "HTTP", 4) == 0 || memcmp(buf, "PUT ", 4) == 0 ||
         memcmp(buf, "HEAD", 4) == 0) {
+        
+        //fprintf(stderr, "[DEBUG-DETECT] FD %d: Terdeteksi HTTP1!\n", fd);
         return PROTOCOL_HTTP1;
     }
 
