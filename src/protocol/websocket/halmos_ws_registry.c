@@ -1,4 +1,5 @@
 #include "halmos_ws_registry.h"
+#include "halmos_log.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -17,6 +18,8 @@ static void ws_registry_send_text(int fd, SSL *ssl, const char *message);
 static void ws_registry_send_ping(int fd, SSL *ssl);
 
 static unsigned long hash_topic(const char *str);
+
+static size_t ws_system_build_frame(unsigned char *out_frame, const char *message, size_t len);
 /* 
  * =================================================================================
  * BLOK 1: Cluster Manajemen Koneksi (Resepsionis)
@@ -76,6 +79,23 @@ void ws_registry_remove(int fd) {
         HalmosWSClient *c = registry.clients[i];
         if (c && c->fd == fd) {
             
+            // --- TAMBAHAN: CABUT DARI USER_MAP HASH TABLE ---
+            if (strlen(c->user_id) > 0) {
+                unsigned long u_idx = hash_topic(c->user_id) % USER_HASH_SIZE;
+                ws_user_node_t **upp = &registry.user_map[u_idx];
+                while (*upp) {
+                    if ((*upp)->client == c) {
+                        ws_user_node_t *u_trash = *upp;
+                        *upp = (*upp)->next;
+                        free(u_trash);
+                        // write_log("[REGISTRY] User %s removed from Hash Map", c->user_id);
+                        break;
+                    }
+                    upp = &((*upp)->next);
+                }
+            }
+            // ------------------------------------------------
+
             // 1. Cabut dari semua grup di Hash Table
             pthread_mutex_lock(&registry.hash_lock);
             for (int j = 0; j < c->topic_count; j++) {
@@ -111,18 +131,27 @@ void ws_registry_remove(int fd) {
 }
 
 void ws_registry_broadcast(const char *message) {
+    // 1. Siapkan Frame WS sekali saja (Sangat hemat CPU!)
+    size_t msg_len = strlen(message);
+    unsigned char frame[65535]; // Sesuaikan ukuran
+    size_t frame_len = ws_system_build_frame(frame, message, msg_len); 
+
     pthread_mutex_lock(&registry.registry_lock);
     
     for (int i = 0; i < MAX_WS_CLIENTS; i++) {
         HalmosWSClient *c = registry.clients[i];
         if (c != NULL && c->is_active) {
             
-            // Kunci client-nya biar nggak tabrakan sama thread lain yang mau nulis
-            pthread_mutex_lock(&c->client_lock);
-            
-            // Di sini nanti panggil fungsi pembungkus frame WS
-            ws_registry_send_text(c->fd, c->ssl, message);
-            pthread_mutex_unlock(&c->client_lock);
+            // Pakai try_lock atau pastikan fungsi send-nya non-blocking
+            if (pthread_mutex_trylock(&c->client_lock) == 0) {
+                // Kirim data mentah yang sudah jadi frame
+                if (c->ssl) {
+                    SSL_write(c->ssl, frame, (int)frame_len);
+                } else {
+                    write(c->fd, frame, frame_len);
+                }
+                pthread_mutex_unlock(&c->client_lock);
+            }
         }
     }
     
@@ -208,22 +237,29 @@ void ws_registry_heartbeat() {
 void ws_registry_reaper() {
     time_t now = time(NULL);
     int timeout_limit = 90; 
+    int dead_fds[MAX_WS_CLIENTS];
+    int dead_count = 0;
 
     pthread_mutex_lock(&registry.registry_lock);
+    
+    // 1. Fase Tandai (Mark)
     for (int i = 0; i < MAX_WS_CLIENTS; i++) {
         HalmosWSClient *c = registry.clients[i];
         if (c != NULL && c->is_active) {
             if (difftime(now, c->last_seen) > timeout_limit) {
-                int dead_fd = c->fd;
-                // Lepas lock global agar ws_registry_remove bisa bekerja tanpa deadlock
-                pthread_mutex_unlock(&registry.registry_lock); 
-                close(dead_fd);
-                ws_registry_remove(dead_fd); 
-                pthread_mutex_lock(&registry.registry_lock);
+                dead_fds[dead_count++] = c->fd;
             }
         }
     }
+    
     pthread_mutex_unlock(&registry.registry_lock);
+
+    // 2. Fase Sikat (Sweep)
+    for (int i = 0; i < dead_count; i++) {
+        write_log("[REAPER] Cleaning up ghost connection: FD %d", dead_fds[i]);
+        close(dead_fds[i]);
+        ws_registry_remove(dead_fds[i]); // ws_registry_remove akan handle lock sendiri
+    }
 }
 
 /* 
@@ -311,10 +347,26 @@ void ws_registry_publish(const char *app_id, const char *topic, const char *mess
 
 void ws_registry_set_user_id(int fd, const char *user_id) {
     pthread_mutex_lock(&registry.registry_lock);
+    
     for (int i = 0; i < MAX_WS_CLIENTS; i++) {
         if (registry.clients[i] && registry.clients[i]->fd == fd) {
+            // 1. Set nama di objek client seperti biasa
             strncpy(registry.clients[i]->user_id, user_id, 63);
             registry.clients[i]->user_id[63] = '\0';
+
+            // 2. DAFTARKAN KE HASH TABLE (USER_MAP)
+            unsigned long idx = hash_topic(user_id) % USER_HASH_SIZE;
+            
+            // Buat node baru untuk linked list di hash table
+            ws_user_node_t *new_node = (ws_user_node_t *)malloc(sizeof(ws_user_node_t));
+            new_node->user_id = registry.clients[i]->user_id; // Pakai pointer ID yang di client
+            new_node->client = registry.clients[i];
+            
+            // Masukkan ke depan (Head) bucket (Simple collision handling)
+            new_node->next = registry.user_map[idx];
+            registry.user_map[idx] = new_node;
+
+            //write_log("[REGISTRY] User %s mapped to Hash Index %lu", user_id, idx);
             break;
         }
     }
@@ -346,25 +398,27 @@ const char* ws_registry_get_user_id(int fd) {
 }
 
 bool ws_registry_get_session_info(const char *name, int *out_fd, uint64_t *out_session, SSL **out_ssl) {
-    if (!name) {
-        //fprintf(stderr, "[DEBUG-REG] ERROR: name is NULL\n");
-        return false;
-    }
+    if (!name) return false;
+
+    // 1. Hitung Hash dari user_id
+    unsigned long idx = hash_topic(name) % USER_HASH_SIZE;
 
     pthread_mutex_lock(&registry.registry_lock);
-    //fprintf(stderr, "[DEBUG-REG] Mencari user: '%s'\n", name);
-    for (int i = 0; i < MAX_WS_CLIENTS; i++) {
-        HalmosWSClient *c = registry.clients[i];
-        if (c && c->is_active && strcmp(c->user_id, name) == 0) {
-            *out_fd = c->fd;
-            *out_session = c->session_id;
-            if (out_ssl) *out_ssl = c->ssl;
+    
+    // 2. Cari di bucket yang sesuai
+    ws_user_node_t *node = registry.user_map[idx];
+    while (node) {
+        if (node->client && node->client->is_active && strcmp(node->client->user_id, name) == 0) {
+            *out_fd = node->client->fd;
+            *out_session = node->client->session_id;
+            if (out_ssl) *out_ssl = node->client->ssl;
             
-            //fprintf(stderr, "[DEBUG-REG] Found Identity: %s -> FD: %d, Session: %lu\n", name, c->fd, (unsigned long)c->session_id);
             pthread_mutex_unlock(&registry.registry_lock);
             return true;
         }
+        node = node->next;
     }
+    
     pthread_mutex_unlock(&registry.registry_lock);
     return false;
 }
@@ -442,6 +496,33 @@ unsigned long hash_topic(const char *str) {
     while ((c = *str++))
         hash = ((hash << 5) + hash) + c; 
     return hash % HASH_SIZE;
+}
+
+size_t ws_system_build_frame(unsigned char *out_frame, const char *message, size_t len) {
+    size_t header_len = 0;
+
+    // 1. FIN bit set (0x80) + Opcode Text (0x01) = 0x81
+    out_frame[0] = 0x81; 
+
+    // 2. Tentukan Payload Length sesuai standar RFC 6455
+    if (len <= 125) {
+        out_frame[1] = (unsigned char)len;
+        header_len = 2;
+    } else if (len <= 65535) {
+        out_frame[1] = 126; // Penanda bahwa length ada di 2 byte berikutnya
+        out_frame[2] = (len >> 8) & 0xFF;
+        out_frame[3] = len & 0xFF;
+        header_len = 4;
+    } else {
+        // Untuk > 65KB biasanya jarang buat broadcast, tapi kita kasih limit aman
+        // Halmos membatasi broadcast di 65KB untuk efisiensi buffer statis
+        return 0; 
+    }
+
+    // 3. Salin payload (pesan) tepat setelah header
+    memcpy(out_frame + header_len, message, len);
+    
+    return header_len + len;
 }
 //Fungsi debug aja
 

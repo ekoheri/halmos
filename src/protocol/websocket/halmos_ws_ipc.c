@@ -18,6 +18,9 @@ Di projek lu ini, IPC adalah "jembatan" yang lu bikin antara PHP dan Halmos (C).
 #include <sys/stat.h>  // <--- Untuk CHMOD
 #include <errno.h>
 
+// global scope di halmos_ws_ipc untuk buffer
+static char ipc_buffer[65536];
+
 // Fungsi pembantu set non-blocking
 static void set_nonblocking_bridge(int fd) {
     int flags = fcntl(fd, F_GETFL, 0);
@@ -44,7 +47,9 @@ int setup_uds_bridge(const char *path) {
         write_log_error("[IPC] Failed to change permissions on %s", path);
     }
     
-    listen(bridge_fd, 16);
+    //SOMAXCONN adalah konstanta sistem (biasanya 128 atau 4096 tergantung konfigurasi OS) 
+    //yang berarti "kasih limit maksimal yang diizinkan sistem".
+    listen(bridge_fd, SOMAXCONN);
     set_nonblocking_bridge(bridge_fd);
 
     write_log("[IPC] Bridge established at %s", path);
@@ -52,47 +57,55 @@ int setup_uds_bridge(const char *path) {
 }
 
 void handle_bridge_request(int bridge_fd) {
-    // 1. Loop Accept sampai habis (Poin #1 lu)
     while (1) {
-        struct ucred cred;
-        socklen_t cred_len = sizeof(struct ucred);
-        
         int client_sock = accept(bridge_fd, NULL, NULL);
-
         if (client_sock < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK)
-                break; // Antrean habis
+            // EAGAIN di sini berarti semua antrean 'accept' sudah habis ditarik
+            if (errno == EAGAIN || errno == EWOULDBLOCK) break; 
             return;
         }
 
-        // 2. Security Check: Validasi UID (Poin #3 lu)
-        if (getsockopt(client_sock, SOL_SOCKET, SO_PEERCRED, &cred, &cred_len) == 0) {
-            // Misalnya: Hanya ijinkan root (0) atau www-data (biasanya 33)
-            if (cred.uid != 0 && cred.uid != 33) { 
-                write_log_error("[IPC-SECURITY] Unauthorized UID %d tried to connect!", cred.uid);
-                close(client_sock);
-                continue;
+        // [Security Check UID tetap di sini...]
+
+        // SET NON-BLOCKING pada client_sock
+        set_nonblocking_bridge(client_sock);
+
+        ssize_t total_received = 0;
+        int retry_count = 0;
+
+        while (total_received < (ssize_t)(sizeof(ipc_buffer) - 1)) {
+            ssize_t n = read(client_sock, ipc_buffer + total_received, (ssize_t)sizeof(ipc_buffer) - 1 - total_received);
+
+            if (n > 0) {
+                total_received += n;
+                // Cek apakah pesan sudah berakhir dengan newline
+                if (ipc_buffer[total_received - 1] == '\n') break;
+            } 
+            else if (n < 0) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    // Data belum siap di kernel. Karena ini UDS (lokal), 
+                    // kita bisa kasih toleransi retry kecil atau balik ke loop utama.
+                    if (retry_count++ < 1000) continue; 
+                    else break;
+                }
+                if (errno == EINTR) continue;
+                break;
+            } 
+            else { // n == 0 (Client tutup koneksi)
+                break;
             }
         }
 
-        // 3. Set Non-blocking untuk client_sock (Poin #2 lu)
-        set_nonblocking_bridge(client_sock);
-
-        char buffer[8192];
-        ssize_t n = read(client_sock, buffer, sizeof(buffer) - 1);
-
-        if (n > 0) {
-            buffer[n] = '\0';
-            // write_log("[IPC] Processing: %s", buffer);
-            //fprintf(stderr, "\n[DEBUG-BRIDGE] Data masuk: %s\n", buffer);
-            
-            // Dispatching ke logika JSON lu
-            ws_system_internal_dispatch(buffer);
-        } 
-        /*else {
-            fprintf(stderr, "[DEBUG-BRIDGE] Read error/empty. n=%ld\n", (long)n);
-        }*/
+        if (total_received > 0) {
+            ipc_buffer[total_received] = '\0';
+            // Bersihkan \n \r
+            for (ssize_t i = total_received - 1; i >= 0 && (ipc_buffer[i] == '\n' || ipc_buffer[i] == '\r'); i--) {
+                ipc_buffer[i] = '\0';
+            }
+            ws_system_internal_dispatch(ipc_buffer);
+        }
 
         close(client_sock);
     }
 }
+

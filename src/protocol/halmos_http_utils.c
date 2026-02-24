@@ -122,9 +122,16 @@ const char* get_active_root(const char *incoming_host) {
     char *port_ptr = strchr(clean_host, ':');
     if (port_ptr) *port_ptr = '\0';
 
+    // --- LOGIKA SKIP WWW ---
+    // Jika user akses www.google.com, p_host akan jadi google.com
+    const char *p_host = clean_host;
+    if (strncasecmp(clean_host, "www.", 4) == 0) {
+        p_host += 4;
+    }
+    
     // 2. Cari di daftar VHost
     for (int i = 0; i < config.vhost_count; i++) {
-        if (strcmp(config.vhosts[i].host, clean_host) == 0) {
+        if (strcasecmp(config.vhosts[i].host, clean_host) == 0) {
             return config.vhosts[i].root;
         }
     }

@@ -1,3 +1,8 @@
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+// Penting untuk POLLRDHUP
+
 #include "halmos_fcgi.h"
 #include "halmos_log.h"
 #include "halmos_global.h"
@@ -10,6 +15,7 @@
 #include <sys/un.h>
 #include <arpa/inet.h>
 #include <errno.h>
+#include <poll.h> // Header untuk fungsi poll()
 
 // Instance global pool
 HalmosFCGI_Pool fcgi_pool;
@@ -60,55 +66,48 @@ int halmos_fcgi_conn_acquire(const char *target, int port) {
 
     int active_for_this_backend = 0;
     int target_quota = 16; // Default safety net
-
-    // 1. Tentukan kuota secara dinamis sesuai config
-    if (is_unix) {
-        if (config.php_server && strcmp(target, config.php_server) == 0) target_quota = fcgi_pool.php_quota;
-        else if (config.rust_server && strcmp(target, config.rust_server) == 0) target_quota = fcgi_pool.rust_quota;
-        else if (config.python_server && strcmp(target, config.python_server) == 0) target_quota = fcgi_pool.python_quota;
-    } else {
-        if (port == config.php_port) target_quota = fcgi_pool.php_quota;
-        else if (port == config.rust_port) target_quota = fcgi_pool.rust_quota;
-        else if (port == config.python_port) target_quota = fcgi_pool.python_quota;
-    }
-
-    // 2. CARI REUSE & HITUNG PEMAKAIAN
-    int reuse_idx = -1;
+    // --- PERBAIKAN: Loop untuk mencari koneksi yang BENAR-BENAR sehat ---
+    // --- PART 1: CARI REUSE & HITUNG AKTIF ---
+    int final_sock = -1;
     for (int i = 0; i < fcgi_pool.pool_size; i++) {
         if (fcgi_pool.connections[i].sockfd != -1) {
-            bool belongs = false;
-            if (is_unix) {
-                belongs = (fcgi_pool.connections[i].is_unix && strcmp(fcgi_pool.connections[i].target_path, target) == 0);
-            } else {
-                belongs = (!fcgi_pool.connections[i].is_unix && fcgi_pool.connections[i].target_port == port);
-            }
+            bool belongs = is_unix ? 
+                (fcgi_pool.connections[i].is_unix && strcmp(fcgi_pool.connections[i].target_path, target) == 0) :
+                (!fcgi_pool.connections[i].is_unix && fcgi_pool.connections[i].target_port == port);
 
             if (belongs) {
-                if (fcgi_pool.connections[i].in_use) active_for_this_backend++;
-                else if (reuse_idx == -1) reuse_idx = i;
+                if (fcgi_pool.connections[i].in_use) {
+                    active_for_this_backend++;
+                } else if (final_sock == -1) {
+                    // Validasi kesehatan
+                    struct pollfd pfd = { .fd = fcgi_pool.connections[i].sockfd, .events = POLLIN | POLLRDHUP };
+                    int ret = poll(&pfd, 1, 0);
+
+                    if (ret > 0 && (pfd.revents & (POLLERR | POLLHUP | POLLRDHUP | POLLNVAL))) {
+                        close(fcgi_pool.connections[i].sockfd);
+                        fcgi_pool.connections[i].sockfd = -1;
+                    } else if (ret > 0 && (pfd.revents & POLLIN)) {
+                        char buf;
+                        if (recv(fcgi_pool.connections[i].sockfd, &buf, 1, MSG_PEEK | MSG_DONTWAIT) == 0) {
+                            close(fcgi_pool.connections[i].sockfd);
+                            fcgi_pool.connections[i].sockfd = -1;
+                        }
+                    } else {
+                        // Socket SEHAT, ambil!
+                        fcgi_pool.connections[i].in_use = true;
+                        final_sock = fcgi_pool.connections[i].sockfd;
+                        active_for_this_backend++;
+                    }
+                }
             }
         }
     }
 
-    // 3. LOGIKA REUSE
-    if (reuse_idx != -1) {
-        int error = 0;
-        socklen_t len = sizeof(error);
-        // Pastikan socket masih hidup sebelum dipakai lagi
-        if (getsockopt(fcgi_pool.connections[reuse_idx].sockfd, SOL_SOCKET, SO_ERROR, &error, &len) == 0 && error == 0) {
-            fcgi_pool.connections[reuse_idx].in_use = true;
-            pthread_mutex_unlock(&fcgi_pool.lock);
-            return fcgi_pool.connections[reuse_idx].sockfd;
-        } else {
-            // Socket mati, bersihkan
-            close(fcgi_pool.connections[reuse_idx].sockfd);
-            fcgi_pool.connections[reuse_idx].sockfd = -1;
-        }
-    }
-    
-    // Simpan status kuota sebelum lepas lock untuk connect
     bool can_store_in_pool = (active_for_this_backend < target_quota);
     pthread_mutex_unlock(&fcgi_pool.lock);
+
+    // Jika dapat dari pool, selesai.
+    if (final_sock != -1) return final_sock;
 
     // 4. JIKA HARUS CREATE BARU (Diluar Lock agar tidak blocking thread lain)
     int new_sock = -1;
@@ -170,7 +169,6 @@ int halmos_fcgi_conn_acquire(const char *target, int port) {
 
     return new_sock;
 }
-
 
 void halmos_fcgi_conn_release(int sockfd) {
     if (sockfd < 0) return;

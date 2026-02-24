@@ -10,6 +10,7 @@
 #define MAX_WS_CLIENTS 1024   // Maksimal total koneksi simultan
 #define HASH_SIZE 1024        // Ukuran tabel hash untuk topik
 #define MAX_TOPICS_PER_USER 5 // Maksimal grup yang bisa diikuti satu user
+#define USER_HASH_SIZE 1024 // Sesuaikan dengan jumlah user yang diekspektasi
 
 /* * 3. STRUKTUR CLIENT (Dunia Array)
  * Menyimpan metadata lengkap setiap koneksi.
@@ -38,7 +39,6 @@ typedef struct ws_subscriber {
     struct ws_subscriber *next;
 } ws_subscriber_t;
 
-
 /* * 2. STRUKTUR TOPIC BUCKET
  * Merepresentasikan satu "Kamar" atau "Grup" pesan.
  */
@@ -47,6 +47,12 @@ typedef struct {
     ws_subscriber_t *head;     // List FD yang ada di grup ini
     pthread_mutex_t topic_lock; // Lock per-topik (Granular Locking)
 } ws_topic_bucket_t;
+
+typedef struct ws_user_node {
+    const char *user_id;        // Key
+    HalmosWSClient *client;     // Value
+    struct ws_user_node *next;  // Collision handling
+} ws_user_node_t;
 
 /* * 4. PUSAT KOMANDO REGISTRY (Hybrid Structure)
  */
@@ -58,6 +64,7 @@ typedef struct {
 
     // Jalur Distribusi Pesan (Akses cepat O(1) untuk PUB/SUB)
     ws_topic_bucket_t *buckets[HASH_SIZE];
+    ws_user_node_t *user_map[USER_HASH_SIZE];
     pthread_mutex_t hash_lock; 
 } HalmosWSRegistry;
 
