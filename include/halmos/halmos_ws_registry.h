@@ -23,6 +23,7 @@ typedef struct {
     
     // Catatan internal agar saat disconnect bisa langsung hapus di Hash Table
     char user_id[64];
+    uint64_t session_id;
     char subscribed_topics[MAX_TOPICS_PER_USER][64]; 
     int topic_count;
 } HalmosWSClient;
@@ -107,8 +108,14 @@ void ws_registry_publish(const char *app_id, const char *topic, const char *mess
 void ws_registry_set_user_id(int fd, const char *user_id);
 
 int ws_registry_get_fd_by_name(const char *name);
+
+const char* ws_registry_get_user_id(int fd);
+
+bool ws_registry_get_session_info(const char *name, int *out_fd, uint64_t *out_session, SSL **out_ssl);
+
+bool ws_registry_validate_session(int fd, uint64_t session_id);
 /**
- * BROADCAST: Kirim ke seluruh koneksi tanpa peduli topik (Sapu Jagat).
+ * BROADCAST : Kirim ke seluruh koneksi tanpa peduli topik (Sapu Jagat).
  */
 void ws_registry_broadcast(const char *message);
 

@@ -1,5 +1,5 @@
-#ifndef HALMOS_QUEUE_H
-#define HALMOS_QUEUE_H
+#ifndef HALMOS_CORE_QUEUE_H
+#define HALMOS_CORE_QUEUE_H
 
 #include <pthread.h>
 #include <sys/time.h>
@@ -34,9 +34,9 @@ typedef struct {
 // --- PROTOTIPE FUNGSI ---
 //void *worker_thread_pool(void *arg);
 //void init_queue(TaskQueue *q, int min_limit, int max_limit);
-void start_thread_worker();
-int enqueue(TaskQueue *q, int sock);
-int dequeue(TaskQueue *q, struct timeval *arrival);
+void queue_thread_worker_start();
+int queue_push(TaskQueue *q, int sock);
+int queue_pop(TaskQueue *q, struct timeval *arrival);
 //void mark_worker_idle(TaskQueue *q);
 
 #endif

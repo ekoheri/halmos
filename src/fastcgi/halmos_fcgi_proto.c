@@ -2,7 +2,7 @@
 #include "halmos_log.h"
 #include "halmos_global.h"
 #include "halmos_http_utils.h"
-#include "halmos_security.h"
+#include "halmos_sec_traffic.h"
 
 #include <string.h>
 #include <stdio.h>

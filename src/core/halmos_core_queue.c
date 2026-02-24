@@ -1,9 +1,8 @@
-#include "halmos_queue.h"
+#include "halmos_core_queue.h"
 #include "halmos_global.h"
-#include "halmos_adaptive.h"
-#include "halmos_config.h"
+#include "halmos_core_config.h"
+#include "halmos_core_thread_pool.h"
 #include "halmos_log.h"
-#include "halmos_thread_pool.h"
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -18,25 +17,9 @@
 //Pemilik variable global global_queue
 TaskQueue global_queue;
 
-//static int get_adaptive_capacity(void);
-static int get_adaptive_timeout(TaskQueue *q);
+static void init_queue(TaskQueue *q, int min_limit, int max_limit, int max_queue_size);
 
-/********************************************************************
- * init_queue() -> [Dapur Restoran Halmos]
- * Mengambil logika init_queue milik Boss.
- ********************************************************************/
-void init_queue(TaskQueue *q, int min_limit, int max_limit, int max_queue_size) {
-    q->head = q->tail = NULL;
-    q->count = 0;
-    q->max_queue_limit = max_queue_size; 
-    q->active_workers = 0;
-    q->total_workers = min_limit;
-    q->min_threads_limit = min_limit;
-    q->max_threads_limit = max_limit;
-    
-    pthread_mutex_init(&q->lock, NULL);
-    pthread_cond_init(&q->cond, NULL);
-}
+static int get_adaptive_timeout(TaskQueue *q);
 
 /*
 Algoritma penjadwalan pada Halmos Core mengadopsi pendekatan hibrida 
@@ -48,13 +31,13 @@ untuk mencegah kegagalan sistem akibat limitasi kernel maupun saturasi memori,
 sebuah mekanisme yang memberikan stabilitas lebih tinggi dibandingkan 
 konfigurasi statis pada server konvensional.
 */
-void start_thread_worker() {
+void queue_thread_worker_start() {
     // Inisialisasi antrean tugas
     init_queue(&global_queue, g_worker_min, g_worker_max, g_queue_capacity);
 
     for (int i = 0; i < g_worker_min; i++) { // Bikin sesuai minimal aja
         pthread_t worker_tid;
-        pthread_create(&worker_tid, NULL, worker_thread_pool, &global_queue);
+        pthread_create(&worker_tid, NULL, core_thread_pool_worker, &global_queue);
         pthread_detach(worker_tid);
     }
 }
@@ -63,7 +46,7 @@ void start_thread_worker() {
  * enqueue() -> [Resepsionis Enqueue]
  * Logika Upscaling Dinamis milik Boss.
  ********************************************************************/
-int enqueue(TaskQueue *q, int sock) { 
+int queue_push(TaskQueue *q, int sock) { 
     pthread_mutex_lock(&q->lock);
     
     // 1. Safety Check: Kapasitas Parkir
@@ -108,7 +91,7 @@ int enqueue(TaskQueue *q, int sock) {
         for (int i = 0; i < spawn_count; i++) {
             if (q->total_workers < q->max_threads_limit) {
                 pthread_t tid;
-                if (pthread_create(&tid, NULL, worker_thread_pool, q) == 0) {
+                if (pthread_create(&tid, NULL, core_thread_pool_worker, q) == 0) {
                     pthread_detach(tid);
                     q->total_workers++;
                 }
@@ -128,7 +111,7 @@ int enqueue(TaskQueue *q, int sock) {
  * queue_pop() -> [Koki Dequeue]
  * Logika Downscaling & Timedwait milik Boss.
  ********************************************************************/
-int dequeue(TaskQueue *q, struct timeval *arrival) {
+int queue_pop(TaskQueue *q, struct timeval *arrival) {
     pthread_mutex_lock(&q->lock);
     
     struct timespec ts;
@@ -180,6 +163,24 @@ int dequeue(TaskQueue *q, struct timeval *arrival) {
     
     return sock;
 }
+
+/********************************************************************
+ * init_queue() -> [Dapur Restoran Halmos]
+ * Mengambil logika init_queue milik Boss.
+ ********************************************************************/
+void init_queue(TaskQueue *q, int min_limit, int max_limit, int max_queue_size) {
+    q->head = q->tail = NULL;
+    q->count = 0;
+    q->max_queue_limit = max_queue_size; 
+    q->active_workers = 0;
+    q->total_workers = min_limit;
+    q->min_threads_limit = min_limit;
+    q->max_threads_limit = max_limit;
+    
+    pthread_mutex_init(&q->lock, NULL);
+    pthread_cond_init(&q->cond, NULL);
+}
+
 
 int get_adaptive_timeout(TaskQueue *q) {
     // 1. Ambil jumlah CPU Core yang aktif secara otomatis

@@ -1,21 +1,11 @@
 <?php
-$socketPath = '/tmp/halmos_bridge.sock';
+require_once 'Halmos_IPC.php';
 
-$data = [
-    "header" => [
-        "type" => "PRIVATE", // Ini 'action' di C, tapi 'type' di JSON
-        "dst"  => "Eko",     // Ini 'to' di C, tapi 'dst' di JSON
-        "src"  => "HALMOS_BACKEND" // Ini 'from' di C, tapi 'src' di JSON
-    ],
-    "payload" => "Halo Eko! Akhirnya kodenya nyambung setelah kamusnya bener."
-];
+// Contoh: Kirim notifikasi ke user "Eko"
+$sukses = Halmos_IPC::send("Eko", "notification", "Ada orderan baru masuk, Boss!");
 
-$socket = socket_create(AF_UNIX, SOCK_STREAM, 0);
-if (@socket_connect($socket, $socketPath)) {
-    socket_write($socket, json_encode($data));
-    echo "Pesan dikirim dengan kamus yang bener!\n";
+if ($sukses) {
+    echo "Pesan sudah terkirim ke Halmos!";
 } else {
-    echo "Gagal konek! Pastikan Halmos jalan dan socket bisa diakses.\n";
+    echo "Gagal konek ke Halmos. Cek apakah Halmos jalan?";
 }
-socket_close($socket);
-?>

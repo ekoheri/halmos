@@ -1,6 +1,6 @@
 #include "halmos_http_utils.h"
 #include "halmos_global.h"
-#include "halmos_config.h"
+#include "halmos_core_config.h"
 #include "halmos_log.h"
 
 #include <stdio.h>

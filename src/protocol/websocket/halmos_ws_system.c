@@ -2,13 +2,13 @@
 #define _GNU_SOURCE
 #endif
 
-#include "halmos_websocket.h"
+#include "halmos_ws_system.h"
 #include "halmos_global.h"
-#include "halmos_config.h"
+#include "halmos_core_config.h"
 #include "halmos_log.h"
-#include "halmos_tls.h"
-#include "halmos_http1_header.h" // Untuk akses struct RequestHeader
-#include "halmos_event_loop.h"   // Untuk rearm_epoll_oneshot
+#include "halmos_sec_tls.h"
+#include "halmos_http1_header.h"        // Untuk akses struct RequestHeader
+#include "halmos_core_event_loop.h"     // Untuk rearm_epoll_oneshot
 
 #include "halmos_ws_registry.h"
 
@@ -18,6 +18,8 @@
 #include <unistd.h>
 #include <sys/socket.h>
 #include <errno.h>
+#include <openssl/ssl.h>
+#include <openssl/err.h>
 #include <openssl/sha.h>
 #include <json-c/json.h>
 #include <arpa/inet.h>   // Untuk htons, ntohs
@@ -45,11 +47,24 @@ static char* ws_create_accept_key(const char *client_key);
  */
 static ssize_t ws_low_level_recv(int fd, void *buf, size_t len);
 
-static void halmos_ws_send_pong(int sock_client);
+static void ws_system_send_pong(int sock_client);
 
-static void* halmos_ws_maintenance_run(void *arg);
+static void* ws_system_maintenance_run(void *arg);
 
-static void halmos_ws_start_maintenance();
+static void ws_system_start_maintenance();
+
+// Fungsi pembantu (Helper) untuk mengubah String JSON jadi Enum angka
+static inline ws_action_ipc_t get_action_code(const char *s) {
+    if (!s) return ACT_UNKNOWN;
+    if (strcmp(s, "AUTH") == 0)      return ACT_AUTH;
+    if (strcmp(s, "PRIVATE") == 0)   return ACT_PRIVATE;
+    if (strcmp(s, "BROADCAST") == 0) return ACT_BROADCAST;
+    if (strcmp(s, "GROUP") == 0)     return ACT_GROUP;
+    if (strcmp(s, "PUB") == 0)       return ACT_PUB;
+    if (strcmp(s, "SUB") == 0)       return ACT_SUB;
+    if (strcmp(s, "REQ") == 0)       return ACT_REQ;
+    return ACT_UNKNOWN;
+}
 
 /* ===================================================================
  * 1. Level 1: System Entry & Lifecycle (The Master Switches)
@@ -61,13 +76,13 @@ void halmos_ws_system_init() {
     ws_registry_init();
     
     // 2. Nyalakan Tukang Pukul Lonceng (Thread Maintenance)
-    halmos_ws_start_maintenance();
+    ws_system_start_maintenance();
     
     write_log("[WS] Infrastructure Ready.");
 }
 
 // Tambahkan di halmos_websocket.c
-void halmos_ws_system_destroy() {
+void ws_system_destroy() {
     // 1. Matikan registry dan free semua memori client
     ws_registry_destroy();
     
@@ -77,7 +92,7 @@ void halmos_ws_system_destroy() {
     write_log("[WS] System resources destroyed.");
 }
 
-void halmos_ws_cleanup_fd(int fd) {
+void ws_system_cleanup_fd(int fd) {
     // Di sini kita cek dulu, apakah FD ini memang WebSocket?
     if (halmos_is_websocket_fd(fd)) {
         // Hapus dari buku alamat
@@ -93,9 +108,9 @@ void halmos_ws_cleanup_fd(int fd) {
  * Fungsi Starter Publik.
  * Inilah yang dipanggil satu kali di main/event_loop.
  */
-void halmos_ws_start_maintenance() {
+void ws_system_start_maintenance() {
     pthread_t tid;
-    if (pthread_create(&tid, NULL, halmos_ws_maintenance_run, NULL) == 0) {
+    if (pthread_create(&tid, NULL, ws_system_maintenance_run, NULL) == 0) {
         pthread_detach(tid); // Lepas agar resource otomatis bebas saat thread selesai
     } else {
         write_log_error("[WS-SYSTEM] Failed to start maintenance thread!");
@@ -170,7 +185,7 @@ int ws_upgrade_handshake(int sock_client, RequestHeader *req) {
         accept_key);
 
     ssize_t sent = 0;
-    SSL *ssl = get_ssl_for_fd(sock_client);
+    SSL *ssl = ssl_get_for_fd(sock_client);
     
     // Gunakan loop kecil atau handling EAGAIN jika perlu
     // Tapi untuk handshake yang cuma 200-an byte, biasanya sekali kirim habis
@@ -193,7 +208,7 @@ int ws_upgrade_handshake(int sock_client, RequestHeader *req) {
     }
 
     // --- DI SINI TEMPATNYA ---
-    // Karena ws_upgrade_handshake sudah punya akses ke 'ssl' via get_ssl_for_fd,
+    // Karena ws_upgrade_handshake sudah punya akses ke 'ssl' via ssl_get_for_fd,
     // Kita langsung daftarkan ke buku alamat.
     int slot = ws_registry_add(sock_client, ssl);
     
@@ -304,11 +319,11 @@ int halmos_ws_recv_frame(int fd, int *opcode, unsigned char **payload, size_t *o
  * =================================================================== */
 
 /**
- * halmos_ws_dispatch
+ * ws_system_dispatch
  * Entry point utama yang dipanggil oleh Worker Thread saat Epoll mendeteksi data masuk.
  * Return 1: Tetap hidup (Rearm Epoll), 0: Tutup koneksi (Cleanup).
  */
-int halmos_ws_dispatch(int sock_client) {
+int ws_system_dispatch(int sock_client) {
     int opcode;
     unsigned char *payload = NULL;
     size_t payload_len = 0;
@@ -332,7 +347,7 @@ int halmos_ws_dispatch(int sock_client) {
         case WS_OP_TEXT:
             // Pesan teks (Biasanya JSON untuk aplikasi lu)
             if (payload) {
-                halmos_ws_on_message(sock_client, payload, payload_len);
+                ws_system_on_message(sock_client, payload, payload_len);
             }
             break;
 
@@ -344,7 +359,7 @@ int halmos_ws_dispatch(int sock_client) {
         case WS_OP_PING:
             // Browser nanya: "Masih hidup gak?" -> Kita harus bales PONG
             write_log("[WS] Ping received. Sending Pong to FD %d", sock_client);
-            halmos_ws_send_pong(sock_client); 
+            ws_system_send_pong(sock_client); 
             break;
 
         case WS_OP_PONG:
@@ -375,7 +390,7 @@ int halmos_ws_dispatch(int sock_client) {
  * Jalur VIP untuk Backend (PHP/Rust).
  * Tidak perlu unmasking, tidak perlu TLS. Langsung to-the-point.
  */
-void halmos_ws_internal_dispatch(const char *json_raw) {
+void ws_system_internal_dispatch(const char *json_raw) {
     if (!json_raw) return;
 
     struct json_tokener *tok = json_tokener_new();
@@ -388,15 +403,15 @@ void halmos_ws_internal_dispatch(const char *json_raw) {
 
     struct json_object *header_obj = NULL;
     // Ambil "header" sesuai config
-    if (json_object_object_get_ex(parsed_json, ws_cfg.envelope.header, &header_obj)) {
+    if (json_object_object_get_ex(parsed_json, K_HEADER, &header_obj)) {
         
-        struct json_object *type_obj = NULL;
+        struct json_object *action_obj = NULL;
         // Ambil "type" sesuai config (ws_cfg.keys.action)
-        json_object_object_get_ex(header_obj, ws_cfg.keys.action, &type_obj);
-        const char *type = type_obj ? json_object_get_string(type_obj) : "";
+        json_object_object_get_ex(header_obj, K_ACTION, &action_obj);
+        const char *action_val = action_obj ? json_object_get_string(action_obj) : "";
 
         // --- LOGIKA SET_IDENTITY (JANGAN DIHAPUS!) ---
-        if (strcmp(type, "SET_IDENTITY") == 0) {
+        if (strcmp(action_val, "SET_IDENTITY") == 0) {
             struct json_object *fd_obj = NULL;
             struct json_object *uid_obj = NULL;
             
@@ -418,21 +433,32 @@ void halmos_ws_internal_dispatch(const char *json_raw) {
             struct json_object *src_obj = NULL;
             
             // Pakai ws_cfg.keys.to (isinya "dst") dan ws_cfg.keys.from (isinya "src")
-            json_object_object_get_ex(header_obj, ws_cfg.keys.to, &dst_obj);
-            json_object_object_get_ex(header_obj, ws_cfg.keys.from, &src_obj);
+            json_object_object_get_ex(header_obj, K_DST, &dst_obj);
+            json_object_object_get_ex(header_obj, K_SRC, &src_obj);
 
             const char *target = dst_obj ? json_object_get_string(dst_obj) : NULL;
             const char *source = src_obj ? json_object_get_string(src_obj) : NULL;
 
             // Pastikan source ada dan punya prefix internal (misal: "HALMOS_")
-            if (source && strncmp(source, ws_cfg.policy.internal_prefix, strlen(ws_cfg.policy.internal_prefix)) == 0 && target) {
+            if (source && strncmp(source, INTERNAL_PREFIX, strlen(INTERNAL_PREFIX)) == 0 && target) {
                 if (strcmp(target, "BROADCAST") == 0) {
                     ws_registry_broadcast(json_raw);
                 } else {
-                    // Cari FD berdasarkan nama target ("Eko")
-                    int target_fd = ws_registry_get_fd_by_name(target); 
-                    if (target_fd > 0) {
-                        halmos_ws_send_text(target_fd, json_raw);
+                    // --- UPGRADE: Pakai Session Info & Validation ---
+                    int target_fd = -1;
+                    uint64_t target_session = 0;
+                    SSL *target_ssl = NULL;
+
+                    // 1. Ambil "KTP" lengkap si target
+                    if (ws_registry_get_session_info(target, &target_fd, &target_session, &target_ssl)) {
+                        
+                        // 2. Validasi apakah FD tersebut masih milik session yang sama
+                        if (ws_registry_validate_session(target_fd, target_session)) {
+                            // Kirim pesan dengan aman (sudah menghandle SSL/Plain internal)
+                            ws_system_send_text(target_fd, target_ssl, json_raw);
+                        } else {
+                            write_log_error("[WS-IPC] Security Block: FD %d for %s is now a different session!", target_fd, target);
+                        }
                     } else {
                         write_log("[WS-IPC] Target %s not found or offline.", target);
                     }
@@ -445,11 +471,11 @@ void halmos_ws_internal_dispatch(const char *json_raw) {
     json_tokener_free(tok);
 }
 /**
- * halmos_ws_on_message
+ * ws_system_on_message
  * Di sinilah logika aplikasi berjalan. 
  * Menerima string/payload yang sudah di-unmask dan siap diproses.
  */
-void halmos_ws_on_message(int sock_client, unsigned char *data, size_t len) {
+void ws_system_on_message(int sock_client, unsigned char *data, size_t len) {
     if (len == 0 || data == NULL) return;
 
     // DEBUG: Intip data mentah yang masuk dari socket
@@ -468,7 +494,7 @@ void halmos_ws_on_message(int sock_client, unsigned char *data, size_t len) {
 
     // 2. Akses Header berdasarkan kamus ws_cfg
     struct json_object *header_obj = NULL;
-    if (json_object_object_get_ex(parsed_json, ws_cfg.envelope.header, &header_obj)) {
+    if (json_object_object_get_ex(parsed_json, K_HEADER, &header_obj)) {
         
         struct json_object *action_obj = NULL;
         struct json_object *dst_obj = NULL;
@@ -478,9 +504,9 @@ void halmos_ws_on_message(int sock_client, unsigned char *data, size_t len) {
         // ws_cfg.keys.action = "type"
         // ws_cfg.keys.to     = "dst"
         // ws_cfg.keys.app    = "app" (atau sesuai config lu)
-        json_object_object_get_ex(header_obj, ws_cfg.keys.action, &action_obj);
-        json_object_object_get_ex(header_obj, ws_cfg.keys.to, &dst_obj);
-        json_object_object_get_ex(header_obj, ws_cfg.keys.app, &app_obj);
+        json_object_object_get_ex(header_obj, K_ACTION, &action_obj);
+        json_object_object_get_ex(header_obj, K_DST, &dst_obj);
+        json_object_object_get_ex(header_obj, K_APP, &app_obj);
 
         // DEBUG: Cek apakah key-nya ketemu atau NULL
         /*fprintf(stderr, "[DEBUG-INFO] Searching keys -> ActionKey: '%s' (%s), TargetKey: '%s' (%s)\n", 
@@ -497,45 +523,69 @@ void halmos_ws_on_message(int sock_client, unsigned char *data, size_t len) {
 
             write_log("[WS] Route: App=%s, Action=%s, Target=%s", app_id, action, target);
 
-            // 3. LOGIKA EKSEKUSI (Tetap utuh sesuai permintaan)
-            if (strcmp(action, "AUTH") == 0) {
-                // Browser kirim: {"header":{"type":"AUTH", "dst":"server"}, "payload":"Eko"}
-                struct json_object *pay_obj = NULL;
-                json_object_object_get_ex(parsed_json, ws_cfg.envelope.payload, &pay_obj);
-                if (pay_obj) {
-                    const char *user_id = json_object_get_string(pay_obj);
-                    //fprintf(stderr, "[DEBUG-AUTH] Attempting to link FD %d to User: %s\n", sock_client, user_id);
-                    ws_registry_set_user_id(sock_client, user_id);
-                    write_log("[WS-AUTH] Client FD %d identified as %s", sock_client, user_id);
-                } else {
-                    fprintf(stderr, "[DEBUG-AUTH] FAILED: Payload (user_id) not found!\n");
+            ws_action_ipc_t action_code = get_action_code(action);
+
+            switch (action_code) {
+                case ACT_AUTH: {
+                    struct json_object *pay_obj = NULL;
+                    json_object_object_get_ex(parsed_json, K_PAYLOAD, &pay_obj);
+                    if (pay_obj) {
+                        const char *user_id = json_object_get_string(pay_obj);
+                        //fprintf(stderr, "[DEBUG-AUTH] Attempting to link FD %d to User: %s\n", sock_client, user_id);
+                        ws_registry_set_user_id(sock_client, user_id);
+                        write_log("[WS-AUTH] Client FD %d identified as %s", sock_client, user_id);
+                    }
+                    break;
                 }
-            } else if (strcmp(action, "PUB") == 0) {
-                // Publish pesan ke topik/grup
-                ws_registry_publish(app_id, target, (const char *)data); 
-            } 
-            else if (strcmp(action, "SUB") == 0) {
-                // Daftarkan socket ke topik/grup
-                ws_registry_add_to_topic(sock_client, app_id, target);
-            }
-            else if (strcmp(action, "REQ") == 0) {
-                // Jika REQ, biasanya butuh body/payload-nya
-                struct json_object *payload_obj = NULL;
-                json_object_object_get_ex(parsed_json, ws_cfg.envelope.payload, &payload_obj);
-                
-                // Lempar ke fungsi backend FastCGI lu (jika diaktifkan)
-                // halmos_bridge_to_fastcgi(sock_client, app_id, target, payload_obj);
-                write_log("[WS-REQ] Request received for App %s, Target %s", app_id, target);
+                case ACT_PRIVATE:{
+                    // Cek siapa pengirimnya (opsional, buat log)
+                    const char *from_user = ws_registry_get_user_id(sock_client);
+                    
+                    int target_fd = -1;
+                    uint64_t target_session = 0;
+                    SSL *target_ssl = NULL;
+
+                    // 1. Cari target di buku alamat (registry)
+                    if (ws_registry_get_session_info(target, &target_fd, &target_session, &target_ssl)) {
+                        // 2. Kirim pesan mentah (data) ke target
+                        if (ws_system_send_text(target_fd, target_ssl, (const char *)data) == 0) {
+                            write_log("[WS-PRIVATE] %s -> %s (Success)", from_user ? from_user : "Anon", target);
+                        }
+                    } else {
+                        write_log("[WS-PRIVATE] Target %s offline", target);
+                    }
+                    break;
+                }
+                case ACT_BROADCAST:{
+                    // Kirim ke semua orang yang terdaftar di registry
+                    // Fungsi broadcast lu biasanya sudah handle looping semua FD
+                    ws_registry_broadcast((const char *)data);
+                    write_log("[WS-BCAST] Broadcast sent by FD %d", sock_client);
+                    break;
+                }
+                case ACT_PUB:
+                    ws_registry_publish("GLOBAL", target, (const char *)data);
+                    break;
+                case ACT_SUB:
+                    ws_registry_add_to_topic(sock_client, app_id, target);
+                    break;
+                case ACT_REQ: {
+                    struct json_object *payload_obj = NULL;
+                    json_object_object_get_ex(parsed_json, K_PAYLOAD, &payload_obj);
+                    break;
+                }
+                default:
+                    write_log_error("[WS] Unknown Command: %s", action);
+                    break;
             }
         } else {
             //fprintf(stderr, "[DEBUG-WARN] Missing routing keys! Make sure JSON uses '%s' and '%s'\n", 
             //        ws_cfg.keys.action, ws_cfg.keys.to);
-            write_log_error("[WS] Missing routing keys in header on FD %d. Key expected: %s and %s", 
-                            sock_client, ws_cfg.keys.action, ws_cfg.keys.to);
+            write_log_error("[WS] Missing routing keys in header on FD %d. ", sock_client);
         }
     } else {
         //fprintf(stderr, "[DEBUG-WARN] Header '%s' not found in JSON!\n", ws_cfg.envelope.header);
-        write_log_error("[WS] Envelope header '%s' not found on FD %d", ws_cfg.envelope.header, sock_client);
+        write_log_error("[WS] Envelope header '%s' not found on FD %d", K_HEADER, sock_client);
     }
 
     // 4. CLEANUP (Wajib!)
@@ -549,11 +599,11 @@ void halmos_ws_on_message(int sock_client, unsigned char *data, size_t len) {
  * =================================================================== */
 
 /**
- * halmos_ws_send_text
+ * ws_system_send_text
  * Membungkus string teks ke dalam frame WebSocket dan mengirimkannya.
  * Mendukung otomatisasi panjang payload (Small, Medium, Large).
  */
-int halmos_ws_send_text(int sock_client, const char *text) {
+int ws_system_send_text(int sock_client, SSL *ssl, const char *text) {
     if (!text) return -1;
 
     size_t len = strlen(text);
@@ -586,7 +636,6 @@ int halmos_ws_send_text(int sock_client, const char *text) {
     }
 
     // 3. PENGIRIMAN (TRANSPARENT TLS/PLAIN)
-    SSL *ssl = get_ssl_for_fd(sock_client);
     
     // Kita kirim header dulu, baru datanya (bisa pakai writev kalau mau lebih kenceng)
     if (ssl) {
@@ -669,7 +718,7 @@ char* ws_create_accept_key(const char *client_key){
  */
 ssize_t ws_low_level_recv(int fd, void *buf, size_t len){
     // 1. Cek apakah socket ini punya objek SSL (dari halmos_tls.h)
-    SSL *ssl = get_ssl_for_fd(fd);
+    SSL *ssl = ssl_get_for_fd(fd);
 
     if (ssl != NULL) {
         // Jalur HTTPS / WSS
@@ -691,9 +740,9 @@ ssize_t ws_low_level_recv(int fd, void *buf, size_t len){
 /**
  * Mengirim frame PONG sederhana sebagai balasan PING.
  */
-void halmos_ws_send_pong(int sock_client) {
+void ws_system_send_pong(int sock_client) {
     unsigned char pong_frame[2] = {0x8A, 0x00}; // FIN=1, Opcode=0xA (Pong), Len=0
-    SSL *ssl = get_ssl_for_fd(sock_client);
+    SSL *ssl = ssl_get_for_fd(sock_client);
     if (ssl) SSL_write(ssl, pong_frame, 2);
     else send(sock_client, pong_frame, 2, MSG_NOSIGNAL);
 }
@@ -702,7 +751,7 @@ void halmos_ws_send_pong(int sock_client) {
  * Fungsi internal thread yang akan berjalan selamanya di background.
  * Kita buat static karena hanya dipanggil via starter di file ini.
  */
-void* halmos_ws_maintenance_run(void *arg) {
+void* ws_system_maintenance_run(void *arg) {
     (void)arg;
     write_log("[WS-SYSTEM] Background Maintenance Thread Started.");
 

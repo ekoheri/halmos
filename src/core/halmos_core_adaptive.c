@@ -1,7 +1,7 @@
-#include "halmos_adaptive.h"
+#include "halmos_core_adaptive.h"
 #include "halmos_global.h"
+#include "halmos_core_config.h"
 #include "halmos_log.h"
-#include "halmos_config.h"
 #include "halmos_fcgi.h"
 
 #include <stdio.h>
@@ -76,7 +76,7 @@ PHPConfig fetch_php_fpm_config() {
     return cfg;
 }
 
-void halmos_adaptive_init_all(void) {
+void core_adaptive_init(void) {
     // --- STEP 1: Deteksi Hardware ---
     long num_cores = sysconf(_SC_NPROCESSORS_ONLN);
     struct rlimit rl;

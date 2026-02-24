@@ -1,10 +1,8 @@
-#include "halmos_thread_pool.h"
+#include "halmos_core_thread_pool.h"
 #include "halmos_global.h"
+#include "halmos_core_event_loop.h"
 #include "halmos_http_bridge.h"
 #include "halmos_log.h"
-#include "halmos_tls.h"
-#include "halmos_event_loop.h"
-#include "halmos_ws_registry.h"
 
 #include <pthread.h>
 #include <sys/epoll.h>
@@ -19,13 +17,13 @@ void mark_worker_idle(TaskQueue *q);
  * halmos_worker_routine() -> [SIKLUS KERJA KOKI]
  * Persis Logika Boss: Ambil -> Masak -> Beresin Meja
  ********************************************************************/
-void *worker_thread_pool(void *arg) {
+void *core_thread_pool_worker(void *arg) {
     (void)arg;
     while (1) {
         struct timeval arrival;
         
         // 1. Ambil tugas (File Descriptor) dari antrean
-        int sock_client = dequeue(&global_queue, &arrival);
+        int sock_client = queue_pop(&global_queue, &arrival);
         
         if (sock_client < 0) continue;
 
@@ -38,20 +36,19 @@ void *worker_thread_pool(void *arg) {
         // 2. PROSES REQUEST (Dispatcher Utama)
         // Boss, urusan SSL Handshake, Dekripsi, dan Deteksi Protokol 
         // semuanya kita pindah ke dalam bridge_dispatch().
-        int status = bridge_dispatch(sock_client);
+        int status = http_bridge_dispatch(sock_client);
 
         // 3. EVALUASI HASIL DISPATCH
         if (status == 1) {
             // Status 1: Keep-Alive atau SSL Handshake butuh data lagi (EAGAIN)
             // Ambil dari event_loop.c
-            rearm_epoll_oneshot(sock_client);
+            event_loop_rearm_epoll(sock_client);
         } else {
             // Status 0 atau -1: Koneksi selesai atau Error
-            // cleanup_connection_properly ada di halmos_tls.c
-            // Ambil dari tls.c
+            // cleanup_connection_properly ada di halmos_event_loop.c
 
             global_telemetry.active_connections--;
-            cleanup_connection_properly(sock_client);
+            event_loop_cleanup_connection(sock_client);
         }
 
         // --- TELEMETRY & LOGGING ---

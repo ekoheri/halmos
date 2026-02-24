@@ -1,12 +1,11 @@
 #include "halmos_http1_parser.h"
 #include "halmos_global.h"
+#include "halmos_core_config.h"
 #include "halmos_http1_header.h"
-#include "halmos_multipart.h"
+#include "halmos_http_multipart.h"
 #include "halmos_http_utils.h"
-#include "halmos_config.h"
+#include "halmos_http_route.h"
 #include "halmos_log.h"
-#include "halmos_route.h"
-
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -34,7 +33,7 @@ static char* fast_trim(char *s) {
     return s;
 }
 
-bool parse_http_request(char *raw_data, size_t total_received, RequestHeader *req) {
+bool http1_parser_parse_header(char *raw_data, size_t total_received, RequestHeader *req) {
     bool saved_tls = req->is_tls;
     // 0. RESET: Bersihkan struct agar tidak ada sisa data dari request sebelumnya
     memset(req, 0, sizeof(RequestHeader));
@@ -125,13 +124,13 @@ bool parse_http_request(char *raw_data, size_t total_received, RequestHeader *re
 
     if (req->is_valid) {
         // Cari di tabel apakah ada rute yang cocok (misal: /dhe-sedang)
-        RouteTable *match = match_route(req->uri);
+        RouteTable *match = http_route_match(req->uri);
 
         if (match != NULL) {
             char t_uri[128] = {0}, t_query[256] = {0}, t_path[128] = {0};
             
             // 1. Olah rute ke buffer lokal (misal: /dhe-sedang jadi /test_dhe.php)
-            apply_route_logic(match, req->uri, t_uri, t_query, t_path);
+            http_route_apply_logic(match, req->uri, t_uri, t_query, t_path);
             
             // 2. Gabungkan query user jika ada
             if (req->query_string && strlen(req->query_string) > 0) {
@@ -268,15 +267,15 @@ bool parse_http_request(char *raw_data, size_t total_received, RequestHeader *re
     // 5. LOGIKA MULTIPART
     if (req->content_type && strstr(req->content_type, "multipart/form-data")) {
         // Panggil fungsi multipart dari halmos_multipart.c
-        parse_multipart_body(req); 
+        http_multipart_parse_body(req); 
     }
 
     return req->is_valid;
 }
 
-void free_request_header(RequestHeader *req) {
+void http1_parser_free_memory(RequestHeader *req) {
     if (req->parts) {
-        free_multipart_parts(req->parts, req->parts_count);
+        http_multipart_free_parts(req->parts, req->parts_count);
         req->parts = NULL;
         req->parts_count = 0;
     }

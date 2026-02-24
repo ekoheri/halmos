@@ -4,16 +4,15 @@
 
 #include "halmos_http1_manager.h"
 #include "halmos_global.h"
+#include "halmos_core_config.h"
 #include "halmos_http1_header.h"
 #include "halmos_http1_parser.h"
 #include "halmos_http1_response.h"
-#include "halmos_multipart.h"
 #include "halmos_http_utils.h"
-#include "halmos_security.h"
-#include "halmos_tls.h"
-#include "halmos_config.h"
+#include "halmos_sec_traffic.h"
+#include "halmos_sec_tls.h"
 #include "halmos_log.h"
-#include "halmos_websocket.h"
+#include "halmos_ws_system.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -35,7 +34,7 @@
  */
 static ssize_t halmos_recv(int fd, void *buf, size_t len, bool is_tls) {
     if (is_tls) {
-        SSL *ssl = get_ssl_for_fd(fd);
+        SSL *ssl = ssl_get_for_fd(fd);
         if (!ssl) return -1;
         // SSL_read melakukan dekripsi internal sebelum masuk ke buf
         return SSL_read(ssl, buf, (int)len);
@@ -98,7 +97,7 @@ static ssize_t recv_until_header_end(int sock, char *buf, size_t limit, bool is_
         if (n < 0) {
             bool retry_it = false;
             if (is_tls) {
-                int err_code = SSL_get_error(get_ssl_for_fd(sock), (int)n);
+                int err_code = SSL_get_error(ssl_get_for_fd(sock), (int)n);
                 if (err_code == SSL_ERROR_WANT_READ || err_code == SSL_ERROR_WANT_WRITE) retry_it = true;
             } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 retry_it = true;
@@ -171,7 +170,7 @@ static bool recv_http_body(int sock, RequestHeader *req, char **buf_ptr, size_t 
 
 /* --- FUNGSI UTAMA (PUBLIC) --- */
 
-int handle_http1_session(int sock_client, bool is_tls) {
+int http1_manager_session(int sock_client, bool is_tls) {
     // CCTV 1: Cek apakah sesi dimulai
     //fprintf(stderr, "[DEBUG] Sesi dimulai. FD: %d, TLS: %s\n", sock_client, is_tls ? "YES" : "NO");
     //fprintf(stderr, "[DEBUG-MANAGER] FD %d: Memulai sesi HTTP1. TLS=%d\n", sock_client, is_tls);
@@ -201,10 +200,10 @@ int handle_http1_session(int sock_client, bool is_tls) {
 
         //fprintf(stderr, "[DEBUG-MANAGER] FD %d: Header OK (%zd bytes). Cek WS Upgrade...\n", sock_client, received);
         // 2. Parsing (Data sudah didekripsi oleh halmos_recv)
-        if (!parse_http_request(buffer, received, &req) || !req.is_valid) {
+        if (!http1_parser_parse_header(buffer, received, &req) || !req.is_valid) {
             //fprintf(stderr, "[DEBUG] Parser GAGAL! Mengirim 400 Bad Request...\n");
-            send_mem_response_plain(sock_client, 400, "Bad Request", "400 Bad Request", is_tls);
-            free_request_header(&req);
+            http1_response_send_mem(sock_client, 400, "Bad Request", "400 Bad Request", is_tls);
+            http1_parser_free_memory(&req);
             break;
         }
 
@@ -213,7 +212,7 @@ int handle_http1_session(int sock_client, bool is_tls) {
             if (ws_upgrade_handshake(sock_client, &req) == 0) {
                 //fprintf(stderr, "[DEBUG-MANAGER] FD %d: Handshake Sukses. Pindah ke WS Mode.\n", sock_client);
                 halmos_set_websocket_fd(sock_client, true); // NYALAKAN SAKLAR
-                free_request_header(&req);
+                http1_parser_free_memory(&req);
                 free(buffer);
                 return 1; // Rearm epoll, tunggu frame WS pertama
             }
@@ -224,16 +223,16 @@ int handle_http1_session(int sock_client, bool is_tls) {
         // 3. Tarik Body jika ada (Misal: POST/PUT)
         if (req.content_length > 0) {
             if (!recv_http_body(sock_client, &req, &buffer, &buf_limit, is_tls)) {
-                free_request_header(&req);
+                http1_parser_free_memory(&req);
                 break;
             }
         }
 
         // 4. Kirim Response (is_tls diteruskan di dalam req)
-        process_request_routing(sock_client, &req);
+        http1_response_routing(sock_client, &req);
 
         keep_alive = req.is_keep_alive;
-        free_request_header(&req);
+        http1_parser_free_memory(&req);
     }
 
     free(buffer);
@@ -255,7 +254,7 @@ static void wait_for_ssl_write(int fd) {
  * handle_ssl_response_logic - FULL VERSION
  * Menangani File Statis & Auto-Index via SSL/TLS
  */
-void handle_ssl_response_logic(int sock_client, RequestHeader *req) {
+void http1_manager_ssl_response(int sock_client, RequestHeader *req) {
     //fprintf(stderr, "[SSL DEBUG] Memulai respons SSL untuk URI: %s\n", req->uri ? req->uri : "NULL");
     
     const char *active_root = get_active_root(req->host);
@@ -287,7 +286,7 @@ void handle_ssl_response_logic(int sock_client, RequestHeader *req) {
                 //fprintf(stderr, "[SSL DEBUG] Auto-index ditemukan: index.php. Mengalihkan ke FastCGI...\n");
                 strcat(req->uri, "index.php"); // Update URI di struct
                 free(safe_path);
-                process_request_routing(sock_client, req); // RE-ROUTE!
+                http1_response_routing(sock_client, req); // RE-ROUTE!
                 return; // KELUAR, karena akan ditangani oleh halmos_fcgi_request_stream
             } else {
                 goto send_404; // Folder ada, tapi index kosong
@@ -315,11 +314,11 @@ void handle_ssl_response_logic(int sock_client, RequestHeader *req) {
         "HTTP/1.1 200 OK\r\n"
         "Content-Type: %s\r\n"
         "Content-Length: %ld\r\n"
-        "Server: Halmos-Savage/2.1\r\n"
+        "Server: Halmos-Savage/1.1\r\n"
         "Connection: %s\r\n\r\n",
         get_mime_type(req->uri), st.st_size, req->is_keep_alive ? "keep-alive" : "close");
     
-    if (halmos_send_ssl(sock_client, header, h_len) <= 0) {
+    if (ssl_send(sock_client, header, h_len) <= 0) {
         close(fd);
         if (safe_path) free(safe_path);
         return;
@@ -332,13 +331,13 @@ void handle_ssl_response_logic(int sock_client, RequestHeader *req) {
         while ((n_read = read(fd, f_buf, 32768)) > 0) {
             ssize_t total_sent = 0;
             while (total_sent < n_read) {
-                ssize_t n_sent = halmos_send_ssl(sock_client, f_buf + total_sent, n_read - total_sent);
+                ssize_t n_sent = ssl_send(sock_client, f_buf + total_sent, n_read - total_sent);
                 
                 if (n_sent > 0) {
                     total_sent += n_sent;
                 } else {
                     // Handling Non-Blocking & SSL Buffer
-                    SSL *ssl = get_ssl_for_fd(sock_client);
+                    SSL *ssl = ssl_get_for_fd(sock_client);
                     int err = SSL_get_error(ssl, (int)n_sent);
                     if (err == SSL_ERROR_WANT_WRITE || err == SSL_ERROR_WANT_READ) {
                         wait_for_ssl_write(sock_client); // Fungsi poll()
@@ -361,7 +360,7 @@ send_404:
     {
         //fprintf(stderr, "[SSL DEBUG] Mengirim 404 Not Found\n");
         const char *nf = "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: 13\r\nConnection: close\r\n\r\n404 Not Found";
-        halmos_send_ssl(sock_client, nf, strlen(nf));
+        ssl_send(sock_client, nf, strlen(nf));
         if (safe_path) free(safe_path);
     }
 }
