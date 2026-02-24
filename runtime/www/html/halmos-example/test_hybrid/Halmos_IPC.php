@@ -19,10 +19,16 @@ class Halmos_IPC {
             ]
         ];
 
-        $json = json_encode($data);
+        // WAJIB tambahkan PHP_EOL atau "\n" di akhir
+        $json = json_encode($data) . "\n";
         
         // Gunakan socket_create agar lebih robust untuk Unix Socket
+        
         $socket = socket_create(AF_UNIX, SOCK_STREAM, 0);
+
+        // Set timeout biar PHP gak ikutan hang kalau Halmos lagi sibuk
+        socket_set_option($socket, SOL_SOCKET, SO_SNDTIMEO, array('sec' => 0, 'usec' => 500000));
+        
         if (!@socket_connect($socket, self::$socketPath)) {
             error_log("Halmos Error: Gagal konek ke socket.");
             return false;

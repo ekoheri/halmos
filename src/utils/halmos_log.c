@@ -51,21 +51,32 @@ void write_log_error(const char *format, ...) {
 }
 
 void write_log_telemetry() {
-    char meta_buffer[MAX_LOG_MESSAGE];
-    // Ambil waktu detik ini
-    time_t now = time(NULL);
-    struct tm *t = localtime(&now);
-    char ts[20];
-    strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", t);
+    // 1. UPDATE RAM: Tanya ke Kernel dulu sebelum lapor!
+    update_mem_usage();
 
+    char meta_buffer[MAX_LOG_MESSAGE];
+    
+    // 2. AMBIL WAKTU PRESISI (Milidetik)
+    struct timespec ts_now;
+    clock_gettime(CLOCK_REALTIME, &ts_now);
+    struct tm *t = localtime(&ts_now.tv_sec);
+    long ms = ts_now.tv_nsec / 1000000;
+
+    // 3. FORMAT TIMESTAMP (YYYY-MM-DD HH:MM:SS.mmm)
+    char ts_full[32];
+    strftime(ts_full, sizeof(ts_full), "%Y-%m-%d %H:%M:%S", t);
+    snprintf(ts_full + strlen(ts_full), sizeof(ts_full) - strlen(ts_full), ".%03ld", ms);
+
+    // 4. BUNGKUS KE JSON
     snprintf(meta_buffer, MAX_LOG_MESSAGE, 
              "{\"ts\":\"%s\",\"type\":\"metrics\",\"req\":%lu,\"conn\":%u,\"ram_kb\":%zu,\"lat_ms\":%.3f}", 
-             ts,
+             ts_full,
              global_telemetry.total_requests,
              global_telemetry.active_connections,
              global_telemetry.mem_usage_kb,
              global_telemetry.last_latency_ms);
-    // Langsung kirim 0, tidak perlu variabel empty_args lagi
+
+    // 5. KIRIM KE ANTREAN
     enqueue_log(LOG_TYPE_METRICS, meta_buffer, (va_list){0});
 }
 
@@ -115,17 +126,25 @@ void* log_thread_routine(void* arg) {
         pthread_mutex_unlock(&global_log_queue.mutex);
 
         // --- Proses Tulis File ---
-        time_t now = time(NULL);
-        struct tm *t = localtime(&now);
+        // --- AMBIL WAKTU PRESISI TINGGI (CLOCK_REALTIME) ---
+        struct timespec ts_now;
+        clock_gettime(CLOCK_REALTIME, &ts_now);
+        
+        struct tm *t = localtime(&ts_now.tv_sec);
+        long milliseconds = ts_now.tv_nsec / 1000000; // Nanodetik ke Milidetik
+
         char log_filename[256];
         char date_str[15];
-        char ts[25];
+        char time_str[32];
 
-        // ISI string date_str dan ts!
+        // Format tanggal untuk nama file
         strftime(date_str, sizeof(date_str), "%Y-%m-%d", t);
-        strftime(ts, sizeof(ts), "%H:%M:%S", t); // Jam:Menit:Detik
+        
+        // Format waktu: Jam:Menit:Detik.Milidetik (Contoh: 13:23:45.002)
+        strftime(time_str, sizeof(time_str), "%H:%M:%S", t);
+        snprintf(time_str + strlen(time_str), sizeof(time_str) - strlen(time_str), ".%03ld", milliseconds);
 
-        // Perbaikan: Logika pemisahan file
+        // Tentukan Nama File berdasarkan Type
         if (current_entry.type == LOG_TYPE_ERROR) {
             snprintf(log_filename, sizeof(log_filename), "%s%s_error.log", LOG_DIR, date_str);
         } else if (current_entry.type == LOG_TYPE_METRICS) {
@@ -143,7 +162,7 @@ void* log_thread_routine(void* arg) {
             } else {
                 // Untuk log biasa (System/Error), tetap pakai format lama yang manusiawi
                 const char* label = (current_entry.type == LOG_TYPE_ERROR) ? "ERROR" : "INFO";
-                fprintf(f, "[%s] [%s] %s\n", ts, label, current_entry.text);
+                fprintf(f, "[%s] [%s] %s\n", time_str, label, current_entry.text);
             }
             fclose(f);
         }
