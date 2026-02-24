@@ -5,11 +5,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "halmos_multipart.h"
+#include "halmos_http_multipart.h"
 #include "halmos_http_utils.h"
 #include "halmos_log.h"
 
-void parse_multipart_body(RequestHeader *req) {
+void http_multipart_parse_body(RequestHeader *req) {
     if (!req->content_type || !req->body_data || req->body_length == 0) return;
 
     // 1. Ekstrak Boundary
@@ -116,7 +116,7 @@ void parse_multipart_body(RequestHeader *req) {
     }
 }
 
-void free_multipart_parts(MultipartPart *parts, int count) {
+void http_multipart_free_parts(MultipartPart *parts, int count) {
     if (!parts) return;
     for (int i = 0; i < count; i++) {
         // Bebaskan hasil strdup (Milik sendiri)

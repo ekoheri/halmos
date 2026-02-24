@@ -1,5 +1,5 @@
-#ifndef HALMOS_IPC_BRIDGE_H
-#define HALMOS_IPC_BRIDGE_H
+#ifndef HALMOS_WS_IPC_H
+#define HALMOS_WS_IPC_H
 
 #include <stdbool.h>
 

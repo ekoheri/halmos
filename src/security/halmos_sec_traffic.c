@@ -1,7 +1,7 @@
-#include "halmos_security.h"
+#include "halmos_sec_traffic.h"
 #include "halmos_global.h"
+#include "halmos_core_config.h"
 #include "halmos_log.h"
-#include "halmos_config.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -19,18 +19,17 @@
 static RateEntry hash_table[HASH_TABLE_SIZE];
 static pthread_mutex_t rate_limit_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-// Algoritma DJB2 Hash - Sangat cepat untuk string (IP Address)
-static unsigned long hash_ip(const char *str) {
-    unsigned long hash = 5381;
-    int c;
-    while ((c = *str++))
-        hash = ((hash << 5) + hash) + c; // hash * 33 + c
-    return hash % HASH_TABLE_SIZE;
-}
+static unsigned long hash_ip(const char *str);
+
+static void reset_rate_limits();
+
+static void clean_old_rate_limits();
+
+static void* janitor_thread(void* arg);
 
 // Fungsi public nanti biasanya di http_manager
 // Setelah parser, sebelum response
-bool is_request_allowed(const char *client_ip, int limit_per_sec) {
+bool sec_traffic_is_request_allowed(const char *client_ip, int limit_per_sec) {
     if (client_ip == NULL || strlen(client_ip) == 0) return true;
 
     unsigned long index = hash_ip(client_ip);
@@ -86,6 +85,56 @@ bool is_request_allowed(const char *client_ip, int limit_per_sec) {
     return true; 
 }
 
+void sec_traffic_start_janitor() {
+    pthread_t janitor_tid;
+
+    // 1. Bersihkan tabel pertama kali pas server start
+    reset_rate_limits();
+
+    // Membuat thread janitor untuk membersihkan rate limit setiap 10 menit
+    if (pthread_create(&janitor_tid, NULL, janitor_thread, NULL) == 0) {
+        pthread_detach(janitor_tid); // Agar thread berjalan mandiri
+        write_log("[SEC] Defense System: Janitor background service activated.");
+    }
+}
+
+void sec_traffic_anti_slow_loris(int sock_client) {
+    // 1. Set Keep-Alive di level TCP (Biar OS yang ngecek kalau client 'ghosting')
+    int keepalive = 1;
+    setsockopt(sock_client, SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(keepalive));
+
+    // 2. TCP_NODELAY (Nagle's Algorithm)
+    // HANYA pasang ini kalau kamu TIDAK pakai TCP_CORK saat kirim file.
+    // Karena kamu pakai TCP_CORK di send_static, NODELAY ini sebaiknya DIMATIKAN 
+    // agar CORK bisa bekerja maksimal menggabungkan paket.
+    int nodelay = 0; 
+    setsockopt(sock_client, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
+
+    // 3. Pasang LINGER (PENTING buat Reliability 'ab')
+    // Ini memastikan saat close(), kernel bakal nunggu sebentar biar data terkirim semua.
+    struct linger sl;
+    sl.l_onoff = 1;
+    sl.l_linger = 2; // Tunggu 2 detik sebelum benar-benar memutus koneksi
+    setsockopt(sock_client, SOL_SOCKET, SO_LINGER, &sl, sizeof(sl));
+
+    // 4. Timeout Recv/Send (Hanya efektif jika socket kembali ke mode Blocking)
+    // Tapi tetap bagus buat 'jaring pengaman' terakhir.
+    struct timeval tv;
+    tv.tv_sec = 5; 
+    tv.tv_usec = 0;
+    setsockopt(sock_client, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(sock_client, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+}
+
+// Algoritma DJB2 Hash - Sangat cepat untuk string (IP Address)
+unsigned long hash_ip(const char *str) {
+    unsigned long hash = 5381;
+    int c;
+    while ((c = *str++))
+        hash = ((hash << 5) + hash) + c; // hash * 33 + c
+    return hash % HASH_TABLE_SIZE;
+}
+
 // Fungsi private
 void reset_rate_limits() {
     pthread_mutex_lock(&rate_limit_mutex);
@@ -98,7 +147,6 @@ void reset_rate_limits() {
     // printf("[SYSTEM] Rate limit table has been cleared.\n");
 }
 
-// Fungsi private
 void clean_old_rate_limits() {
     pthread_mutex_lock(&rate_limit_mutex);
     
@@ -127,45 +175,4 @@ void* janitor_thread(void* arg) {
         clean_old_rate_limits();
     }
     return NULL;
-}
-
-void start_janitor() {
-    pthread_t janitor_tid;
-
-    // 1. Bersihkan tabel pertama kali pas server start
-    reset_rate_limits();
-
-    // Membuat thread janitor untuk membersihkan rate limit setiap 10 menit
-    if (pthread_create(&janitor_tid, NULL, janitor_thread, NULL) == 0) {
-        pthread_detach(janitor_tid); // Agar thread berjalan mandiri
-        write_log("[SEC] Defense System: Janitor background service activated.");
-    }
-}
-
-void anti_slow_loris(int sock_client) {
-    // 1. Set Keep-Alive di level TCP (Biar OS yang ngecek kalau client 'ghosting')
-    int keepalive = 1;
-    setsockopt(sock_client, SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(keepalive));
-
-    // 2. TCP_NODELAY (Nagle's Algorithm)
-    // HANYA pasang ini kalau kamu TIDAK pakai TCP_CORK saat kirim file.
-    // Karena kamu pakai TCP_CORK di send_static, NODELAY ini sebaiknya DIMATIKAN 
-    // agar CORK bisa bekerja maksimal menggabungkan paket.
-    int nodelay = 0; 
-    setsockopt(sock_client, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
-
-    // 3. Pasang LINGER (PENTING buat Reliability 'ab')
-    // Ini memastikan saat close(), kernel bakal nunggu sebentar biar data terkirim semua.
-    struct linger sl;
-    sl.l_onoff = 1;
-    sl.l_linger = 2; // Tunggu 2 detik sebelum benar-benar memutus koneksi
-    setsockopt(sock_client, SOL_SOCKET, SO_LINGER, &sl, sizeof(sl));
-
-    // 4. Timeout Recv/Send (Hanya efektif jika socket kembali ke mode Blocking)
-    // Tapi tetap bagus buat 'jaring pengaman' terakhir.
-    struct timeval tv;
-    tv.tv_sec = 5; 
-    tv.tv_usec = 0;
-    setsockopt(sock_client, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    setsockopt(sock_client, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 }

@@ -1,9 +1,11 @@
-#ifndef HALMOS_WEBSOCKET_H
-#define HALMOS_WEBSOCKET_H
+#ifndef HALMOS_WS_SYSTEM_H
+#define HALMOS_WS_SYSTEM_H
 
 #include <stdbool.h>
 #include <stdint.h>
 #include <stddef.h>
+#include <openssl/ssl.h>
+
 #include "halmos_http1_parser.h" // Kita butuh RequestHeader buat handshake
 
 // Opcode sesuai RFC 6455
@@ -38,6 +40,28 @@ typedef struct {
     unsigned char *payload_buf;
 } ws_context_t;
 
+typedef enum {
+    ACT_UNKNOWN = 0,
+    ACT_AUTH,
+    ACT_PRIVATE,
+    ACT_BROADCAST,
+    ACT_GROUP,
+    ACT_PUB,
+    ACT_SUB,
+    ACT_REQ
+} ws_action_ipc_t;
+
+// Konstanta untuk IPC
+#define K_HEADER  "header"
+#define K_PAYLOAD "payload"
+#define K_ACTION  "action"
+#define K_SRC     "src"
+#define K_DST     "dst"
+#define K_APP     "app" 
+// --- Aturan Keamanan & IPC ---
+#define INTERNAL_PREFIX "HALMOS_"
+#define SOCKET_PATH     "/tmp/halmos_bridge.sock"
+
 void halmos_set_websocket_fd(int fd, bool status);
 
 bool halmos_is_websocket_fd(int fd);
@@ -55,22 +79,22 @@ int ws_upgrade_handshake(int sock_client, RequestHeader *req);
  */
 // Fungsi utama yang dipanggil oleh Worker Thread saat ada event EPOLLIN
 // Return 1 untuk lanjut (rearm), 0 untuk tutup (cleanup)
-int halmos_ws_dispatch(int sock_client);
+int ws_system_dispatch(int sock_client);
 
-void halmos_ws_internal_dispatch(const char *json_raw);
+void ws_system_internal_dispatch(const char *json_raw);
 
 // Fungsi untuk mengirim pesan teks (Otomatis bungkus frame)
-int halmos_ws_send_text(int sock_client, const char *text);
+int ws_system_send_text(int sock_client, SSL *ssl, const char *text);
 
 /**
  * LOGIKA BISNIS (JSON-C)
  */
 // Di sinilah tempat lu naro logika JSON karangan lu
-void halmos_ws_on_message(int sock_client, unsigned char *data, size_t len);
+void ws_system_on_message(int sock_client, unsigned char *data, size_t len);
 
 void halmos_ws_system_init();
 
-void halmos_ws_cleanup_fd(int fd);
+void ws_system_cleanup_fd(int fd);
 
-void halmos_ws_system_destroy();
+void ws_system_destroy();
 #endif

@@ -1,6 +1,6 @@
-#include "halmos_tcp_server.h"
+#include "halmos_core_tcp_server.h"
 #include "halmos_global.h"
-#include "halmos_config.h"
+#include "halmos_core_config.h"
 #include "halmos_log.h"
 
 #include <stdio.h>
@@ -19,7 +19,7 @@ int qlen = 5;
 #define TCP_FASTOPEN 23
 #endif
 
-void set_nonblocking(int sock) {
+void tcp_set_nonblocking(int sock) {
     int flags = fcntl(sock, F_GETFL, 0);
     if (flags == -1) {
         write_log_error("[NET] Failed to get socket flags for FD %d", sock);
@@ -30,7 +30,7 @@ void set_nonblocking(int sock) {
     }
 }
 
-int create_server_socket(const char* ip, int port) {
+int tcp_create_server(const char* ip, int port) {
     int sock_server;
     int opt = 1;
     int qlen = 5;
@@ -43,7 +43,7 @@ int create_server_socket(const char* ip, int port) {
     }
 
     setsockopt(sock_server, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt, sizeof(opt));
-    set_nonblocking(sock_server);
+    tcp_set_nonblocking(sock_server);
 
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_addr.s_addr = inet_addr(ip);

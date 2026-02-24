@@ -1,3 +1,7 @@
+#include "halmos_fcgi.h"
+#include "halmos_log.h"
+#include "halmos_global.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -6,9 +10,6 @@
 #include <sys/un.h>
 #include <arpa/inet.h>
 #include <errno.h>
-#include "halmos_fcgi.h"
-#include "halmos_log.h"
-#include "halmos_global.h"
 
 // Instance global pool
 HalmosFCGI_Pool fcgi_pool;

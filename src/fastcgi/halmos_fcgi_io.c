@@ -6,7 +6,7 @@
 #include "halmos_log.h"
 #include "halmos_http_utils.h"
 #include "halmos_global.h"
-#include "halmos_tls.h"
+#include "halmos_sec_tls.h"
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -28,7 +28,7 @@ static ssize_t halmos_smart_send(int fd, const void *buf, size_t len, bool is_tl
         // Kita loop di sini biar semua chunk datanya beneran keluar
         size_t total_sent = 0;
         while (total_sent < len) {
-            ssize_t n = halmos_send_ssl(fd, (const char*)buf + total_sent, len - total_sent);
+            ssize_t n = ssl_send(fd, (const char*)buf + total_sent, len - total_sent);
             if (n > 0) {
                 total_sent += n;
             } else if (n == 0) {

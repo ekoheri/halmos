@@ -1,5 +1,5 @@
-#ifndef HALMOS_ROUTE_H
-#define HALMOS_ROUTE_H
+#ifndef HALMOS_HTTP_ROUTE_H
+#define HALMOS_HTTP_ROUTE_H
 
 /* --- Konfigurasi Maksimal --- */
 #define MAX_ROUTES 100
@@ -40,28 +40,18 @@ extern const char *route_config_filename;
  * Fungsi Auto Reload yang dipanggil di event loop.
  * Mengecek mtime file setiap 5 detik.
  */
-void halmos_router_auto_reload();
-
-/**
- * Membaca file konfigurasi (Internal, tapi bisa dipanggil manual jika perlu).
- */
-void load_routes();
+void http_route_auto_reload();
 
 /**
  * Mencocokkan URI request dengan tabel rute.
  * Digunakan untuk mencari baris mana yang cocok di memory.
  */
-RouteTable* match_route(const char *uri);
+RouteTable* http_route_match(const char *uri);
 
 /**
  * Melakukan transformasi URL.
  * Memecah URI user menjadi Script Target, Query String, atau Path Info.
  */
-void apply_route_logic(RouteTable *match, const char *original_uri, char *out_target, char *out_query, char *out_path_info);
-
-/**
- * Helper Utility
- */
-void trim_util(char *str);
+void http_route_apply_logic(RouteTable *match, const char *original_uri, char *out_target, char *out_query, char *out_path_info);
 
 #endif

@@ -1,13 +1,14 @@
-#include "halmos_event_loop.h"
 #include "halmos_global.h"
-#include "halmos_tcp_server.h"
-#include "halmos_config.h"
+#include "halmos_core_event_loop.h"
+#include "halmos_core_config.h"
+#include "halmos_core_tcp_server.h"
+#include "halmos_core_queue.h"
 #include "halmos_log.h"
-#include "halmos_queue.h"
-#include "halmos_security.h"
-#include "halmos_route.h"
-#include "halmos_tls.h"
-#include "halmos_ipc_bridge.h"
+#include "halmos_sec_traffic.h"
+#include "halmos_sec_tls.h"
+#include "halmos_http_route.h"
+#include "halmos_ws_system.h"
+#include "halmos_ws_ipc.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -36,13 +37,13 @@ int sock_server;
 
 volatile sig_atomic_t server_running = 1;
 
-void start_event_loop() {
+void event_loop_start() {
     // 1. aktifkan epoll
     // menghitung berapa jumlah core untuk 
     // patokan berapa jumlah event pool yang cocok
     events = malloc(sizeof(struct epoll_event) * g_event_batch_size);
 
-    sock_server = create_server_socket(config.server_name, config.server_port);
+    sock_server = tcp_create_server(config.server_name, config.server_port);
     if (sock_server < 0) {
         exit(EXIT_FAILURE);
     }
@@ -66,9 +67,9 @@ void start_event_loop() {
     write_log("[CORE] Server listening on %s:%d", config.server_name, config.server_port);
 }
 
-void run_event_loop() {
+void event_loop_run() {
     while (server_running) {
-        halmos_router_auto_reload();
+        http_route_auto_reload();
 
         int num_fds = epoll_wait(epoll_fd, events, g_event_batch_size, 500); // awalnya -1
         if (num_fds < 0) {
@@ -108,12 +109,12 @@ void run_event_loop() {
                     // --- PANGGIL ANTI SLOW LORIS ---
                     // Jika di konfigurasi diset true
                     if(config.anti_slow_loris_enabled == true){
-                        anti_slow_loris(sock_client);
+                        sec_traffic_anti_slow_loris(sock_client);
                     }
                     // -------------------------
 
                     // Set tamu jadi non-blocking agar tidak bikin thread pool macet
-                    set_nonblocking(sock_client);
+                    tcp_set_nonblocking(sock_client);
 
                     struct epoll_event ev_client;
                     ev_client.data.fd = sock_client;
@@ -149,7 +150,7 @@ void run_event_loop() {
                     global_telemetry.active_connections--; // <--- TAMBAHKAN INI! Tamu batal masuk.
                     // PENTING: Bersihkan sisa-sisa SSL di mapping table sebelum FD ditutup!
 
-                    cleanup_connection_properly(client_fd);
+                    event_loop_cleanup_connection(client_fd);
                     
                     close(client_fd);
                     continue;
@@ -158,7 +159,7 @@ void run_event_loop() {
                 // 1. Masukkan ke antrean TANPA memanipulasi epoll di sini.
                 // Karena kita pakai EPOLLONESHOT, kernel otomatis menonaktifkan
                 // FD ini dari epoll_wait sampai ada yang panggil MOD lagi.
-                int status = enqueue(&global_queue, client_fd); 
+                int status = queue_push(&global_queue, client_fd); 
 
                 if (status < 0) {
                     if (status == -1) {
@@ -187,7 +188,7 @@ void run_event_loop() {
     write_log("[CORE] Server stopped. Resource cleanup complete."); 
 }
 
-void stop_event_loop(int sig) {
+void event_loop_stop(int sig) {
     (void)sig;
     server_running = 0;
 }
@@ -197,7 +198,7 @@ void stop_event_loop(int sig) {
  * Analogi: Pelayan (Worker) melapor ke Resepsionis (Epoll) 
  * bahwa meja ini sudah selesai dibersihkan dan siap menerima pesanan lagi.
  */
-void rearm_epoll_oneshot(int fd) {
+void event_loop_rearm_epoll(int fd) {
     struct epoll_event ev;
     // Kembalikan status ke mode pantau: Read + Edge-Triggered + One-Shot
     ev.events = EPOLLIN | EPOLLET | EPOLLONESHOT;
@@ -211,3 +212,39 @@ void rearm_epoll_oneshot(int fd) {
     }
 }
 
+void event_loop_cleanup_connection(int sock_client) {
+    // --- [ TAMBAHAN UNTUK WEBSOCKET ] ---
+    // Pastikan flag WS dihapus sebelum FD ini dipakai ulang oleh kernel
+    ws_system_cleanup_fd(sock_client);
+
+    // 1. Ambil SSL-nya (kalau ada)
+    SSL *ssl = ssl_get_for_fd(sock_client);
+
+    // 2. Cabut dari map biar thread lain nggak ganggu
+    ssl_nullify_ptr(sock_client); 
+    
+    if (ssl) {
+        // Cek dulu apa ada error nyangkut di OpenSSL sebelum dibuang
+        unsigned long err_code = ERR_peek_last_error(); 
+        if (err_code != 0) {
+            write_log_error("[SEC] Ending FD %d with SSL error: %s", 
+                            sock_client, ERR_error_string(err_code, NULL));
+        }
+
+        // SSL_shutdown kirim "Close Notify" (sopan)
+        SSL_shutdown(ssl);
+        SSL_free(ssl);
+        ERR_clear_error(); // Bersihkan error queue per-thread
+    }
+
+    // 3. SHUTDOWN TCP (Graceful)
+    // Kirim paket FIN, bukan RST
+    shutdown(sock_client, SHUT_WR);
+
+    // 4. DRAIN (Kuras data sisa agar kernel nggak kirim RST)
+    char junk[1024];
+    while (recv(sock_client, junk, sizeof(junk), MSG_DONTWAIT) > 0);
+    
+    // 5. CLOSE TOTAL
+    close(sock_client);
+}

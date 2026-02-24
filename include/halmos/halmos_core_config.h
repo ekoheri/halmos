@@ -46,10 +46,7 @@ typedef struct {
     int vhost_count;
 } Config;
 
-//Fungsi untuk membersihkan spasi diawal dan diakhir string
-char *trim(char *str);
-
 // Fungsi untuk memuat konfigurasi dari file
-void load_config(const char *filename);
+void core_config_load(const char *filename);
 
 #endif

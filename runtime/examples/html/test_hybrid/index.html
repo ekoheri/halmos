@@ -43,8 +43,9 @@
                 // 2. OTOMATIS KIRIM AUTH (Ini yang ditunggu fungsi on_message di C)
                 const authPacket = {
                     "header": {
-                        "type": "AUTH", 
-                        "dst": "server"
+                        "action": "AUTH", 
+                        "dst": "server",
+                        "src": user
                     },
                     "payload": user
                 };

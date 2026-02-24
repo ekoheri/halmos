@@ -2,11 +2,11 @@
 #define _GNU_SOURCE
 #endif
 
-#include "halmos_tls.h"
+#include "halmos_sec_tls.h"
 #include "halmos_global.h"
+#include "halmos_core_config.h"
 #include "halmos_log.h"
-#include "halmos_config.h"
-#include "halmos_websocket.h"
+#include "halmos_ws_system.h"
 
 #include <openssl/ssl.h>
 #include <openssl/err.h>
@@ -29,7 +29,7 @@ static int current_max_limit = 0;
 
 // Fungsi untuk mengaktifkan SSL
 
-void init_openssl_runtime() {
+void ssl_init() {
     if (!config.tls_enabled) return; // Jangan inisialisasi kalau di config OFF
 
     // 1. Inisialisasi library
@@ -63,7 +63,7 @@ void init_openssl_runtime() {
     write_log("[SEC] TLS Engine: OpenSSL initialized with certificate.");
 }
 
-void cleanup_openssl() {
+void ssl_cleanup() {
     // Jika context NULL, berarti TLS memang tidak aktif atau sudah di-cleanup
     if (halmos_tls_ctx == NULL) {
         return; 
@@ -94,7 +94,7 @@ void cleanup_openssl() {
 /**
  * Mendapatkan atau membuat objek SSL untuk FD tertentu
  */
-void init_ssl_mapping(int max_fds) {
+void ssl_init_mapping(int max_fds) {
     current_max_limit = max_fds;
     // Gunakan calloc agar semua otomatis jadi NULL
     fd_to_ssl_map = calloc(current_max_limit, sizeof(SSL*));
@@ -105,7 +105,7 @@ void init_ssl_mapping(int max_fds) {
     }
 }
 
-void set_ssl_for_fd(int fd, SSL *ssl) {
+void ssl_set_for_fd(int fd, SSL *ssl) {
     if (fd_to_ssl_map && fd >= 0 && fd < current_max_limit) {
         fd_to_ssl_map[fd] = ssl;
     } else {
@@ -114,26 +114,26 @@ void set_ssl_for_fd(int fd, SSL *ssl) {
     }
 }
 
-SSL* get_ssl_for_fd(int fd) {
+SSL* ssl_get_for_fd(int fd) {
     if (fd_to_ssl_map && fd >= 0 && fd < current_max_limit) {
         return fd_to_ssl_map[fd];
     }
     return NULL;
 }
 
-void nullify_ssl_ptr(int fd) {
+void ssl_nullify_ptr(int fd) {
     if (fd_to_ssl_map && fd >= 0 && fd < current_max_limit) {
         fd_to_ssl_map[fd] = NULL;
     }
 }
 
 /**
- * halmos_send_ssl
+ * ssl_send
  * Fungsi Jembatan: Response.c manggil ini buat kirim data HTTPS.
  * JANGAN dikasih 'static' supaya bisa dipanggil dari luar file Manager!
  */
-ssize_t halmos_send_ssl(int fd, const void *buf, size_t len) {
-    SSL *ssl = get_ssl_for_fd(fd);
+ssize_t ssl_send(int fd, const void *buf, size_t len) {
+    SSL *ssl = ssl_get_for_fd(fd);
     if (!ssl) {
         //fprintf(stderr, "[SSL ERROR] Tidak nemu objek SSL untuk FD: %d\n", fd);
         return -1;
@@ -157,41 +157,4 @@ ssize_t halmos_send_ssl(int fd, const void *buf, size_t len) {
     }
 
     return ret;
-}
-
-void cleanup_connection_properly(int sock_client) {
-    // --- [ TAMBAHAN UNTUK WEBSOCKET ] ---
-    // Pastikan flag WS dihapus sebelum FD ini dipakai ulang oleh kernel
-    halmos_ws_cleanup_fd(sock_client);
-
-    // 1. Ambil SSL-nya (kalau ada)
-    SSL *ssl = get_ssl_for_fd(sock_client);
-
-    // 2. Cabut dari map biar thread lain nggak ganggu
-    nullify_ssl_ptr(sock_client); 
-    
-    if (ssl) {
-        // Cek dulu apa ada error nyangkut di OpenSSL sebelum dibuang
-        unsigned long err_code = ERR_peek_last_error(); 
-        if (err_code != 0) {
-            write_log_error("[SEC] Ending FD %d with SSL error: %s", 
-                            sock_client, ERR_error_string(err_code, NULL));
-        }
-
-        // SSL_shutdown kirim "Close Notify" (sopan)
-        SSL_shutdown(ssl);
-        SSL_free(ssl);
-        ERR_clear_error(); // Bersihkan error queue per-thread
-    }
-
-    // 3. SHUTDOWN TCP (Graceful)
-    // Kirim paket FIN, bukan RST
-    shutdown(sock_client, SHUT_WR);
-
-    // 4. DRAIN (Kuras data sisa agar kernel nggak kirim RST)
-    char junk[1024];
-    while (recv(sock_client, junk, sizeof(junk), MSG_DONTWAIT) > 0);
-    
-    // 5. CLOSE TOTAL
-    close(sock_client);
 }

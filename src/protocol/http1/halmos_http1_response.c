@@ -4,11 +4,11 @@
 
 #include "halmos_http1_response.h"
 #include "halmos_global.h"
+#include "halmos_core_config.h"
 #include "halmos_http1_header.h"
 #include "halmos_http_utils.h"
 #include "halmos_fcgi.h"
 #include "halmos_log.h"
-#include "halmos_config.h"
 #include "halmos_http1_manager.h"
 
 #include <stdio.h>
@@ -47,7 +47,7 @@ static void send_headers_plain(int client_fd, int status, const char *msg, const
 /********************************************************************
  * 2. MEMORY RESPONSE (PLAIN)
  ********************************************************************/
-void send_mem_response_plain(int client_fd, int status_code, const char *status_text, 
+void http1_response_send_mem(int client_fd, int status_code, const char *status_text, 
                             const char *content, bool keep_alive) {
     size_t len = content ? strlen(content) : 0;
     send_headers_plain(client_fd, status_code, status_text, "text/html", len, keep_alive);
@@ -60,20 +60,20 @@ void send_mem_response_plain(int client_fd, int status_code, const char *status_
  * 3. STATIC RESPONSE (ZERO-COPY STRATEGY)
  * Hanya dipanggil oleh Manager jika req->is_tls == false
  ********************************************************************/
-void static_response_zerocopy(int sock_client, RequestHeader *req) {
+void http1_response_zerocopy(int sock_client, RequestHeader *req) {
     const char *active_root = get_active_root(req->host);
     char *safe_path = sanitize_path(active_root, req->uri);
     struct stat st;
 
     if (!safe_path || stat(safe_path, &st) != 0 || !S_ISREG(st.st_mode)) {
-        send_mem_response_plain(sock_client, 404, "Not Found", "<h1>404 Not Found</h1>", req->is_keep_alive);
+        http1_response_send_mem(sock_client, 404, "Not Found", "<h1>404 Not Found</h1>", req->is_keep_alive);
         if (safe_path) free(safe_path);
         return;
     }
 
     int fd = open(safe_path, O_RDONLY);
     if (fd == -1) {
-        send_mem_response_plain(sock_client, 500, "Internal Error", "<h1>500</h1>", false);
+        http1_response_send_mem(sock_client, 500, "Internal Error", "<h1>500</h1>", false);
         free(safe_path);
         return;
     }
@@ -135,7 +135,7 @@ static void send_directory_listing_plain(int sock_client, const char *path, cons
  * Memisahkan takdir: SSL ke Manager, Plain ke Zero-Copy
  ********************************************************************/
 
-void process_request_routing(int sock_client, RequestHeader *req) {
+void http1_response_routing(int sock_client, RequestHeader *req) {
     //fprintf(stderr, "[ROUTING DEBUG] Masuk routing. URI: %s, TLS: %s\n", 
     //        req->uri, req->is_tls ? "YES" : "NO");
 
@@ -153,8 +153,8 @@ void process_request_routing(int sock_client, RequestHeader *req) {
 
     // 2. JALUR TLS (Hanya untuk File Statis, karena PHP sudah di-handle di atas)
     if (req->is_tls) {
-        //fprintf(stderr, "[ROUTING DEBUG] Memanggil handle_ssl_response_logic untuk file statis...\n");
-        handle_ssl_response_logic(sock_client, req); 
+        //fprintf(stderr, "[ROUTING DEBUG] Memanggil http1_manager_ssl_response untuk file statis...\n");
+        http1_manager_ssl_response(sock_client, req); 
         return;
     }
 
@@ -169,7 +169,7 @@ void process_request_routing(int sock_client, RequestHeader *req) {
         snprintf(index_check, sizeof(index_check), "%sindex.html", full_path);
         if (access(index_check, F_OK) == 0) {
             strcat(req->uri, "index.html"); 
-            static_response_zerocopy(sock_client, req);
+            http1_response_zerocopy(sock_client, req);
             return;
         }
         // Cek index.php (kalau mau auto-index PHP juga)
@@ -177,7 +177,7 @@ void process_request_routing(int sock_client, RequestHeader *req) {
         if (access(index_check, F_OK) == 0) {
             strcat(req->uri, "index.php");
             // Panggil ulang routing biar diproses via FastCGI
-            process_request_routing(sock_client, req);
+            http1_response_routing(sock_client, req);
             return;
         }
 
@@ -187,5 +187,5 @@ void process_request_routing(int sock_client, RequestHeader *req) {
     }
 
     // 3. Static File (Plain - ZeroCopy)
-    static_response_zerocopy(sock_client, req);
+    http1_response_zerocopy(sock_client, req);
 }

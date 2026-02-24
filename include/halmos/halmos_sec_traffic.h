@@ -1,5 +1,5 @@
-#ifndef HALMOS_SECURITY_H
-#define HALMOS_SECURITY_H
+#ifndef HALMOS_SEC_TRAFFIC_H
+#define HALMOS_SEC_TRAFFIC_H
 
 #include <stdbool.h>
 #include <time.h>
@@ -20,14 +20,14 @@ typedef struct {
  * Meskipun kamu bilang cuma clean_old yang dipanggil, fungsi ini 
  * biasanya wajib ada di header supaya bisa dipakai di event loop/worker.
  */
-bool is_request_allowed(const char *client_ip, int limit_per_sec);
+bool sec_traffic_is_request_allowed(const char *client_ip, int limit_per_sec);
 
 
 /*
  * Firewall anti slow solaris. Yaitu koneksi yang bertengger
  * disitu, tetapi tidak ngapa-ngapain. Hanya menghabiskan tempat saja 
 */
-void anti_slow_loris(int sock_client);
+void sec_traffic_anti_slow_loris(int sock_client);
 
 /**
  * Membersihkan data IP yang sudah tidak aktif lebih dari 10 detik.
@@ -35,14 +35,9 @@ void anti_slow_loris(int sock_client);
  */
 // void clean_old_rate_limits();
 
-/**
- * Reset total semua data rate limit.
- */
-void reset_rate_limits();
-
 /*
 * FUngsi untuk membersihkan IP user yang nyangkut di RAM 
 */
-void start_janitor();
+void sec_traffic_start_janitor();
 
 #endif

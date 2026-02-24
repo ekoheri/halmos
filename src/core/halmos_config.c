@@ -5,57 +5,19 @@
 #include <stdbool.h>
 #include <strings.h> // Untuk strcasecmp
 
-#include "halmos_config.h"
+#include "halmos_core_config.h"
 #include "halmos_global.h"
 #include "halmos_log.h"
 
 // Inisialisasi variabel global config
 Config config = {0};
 
-char *trim(char *str) {
-    char *end;
+static char *trim(char *str);
 
-    // Hapus spasi di depan
-    while (isspace((unsigned char)*str)) {
-        str++;
-    }
-
-    // Jika hanya ada spasi
-    if (*str == 0) {
-        return str;
-    }
-
-    // Hapus spasi di belakang
-    end = str + strlen(str) - 1;
-    while (end > str && isspace((unsigned char)*end)) {
-        end--;
-    }
-
-    // Tambahkan null-terminator setelah karakter terakhir yang bukan spasi
-    *(end + 1) = '\0';
-
-    return str;
-}
-
-unsigned long parse_size(const char *str) {
-    if (str == NULL) return 0;
-
-    char *endptr;
-    unsigned long value = strtoul(str, &endptr, 10);
-
-    while (isspace((unsigned char)*endptr)) endptr++;
-
-    // Switch hanya bisa karakter tunggal
-    switch (toupper((unsigned char)*endptr)) {
-        case 'G': value *= 1024 * 1024 * 1024; break; // Covers G, GB, Gb
-        case 'M': value *= 1024 * 1024; break;        // Covers M, MB, Mb
-        case 'K': value *= 1024; break;               // Covers K, KB, Kb
-    }
-    return value;
-}
+static unsigned long parse_size(const char *str);
 
 // Fungsi untuk membaca file konfigurasi
-void load_config(const char *filename) {
+void core_config_load(const char *filename) {
     FILE *file = fopen(filename, "r");
     if (file == NULL) {
         write_log("[ERROR : config.c] Error opening config file");
@@ -181,4 +143,46 @@ void load_config(const char *filename) {
     }
 
     fclose(file);
+}
+
+char *trim(char *str) {
+    char *end;
+
+    // Hapus spasi di depan
+    while (isspace((unsigned char)*str)) {
+        str++;
+    }
+
+    // Jika hanya ada spasi
+    if (*str == 0) {
+        return str;
+    }
+
+    // Hapus spasi di belakang
+    end = str + strlen(str) - 1;
+    while (end > str && isspace((unsigned char)*end)) {
+        end--;
+    }
+
+    // Tambahkan null-terminator setelah karakter terakhir yang bukan spasi
+    *(end + 1) = '\0';
+
+    return str;
+}
+
+unsigned long parse_size(const char *str) {
+    if (str == NULL) return 0;
+
+    char *endptr;
+    unsigned long value = strtoul(str, &endptr, 10);
+
+    while (isspace((unsigned char)*endptr)) endptr++;
+
+    // Switch hanya bisa karakter tunggal
+    switch (toupper((unsigned char)*endptr)) {
+        case 'G': value *= 1024 * 1024 * 1024; break; // Covers G, GB, Gb
+        case 'M': value *= 1024 * 1024; break;        // Covers M, MB, Mb
+        case 'K': value *= 1024; break;               // Covers K, KB, Kb
+    }
+    return value;
 }

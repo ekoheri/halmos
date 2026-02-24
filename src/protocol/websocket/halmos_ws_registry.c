@@ -10,9 +10,11 @@
 // Instance global buku alamat
 static HalmosWSRegistry registry;
 
-static void halmos_ws_send_text(int fd, SSL *ssl, const char *message);
+static uint64_t global_session_counter = 1;
 
-static void halmos_ws_send_ping(int fd, SSL *ssl);
+static void ws_registry_send_text(int fd, SSL *ssl, const char *message);
+
+static void ws_registry_send_ping(int fd, SSL *ssl);
 
 static unsigned long hash_topic(const char *str);
 /* 
@@ -51,6 +53,9 @@ int ws_registry_add(int fd, SSL *ssl) {
             new_client->last_seen = time(NULL);
             new_client->is_active = true;
             new_client->topic_count = 0; // Pastikan counter topik mulai dari nol
+
+            // Gabungkan timestamp dan counter agar ID benar-benar unik
+            new_client->session_id = ((uint64_t)time(NULL) << 32) | global_session_counter++;
             pthread_mutex_init(&new_client->client_lock, NULL);
             
             registry.clients[i] = new_client;
@@ -116,7 +121,7 @@ void ws_registry_broadcast(const char *message) {
             pthread_mutex_lock(&c->client_lock);
             
             // Di sini nanti panggil fungsi pembungkus frame WS
-            halmos_ws_send_text(c->fd, c->ssl, message);
+            ws_registry_send_text(c->fd, c->ssl, message);
             pthread_mutex_unlock(&c->client_lock);
         }
     }
@@ -125,18 +130,11 @@ void ws_registry_broadcast(const char *message) {
 }
 
 void ws_registry_destroy() {
+    // 1. Kunci semuanya dulu
     pthread_mutex_lock(&registry.registry_lock);
-    // Bersihkan Client Array
-    for (int i = 0; i < MAX_WS_CLIENTS; i++) {
-        if (registry.clients[i]) {
-            pthread_mutex_destroy(&registry.clients[i]->client_lock);
-            free(registry.clients[i]);
-            registry.clients[i] = NULL;
-        }
-    }
-    
-    // Bersihkan Hash Table
     pthread_mutex_lock(&registry.hash_lock);
+
+    // 2. Bersihkan Hash Table (Topic/Groups)
     for (int i = 0; i < HASH_SIZE; i++) {
         if (registry.buckets[i]) {
             ws_subscriber_t *sub = registry.buckets[i]->head;
@@ -150,11 +148,24 @@ void ws_registry_destroy() {
             registry.buckets[i] = NULL;
         }
     }
+
+    // 3. Bersihkan Client Array
+    for (int i = 0; i < MAX_WS_CLIENTS; i++) {
+        if (registry.clients[i]) {
+            // Hancurkan lock per-client sebelum di-free
+            pthread_mutex_destroy(&registry.clients[i]->client_lock);
+            free(registry.clients[i]);
+            registry.clients[i] = NULL;
+        }
+    }
+
+    // 4. Unlock sebelum Destroy (PENTING!)
     pthread_mutex_unlock(&registry.hash_lock);
-    
     pthread_mutex_unlock(&registry.registry_lock);
-    pthread_mutex_destroy(&registry.registry_lock);
+
+    // 5. Baru musnahkan Mutex utamanya
     pthread_mutex_destroy(&registry.hash_lock);
+    pthread_mutex_destroy(&registry.registry_lock);
 }
 
 /* 
@@ -184,7 +195,7 @@ void ws_registry_heartbeat() {
             pthread_mutex_lock(&c->client_lock);
             
             // Kirim detak jantung
-            halmos_ws_send_ping(c->fd, c->ssl);
+            ws_registry_send_ping(c->fd, c->ssl);
             
             pthread_mutex_unlock(&c->client_lock);
         }
@@ -289,7 +300,7 @@ void ws_registry_publish(const char *app_id, const char *topic, const char *mess
         // Langsung kunci client-nya, tanpa perlu kunci registry_lock global!
         if (c && c->is_active) {
             pthread_mutex_lock(&c->client_lock);
-            halmos_ws_send_text(c->fd, c->ssl, message);
+            ws_registry_send_text(c->fd, c->ssl, message);
             pthread_mutex_unlock(&c->client_lock);
         }
         
@@ -311,24 +322,69 @@ void ws_registry_set_user_id(int fd, const char *user_id) {
 }
 
 int ws_registry_get_fd_by_name(const char *name) {
-    if (!name) return -1;
-
-    pthread_mutex_lock(&registry.registry_lock);
-    
-    for (int i = 0; i < MAX_WS_CLIENTS; i++) {
-        HalmosWSClient *c = registry.clients[i];
-        // Cek apakah slot ada isinya, aktif, dan namanya cocok
-        if (c && c->is_active && strcmp(c->user_id, name) == 0) {
-            int found_fd = c->fd;
-            pthread_mutex_unlock(&registry.registry_lock);
-            return found_fd;
-        }
+    int fd = -1;
+    uint64_t session = 0;
+    // Dia memanggil fungsi di atasnya (dalam file yang sama)
+    if (ws_registry_get_session_info(name, &fd, &session, NULL)) {
+        return fd;
     }
-    
-    pthread_mutex_unlock(&registry.registry_lock);
-    return -1; // Tidak ketemu
+    //fprintf(stderr, "[DEBUG-REG] get_fd_by_name: User '%s' not found in registry\n", name ? name : "NULL");
+    return -1;
 }
 
+const char* ws_registry_get_user_id(int fd) {
+    const char *uid = NULL;
+    pthread_mutex_lock(&registry.registry_lock);
+    for (int i = 0; i < MAX_WS_CLIENTS; i++) {
+        if (registry.clients[i] && registry.clients[i]->fd == fd) {
+            uid = registry.clients[i]->user_id;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&registry.registry_lock);
+    return uid;
+}
+
+bool ws_registry_get_session_info(const char *name, int *out_fd, uint64_t *out_session, SSL **out_ssl) {
+    if (!name) {
+        //fprintf(stderr, "[DEBUG-REG] ERROR: name is NULL\n");
+        return false;
+    }
+
+    pthread_mutex_lock(&registry.registry_lock);
+    //fprintf(stderr, "[DEBUG-REG] Mencari user: '%s'\n", name);
+    for (int i = 0; i < MAX_WS_CLIENTS; i++) {
+        HalmosWSClient *c = registry.clients[i];
+        if (c && c->is_active && strcmp(c->user_id, name) == 0) {
+            *out_fd = c->fd;
+            *out_session = c->session_id;
+            if (out_ssl) *out_ssl = c->ssl;
+            
+            //fprintf(stderr, "[DEBUG-REG] Found Identity: %s -> FD: %d, Session: %lu\n", name, c->fd, (unsigned long)c->session_id);
+            pthread_mutex_unlock(&registry.registry_lock);
+            return true;
+        }
+    }
+    pthread_mutex_unlock(&registry.registry_lock);
+    return false;
+}
+
+bool ws_registry_validate_session(int fd, uint64_t session_id) {
+    pthread_mutex_lock(&registry.registry_lock);
+    for (int i = 0; i < MAX_WS_CLIENTS; i++) {
+        HalmosWSClient *c = registry.clients[i];
+        if (c && c->fd == fd && c->session_id == session_id && c->is_active) {
+            pthread_mutex_unlock(&registry.registry_lock);
+            return true;
+        } /*else {
+            // INI YANG KITA CARI: Kalau FD sama tapi Session beda
+            fprintf(stderr, "[DEBUG-REG] SESSION MISMATCH! FD: %d, Expected: %lu, Actual: %lu\n", 
+                fd, (unsigned long)session_id, (unsigned long)c->session_id);
+        }*/
+    }
+    pthread_mutex_unlock(&registry.registry_lock);
+    return false;
+}
 /* 
  * =================================================================================
  * BLOK 4: Cluster Low-Level Driver (Alat Komunikasi)
@@ -336,7 +392,7 @@ int ws_registry_get_fd_by_name(const char *name) {
  * ================================================================================= 
 */
 
-void halmos_ws_send_ping(int fd, SSL *ssl) {
+void ws_registry_send_ping(int fd, SSL *ssl) {
     unsigned char frame[2];
     frame[0] = 0x89; // FIN bit set + Opcode 0x9 (PING)
     frame[1] = 0x00; // Payload length 0 (Ping biasanya kosong)
@@ -348,7 +404,7 @@ void halmos_ws_send_ping(int fd, SSL *ssl) {
     }
 }
 
-void halmos_ws_send_text(int fd, SSL *ssl, const char *message) {
+void ws_registry_send_text(int fd, SSL *ssl, const char *message) {
     size_t len = strlen(message);
     unsigned char frame[4096]; // Buffer sementara untuk frame
     int frame_header_len = 0;

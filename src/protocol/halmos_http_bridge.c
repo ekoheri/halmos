@@ -3,13 +3,13 @@
 #endif
 
 #include "halmos_global.h"
-#include "halmos_config.h" 
+#include "halmos_core_config.h" 
 #include "halmos_http1_manager.h"
 #include "halmos_http_bridge.h"
-#include "halmos_event_loop.h"
+#include "halmos_core_event_loop.h"
 #include "halmos_log.h"
-#include "halmos_tls.h"
-#include "halmos_websocket.h"
+#include "halmos_sec_tls.h"
+#include "halmos_ws_system.h"
 
 #include <stdbool.h>
 #include <openssl/ssl.h>
@@ -69,21 +69,21 @@ static halmos_protocol_t bridge_detect(int fd, SSL *ssl);
 /**
  * Multiplexer Utama: Jembatan antara Core FD dan Protocol Manager
  */
-int bridge_dispatch(int sock_client) {
+int http_bridge_dispatch(int sock_client) {
     // --- [ LANGKAH 0: CEK STATUS WEBSOCKET ] ---
     // Jika FD ini sudah terdaftar sebagai WebSocket, langsung lempar ke dispatcher WS.
     // Kita nggak perlu peek-peek lagi, langsung gas pol.
 
     //fprintf(stderr, "[DEBUG-BRIDGE] Thread %ld menangani FD %d\n", (long)pthread_self(), sock_client);
     if (halmos_is_websocket_fd(sock_client)) {
-        return halmos_ws_dispatch(sock_client);
+        return ws_system_dispatch(sock_client);
     }
 
     char peek_buf[1];     // cukup diset 1 untuk kebutuhan jalannya sistem normal
     //char peek_buf[256]; // di set 256 untuk kebutuhan debug data
 
     // 1. Ambil state SSL jika ada
-    SSL *ssl = get_ssl_for_fd(sock_client);
+    SSL *ssl = ssl_get_for_fd(sock_client);
     bool is_actually_tls = (ssl != NULL);
 
     // 2. DETEKSI AWAL: Intip byte pertama kalau belum yakin ini TLS
@@ -101,7 +101,7 @@ int bridge_dispatch(int sock_client) {
             //    sock_client, errno, strerror(errno));
 
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                rearm_epoll_oneshot(sock_client);
+                event_loop_rearm_epoll(sock_client);
                 return 1; 
             }
             return 0; 
@@ -128,7 +128,7 @@ int bridge_dispatch(int sock_client) {
             if (config.tls_enabled) {
                 ssl = SSL_new(halmos_tls_ctx);
                 SSL_set_fd(ssl, sock_client);
-                set_ssl_for_fd(sock_client, ssl);
+                ssl_set_for_fd(sock_client, ssl);
             }
         }
     }
@@ -155,7 +155,7 @@ int bridge_dispatch(int sock_client) {
             if (r <= 0) {
                 int err = SSL_get_error(ssl, r);
                 if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
-                    rearm_epoll_oneshot(sock_client);
+                    event_loop_rearm_epoll(sock_client);
                     return 1;
                 }
                 return 0; // Handshake gagal
@@ -181,12 +181,12 @@ int bridge_dispatch(int sock_client) {
     halmos_protocol_t proto = bridge_detect(sock_client, ssl);
 
     if (proto == PROTOCOL_RETRY) {
-        rearm_epoll_oneshot(sock_client);
+        event_loop_rearm_epoll(sock_client);
         return 1;
     }
 
     if (proto == PROTOCOL_HTTP1) {
-        return handle_http1_session(sock_client, is_actually_tls);
+        return http1_manager_session(sock_client, is_actually_tls);
     }
 
     return 0;
