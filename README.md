@@ -1,4 +1,4 @@
-# Halmos Web Server Engine v2.0.0
+# Halmos Web Server Engine v0.2.4
 
 Halmos adalah engine web server berbasis C yang dirancang untuk performa tinggi dan integrasi sistem Linux yang erat.
 
