@@ -12,38 +12,16 @@
 #include <errno.h>
 #include <unistd.h>
 
-/* --- INTERNAL HELPER --- */
+// Helper internal untuk pasangan key-value
+static int  fcgi_proto_add_pair(unsigned char* dest, const char *name, const char *value, int offset, int max_len);
 
-int add_fcgi_pair(unsigned char* dest, const char *name, const char *value, int offset, int max_len) {
-    int name_len = (int)strlen(name);
-    const char* val_ptr = value ? value : "";
-    int value_len = (int)strlen(val_ptr);
+// Mengirim data STDIN (Body POST)
+static void fcgi_proto_send_stdin(int sockfd, int request_id, const void *data, int data_len);
 
-    if (offset + name_len + value_len + 8 > max_len) return offset;
-
-    if (name_len > 127) {
-        dest[offset++] = (unsigned char)((name_len >> 24) | 0x80);
-        dest[offset++] = (unsigned char)((name_len >> 16) & 0xFF);
-        dest[offset++] = (unsigned char)((name_len >> 8) & 0xFF);
-        dest[offset++] = (unsigned char)(name_len & 0xFF);
-    } else dest[offset++] = (unsigned char)name_len;
-
-    if (value_len > 127) {
-        dest[offset++] = (unsigned char)((value_len >> 24) | 0x80);
-        dest[offset++] = (unsigned char)((value_len >> 16) & 0xFF);
-        dest[offset++] = (unsigned char)((value_len >> 8) & 0xFF);
-        dest[offset++] = (unsigned char)(value_len & 0xFF);
-    } else dest[offset++] = (unsigned char)value_len;
-
-    memcpy(dest + offset, name, name_len);
-    offset += name_len;
-    memcpy(dest + offset, val_ptr, value_len);
-    return offset + value_len;
-}
 
 /* --- CORE FUNCTIONS --- */
 
-int halmos_fcgi_begin_request(const char *target, int port, unsigned char *gather_buf, int *g_ptr, int request_id) {
+int fcgi_proto_begin_request(const char *target, int port, unsigned char *gather_buf, int *g_ptr, int request_id) {
     int fpm_sock = halmos_fcgi_conn_acquire(target, port);
     if (fpm_sock == -1) return -1;
 
@@ -65,13 +43,13 @@ int halmos_fcgi_begin_request(const char *target, int port, unsigned char *gathe
     return fpm_sock;
 }
 
-void halmos_fcgi_build_params(RequestHeader *req, int sock_client, size_t content_length, unsigned char *gather_buf, int *g_ptr, int request_id) {
+void fcgi_proto_build_params(RequestHeader *req, int sock_client, size_t content_length, unsigned char *gather_buf, int *g_ptr, int request_id) {
     (void)sock_client;
     #define FCGI_ADD_PARAM(buf, key, val, offset) \
     do { \
         const char *v__ = (const char *)(val); \
         if (v__) { \
-            offset = add_fcgi_pair(buf, key, v__, offset, 16384); \
+            offset = fcgi_proto_add_pair(buf, key, v__, offset, 16384); \
         } \
     } while (0)
 
@@ -159,7 +137,7 @@ void halmos_fcgi_build_params(RequestHeader *req, int sock_client, size_t conten
     *g_ptr += sizeof(HalmosFCGI_Header);
 }
 
-int halmos_fcgi_send_and_receive(int fpm_sock, int sock_client, RequestHeader *req, int request_id, unsigned char *gather_buf, int g_ptr, void *post_data, size_t content_length) {
+int fcgi_proto_send_and_receive(int fpm_sock, int sock_client, RequestHeader *req, int request_id, unsigned char *gather_buf, int g_ptr, void *post_data, size_t content_length) {
     // 1. Kirim Semua Header Params ke PHP-FPM
     if (send(fpm_sock, gather_buf, g_ptr, 0) < 0) {
         halmos_fcgi_conn_release(fpm_sock);
@@ -168,13 +146,13 @@ int halmos_fcgi_send_and_receive(int fpm_sock, int sock_client, RequestHeader *r
 
     // 2. Kirim Body (STDIN)
     if (content_length > 0 && post_data != NULL) {
-        halmos_fcgi_send_stdin(fpm_sock, request_id, post_data, (int)content_length);
+        fcgi_proto_send_stdin(fpm_sock, request_id, post_data, (int)content_length);
     }
-    halmos_fcgi_send_stdin(fpm_sock, request_id, NULL, 0); // End of STDIN
+    fcgi_proto_send_stdin(fpm_sock, request_id, NULL, 0); // End of STDIN
 
     // 3. Baca & Teruskan Response (Splice)
     // Di sini req->is_tls akan menentukan apakah kirim ke client pakai SSL_write atau send
-    int status = halmos_fcgi_splice_response(fpm_sock, sock_client, req);
+    int status = fcgi_io_splice_response(fpm_sock, sock_client, req);
     
     if (status != 0) {
         write_log_error("[FCGI] Backend error for URI: %s", req->uri);
@@ -184,7 +162,7 @@ int halmos_fcgi_send_and_receive(int fpm_sock, int sock_client, RequestHeader *r
     return status;
 }
 
-void halmos_fcgi_send_stdin(int sockfd, int request_id, const void *data, int data_len) {
+void fcgi_proto_send_stdin(int sockfd, int request_id, const void *data, int data_len) {
     if (data_len > 0 && data != NULL) {
         int sent = 0;
         while (sent < data_len) {
@@ -217,4 +195,33 @@ void halmos_fcgi_send_stdin(int sockfd, int request_id, const void *data, int da
         empty_h.requestIdB0 = request_id & 0xFF;
         send(sockfd, &empty_h, 8, MSG_NOSIGNAL);
     }
+}
+
+/* --- INTERNAL HELPER --- */
+
+int fcgi_proto_add_pair(unsigned char* dest, const char *name, const char *value, int offset, int max_len) {
+    int name_len = (int)strlen(name);
+    const char* val_ptr = value ? value : "";
+    int value_len = (int)strlen(val_ptr);
+
+    if (offset + name_len + value_len + 8 > max_len) return offset;
+
+    if (name_len > 127) {
+        dest[offset++] = (unsigned char)((name_len >> 24) | 0x80);
+        dest[offset++] = (unsigned char)((name_len >> 16) & 0xFF);
+        dest[offset++] = (unsigned char)((name_len >> 8) & 0xFF);
+        dest[offset++] = (unsigned char)(name_len & 0xFF);
+    } else dest[offset++] = (unsigned char)name_len;
+
+    if (value_len > 127) {
+        dest[offset++] = (unsigned char)((value_len >> 24) | 0x80);
+        dest[offset++] = (unsigned char)((value_len >> 16) & 0xFF);
+        dest[offset++] = (unsigned char)((value_len >> 8) & 0xFF);
+        dest[offset++] = (unsigned char)(value_len & 0xFF);
+    } else dest[offset++] = (unsigned char)value_len;
+
+    memcpy(dest + offset, name, name_len);
+    offset += name_len;
+    memcpy(dest + offset, val_ptr, value_len);
+    return offset + value_len;
 }

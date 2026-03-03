@@ -62,7 +62,7 @@ $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c
 # 1. INSTALL: Pasang ke folder sistem
 # ---------------------------------------------------------
 install: all
-	@echo "$(BLUE)[INSTALL]$(NC) Membuat struktur direktori di $(DEST_WWW)..."
+	@echo "$(BLUE)[INSTALL]$(NC) Membuat struktur direktori..."
 	sudo mkdir -p $(DEST_HTML) $(DEST_PY) $(DEST_RUST) $(DEST_CONF)
 
 	@echo "$(BLUE)[INSTALL]$(NC) Menyalin binari dan konfigurasi..."
@@ -70,13 +70,18 @@ install: all
 	sudo install -m 644 $(RUNTIME_DIR)/configs/halmos.conf $(DEST_CONF)/
 	sudo install -m 644 $(RUNTIME_DIR)/configs/$(SERVICE_NAME) $(DEST_SERVICE)
 
-	@echo "$(BLUE)[INSTALL]$(NC) Menyalin konten web & backend..."
-	sudo cp -r $(RUNTIME_DIR)/www/html/halmos-example $(DEST_HTML)/
-	sudo cp $(RUNTIME_DIR)/www/html/index.html $(DEST_HTML)/
-	sudo cp -r $(RUNTIME_DIR)/www/halmos-python/* $(DEST_PY)/
-	sudo cp -r $(RUNTIME_DIR)/www/halmos-rust/* $(DEST_RUST)/
+	@echo "$(BLUE)[INSTALL]$(NC) Menyalin konten web & backend secara aman..."
+	# Untuk folder, gunakan cp -a (archive) agar permission tetap terjaga
+	sudo cp -a $(RUNTIME_DIR)/www/html/halmos-example $(DEST_HTML)/
+	
+	# Untuk file index.html (Yang paling sering diakses), WAJIB gunakan install
+	sudo install -m 644 $(RUNTIME_DIR)/www/html/index.html $(DEST_HTML)/index.html
 
-	@echo "$(BLUE)[INSTALL]$(NC) Mendaftarkan service ke Systemd..."
+	# Untuk isi folder backend
+	sudo cp -a $(RUNTIME_DIR)/www/halmos-python/. $(DEST_PY)/
+	sudo cp -a $(RUNTIME_DIR)/www/halmos-rust/. $(DEST_RUST)/
+
+	@echo "$(BLUE)[INSTALL]$(NC) Mendaftarkan service ke systemd..."
 	sudo systemctl daemon-reload
 	@echo "\n$(GREEN)[OK] Halmos terpasang sempurna!$(NC)"
 	@echo "Gunakan 'make run' untuk jalan di background."
