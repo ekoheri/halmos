@@ -35,6 +35,7 @@ cd halmos
 ### Memasang ke Sistem
 Perintah ini akan menyalin binary ke /usr/bin, konfigurasi ke /etc/halmos, dan mendaftarkan service ke systemd.
 ```bash
+make
 sudo make install
 ```
 ### Konfigurasi Sistem
@@ -80,5 +81,5 @@ Pastikan file index sudah tersedia di direktori /var/www/html, dan pastikan port
 ## 7. Pembersihan (Uninstall)
 Untuk menghapus seluruh file build dan menghapus Halmos dari sistem secara total:
 ```bash
-make clean
+sudo make clean
 ```

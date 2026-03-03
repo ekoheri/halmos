@@ -18,38 +18,15 @@
 #include <poll.h>
 
 /**
- * halmos_smart_send: Wrapper internal untuk memastikan data terkirim
+ * fcgi_smart_send: Wrapper internal untuk memastikan data terkirim
  * baik lewat SSL atau socket biasa.
  */
 
-static ssize_t halmos_smart_send(int fd, const void *buf, size_t len, bool is_tls) {
-    if (is_tls) {
-        // Panggil fungsi pusat yang sudah pinter handle WANT_WRITE (code 3)
-        // Kita loop di sini biar semua chunk datanya beneran keluar
-        size_t total_sent = 0;
-        while (total_sent < len) {
-            ssize_t n = ssl_send(fd, (const char*)buf + total_sent, len - total_sent);
-            if (n > 0) {
-                total_sent += n;
-            } else if (n == 0) {
-                // Pakai wait_for_write yang kita buat di manager tadi
-                // Kalau fungsi wait_for_write juga static, terpaksa bikin poll lokal di sini
-                struct pollfd pfd = {.fd = fd, .events = POLLOUT};
-                poll(&pfd, 1, 10); 
-            } else {
-                return -1; // Fatal error
-            }
-        }
-        return total_sent;
-    }
-    // Jalur Plaintext (Non-TLS)
-    return send(fd, buf, len, MSG_NOSIGNAL);
-}
-
+static ssize_t fcgi_smart_send(int fd, const void *buf, size_t len, bool is_tls);
 /**
- * halmos_fcgi_splice_response: Otak dari streaming response Backend.
+ * fcgi_splice_response: Otak dari streaming response Backend.
  */
-int halmos_fcgi_splice_response(int fpm_fd, int sock_client, RequestHeader *req) {
+int fcgi_io_splice_response(int fpm_fd, int sock_client, RequestHeader *req) {
     unsigned char h_buf[8];
     int pipe_fds[2];
     bool is_tls = req->is_tls;
@@ -102,11 +79,11 @@ int halmos_fcgi_splice_response(int fpm_fd, int sock_client, RequestHeader *req)
                         is_redirect ? "" : "Transfer-Encoding: chunked\r\n",
                         req->is_keep_alive ? "keep-alive" : "close");
                     
-                    halmos_smart_send(sock_client, res_start, s_len, is_tls);
+                    fcgi_smart_send(sock_client, res_start, s_len, is_tls);
 
                     // 2. Kirim Header murni dari PHP (Content-Type, Set-Cookie, dll)
                     int h_only_len = (delim - header_buffer) + 4; 
-                    halmos_smart_send(sock_client, header_buffer, h_only_len, is_tls);
+                    fcgi_smart_send(sock_client, header_buffer, h_only_len, is_tls);
                     header_sent = true;
 
                     // 3. Kirim Body yang 'ikut' di buffer header tadi
@@ -114,9 +91,9 @@ int halmos_fcgi_splice_response(int fpm_fd, int sock_client, RequestHeader *req)
                     if (!is_redirect && body_in_buf > 0) {
                         char sz[16];
                         int sz_l = snprintf(sz, sizeof(sz), "%X\r\n", body_in_buf);
-                        halmos_smart_send(sock_client, sz, sz_l, is_tls);
-                        halmos_smart_send(sock_client, header_buffer + h_only_len, body_in_buf, is_tls);
-                        halmos_smart_send(sock_client, "\r\n", 2, is_tls);
+                        fcgi_smart_send(sock_client, sz, sz_l, is_tls);
+                        fcgi_smart_send(sock_client, header_buffer + h_only_len, body_in_buf, is_tls);
+                        fcgi_smart_send(sock_client, "\r\n", 2, is_tls);
                     }
 
                     // 4. Handle sisa clen di record pertama ini
@@ -125,16 +102,16 @@ int halmos_fcgi_splice_response(int fpm_fd, int sock_client, RequestHeader *req)
                         if (!is_redirect) {
                             char sz[16];
                             int sz_l = snprintf(sz, sizeof(sz), "%X\r\n", remain);
-                            halmos_smart_send(sock_client, sz, sz_l, is_tls);
+                            fcgi_smart_send(sock_client, sz, sz_l, is_tls);
                         }
                         
                         while (remain > 0) {
                             int pull = (remain > (int)sizeof(body_temp)) ? (int)sizeof(body_temp) : remain;
                             recv(fpm_fd, body_temp, pull, MSG_WAITALL);
-                            if (!is_redirect) halmos_smart_send(sock_client, body_temp, pull, is_tls);
+                            if (!is_redirect) fcgi_smart_send(sock_client, body_temp, pull, is_tls);
                             remain -= pull;
                         }
-                        if (!is_redirect) halmos_smart_send(sock_client, "\r\n", 2, is_tls);
+                        if (!is_redirect) fcgi_smart_send(sock_client, "\r\n", 2, is_tls);
                     }
                 }
             } else {
@@ -142,7 +119,7 @@ int halmos_fcgi_splice_response(int fpm_fd, int sock_client, RequestHeader *req)
                 if (!is_redirect) {
                     char sz[16];
                     int sz_l = snprintf(sz, sizeof(sz), "%X\r\n", clen);
-                    halmos_smart_send(sock_client, sz, sz_l, is_tls);
+                    fcgi_smart_send(sock_client, sz, sz_l, is_tls);
                 }
 
                 if (use_splice) {
@@ -155,11 +132,11 @@ int halmos_fcgi_splice_response(int fpm_fd, int sock_client, RequestHeader *req)
                     while (to_pull > 0) {
                         int pull = (to_pull > (int)sizeof(body_temp)) ? (int)sizeof(body_temp) : to_pull;
                         recv(fpm_fd, body_temp, pull, MSG_WAITALL);
-                        if (!is_redirect) halmos_smart_send(sock_client, body_temp, pull, is_tls);
+                        if (!is_redirect) fcgi_smart_send(sock_client, body_temp, pull, is_tls);
                         to_pull -= pull;
                     }
                 }
-                if (!is_redirect) halmos_smart_send(sock_client, "\r\n", 2, is_tls);
+                if (!is_redirect) fcgi_smart_send(sock_client, "\r\n", 2, is_tls);
             }
         } 
         else if (h->type == FCGI_STDERR && clen > 0) {
@@ -173,7 +150,7 @@ int halmos_fcgi_splice_response(int fpm_fd, int sock_client, RequestHeader *req)
         }
         else if (h->type == FCGI_END_REQUEST) {
             // Akhiri Chunked Encoding
-            if (!is_redirect) halmos_smart_send(sock_client, "0\r\n\r\n", 5, is_tls);
+            if (!is_redirect) fcgi_smart_send(sock_client, "0\r\n\r\n", 5, is_tls);
             success = 1;
             // Buang sisa data end-request
             char junk[32];
@@ -193,4 +170,28 @@ int halmos_fcgi_splice_response(int fpm_fd, int sock_client, RequestHeader *req)
         close(pipe_fds[1]);
     }
     return (success) ? 0 : -1;
+}
+
+ssize_t fcgi_smart_send(int fd, const void *buf, size_t len, bool is_tls) {
+    if (is_tls) {
+        // Panggil fungsi pusat yang sudah pinter handle WANT_WRITE (code 3)
+        // Kita loop di sini biar semua chunk datanya beneran keluar
+        size_t total_sent = 0;
+        while (total_sent < len) {
+            ssize_t n = ssl_send(fd, (const char*)buf + total_sent, len - total_sent);
+            if (n > 0) {
+                total_sent += n;
+            } else if (n == 0) {
+                // Pakai wait_for_write yang kita buat di manager tadi
+                // Kalau fungsi wait_for_write juga static, terpaksa bikin poll lokal di sini
+                struct pollfd pfd = {.fd = fd, .events = POLLOUT};
+                poll(&pfd, 1, 10); 
+            } else {
+                return -1; // Fatal error
+            }
+        }
+        return total_sent;
+    }
+    // Jalur Plaintext (Non-TLS)
+    return send(fd, buf, len, MSG_NOSIGNAL);
 }

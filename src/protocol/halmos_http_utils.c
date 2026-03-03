@@ -11,6 +11,7 @@
 #include <sys/time.h>
 #include <time.h>
 #include <sys/sysinfo.h> // untuk info CPU dan RAM
+#include <errno.h>
 
 #define PATH_MAX 1024
 
@@ -142,25 +143,39 @@ const char* get_active_root(const char *incoming_host) {
 
 char *sanitize_path(const char *root, const char *uri) {
     char full_path[PATH_MAX];
-    char resolved_path[PATH_MAX];
+    char resolved_root[PATH_MAX];
 
-    // Gabungkan dengan cerdas: cek apakah uri sudah punya slash
-    if (uri[0] == '/') {
-        snprintf(full_path, sizeof(full_path), "%s%s", root, uri);
-    } else {
-        snprintf(full_path, sizeof(full_path), "%s/%s", root, uri);
+    // 1. Validasi Root di awal (hanya sekali atau jarang-jarang)
+    if (realpath(root, resolved_root) == NULL) {
+        return NULL; 
     }
 
-    if (realpath(full_path, resolved_path) == NULL) {
-        write_log_error("[ERR] Root path invalid or inaccessible: %s", root);
+    // 2. Hitung dan bersihkan trailing slash (Hanya sekali deklarasi)
+    size_t root_len = strlen(resolved_root);
+    if (root_len > 0 && resolved_root[root_len - 1] == '/') {
+        resolved_root[root_len - 1] = '\0';
+        root_len--; // Update panjangnya setelah slash dihapus
+    }
+
+    if (strlen(resolved_root) + strlen(uri) + 2 > PATH_MAX) {
+        write_log_error("[ERR] Path too long");
         return NULL;
     }
 
-    // Gunakan realpath juga untuk si ROOT agar perbandingannya 'apple-to-apple'
-    char resolved_root[PATH_MAX];
-    if (realpath(root, resolved_root) == NULL) return NULL;
-    
-    size_t root_len = strlen(resolved_root);
+    // Gabungkan dengan cerdas: cek apakah uri sudah punya slash
+    // 3. Gabungkan Path
+    if (uri[0] == '/') {
+        snprintf(full_path, sizeof(full_path), "%.512s%.511s", resolved_root, uri);
+    } else {
+        snprintf(full_path, sizeof(full_path), "%.512s/%.510s", resolved_root, uri);
+    }
+
+    char resolved_path[PATH_MAX];
+    if (realpath(full_path, resolved_path) == NULL) {
+        write_log_error("[ERR] Realpath failed for: %s. Reason: %s", full_path, strerror(errno));
+        return NULL;
+    }
+
     if (strncmp(resolved_root, resolved_path, root_len) != 0) {
         // TANDA BAHAYA: Percobaan Path Traversal!
         write_log_error("[SECURITY] Path traversal attempt blocked: %s", resolved_path);
