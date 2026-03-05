@@ -16,6 +16,8 @@ static char *trim(char *str);
 
 static unsigned long parse_size(const char *str);
 
+static void parse_csv_to_group(char *value, BackendGroup *group, bool is_port);
+
 // Fungsi untuk membaca file konfigurasi
 void core_config_load(const char *filename) {
     FILE *file = fopen(filename, "r");
@@ -113,28 +115,36 @@ void core_config_load(const char *filename) {
                 config.max_requests_per_sec = atoi(value);
             } else if (strcmp(key, "keep_alive_timeout") == 0) {
                 config.keep_alive_timeout = atoi(value);
-            // Backend PHP
+            } else if (strcmp(key, "trust_proxy") == 0) {
+                if (strcasecmp(value, "true") == 0) {
+                    config.trust_proxy = true;
+                } else {
+                    config.trust_proxy = false;
+                }
             } else if (strcmp(key, "php_server") == 0) {
-                snprintf(config.php_server, sizeof(config.php_server), "%s", value);
+                parse_csv_to_group(value, &config.php, false);
             } else if (strcmp(key, "php_port") == 0) {
-                config.php_port = atoi(value);
-            }
-            else if (strcmp(key, "php_fpm_config_path") == 0) { // <--- Tambahkan blok ini
+                parse_csv_to_group(value, &config.php, true);
+            } else if (strcmp(key, "php_fpm_config_path") == 0) { // <--- Tambahkan blok ini
                 snprintf(config.php_fpm_config_path, sizeof(config.php_fpm_config_path), "%s", value);
-            // Backend Rust
+            } else if(strcmp(key, "php_lb_strategy") == 0) {
+                snprintf(config.php.lb_strategy, sizeof(config.php.lb_strategy), "%s", value);
             } else if (strcmp(key, "rust_ext") == 0) {
-                snprintf(config.rust_ext, sizeof(config.rust_ext), "%s", value);
+                snprintf(config.rust.ext, sizeof(config.rust.ext), "%s", value);
             } else if (strcmp(key, "rust_server") == 0) {
-                snprintf(config.rust_server, sizeof(config.rust_server), "%s", value);
+                parse_csv_to_group(value, &config.rust, false);
             } else if (strcmp(key, "rust_port") == 0) {
-                config.rust_port = atoi(value);
-            // Backend Python
+                parse_csv_to_group(value, &config.rust, true);
+            } else if(strcmp(key, "rust_lb_strategy") == 0) {
+                snprintf(config.rust.lb_strategy, sizeof(config.rust.lb_strategy), "%s", value);
             } else if (strcmp(key, "python_ext") == 0) {
-                snprintf(config.python_ext, sizeof(config.python_ext), "%s", value);
+                snprintf(config.python.ext, sizeof(config.python.ext), "%s", value);
             } else if (strcmp(key, "python_server") == 0) {
-                snprintf(config.python_server, sizeof(config.python_server), "%s", value);
+                parse_csv_to_group(value, &config.python, false);
             } else if (strcmp(key, "python_port") == 0) {
-                config.python_port = atoi(value);
+                parse_csv_to_group(value, &config.python, true);
+            } else if(strcmp(key, "python_lb_strategy") == 0) {
+                snprintf(config.python.lb_strategy, sizeof(config.python.lb_strategy), "%s", value);
             // Performance
             } else if (strcmp(key, "request_buffer_size") == 0) {
                 config.request_buffer_size = atoi(value);
@@ -185,4 +195,22 @@ unsigned long parse_size(const char *str) {
         case 'K': value *= 1024; break;               // Covers K, KB, Kb
     }
     return value;
+}
+
+void parse_csv_to_group(char *value, BackendGroup *group, bool is_port) {
+    char *token;
+    char *rest = value;
+    int i = 0;
+
+    while ((token = strtok_r(rest, ",", &rest)) && i < MAX_BACKEND_NODES) {
+        char *t = trim(token);
+        if (is_port) {
+            group->ports[i] = atoi(t);
+        } else {
+            snprintf(group->ips[i], sizeof(group->ips[0]), "%s", t);
+        }
+        i++;
+    }
+    // Update count hanya jika ini adalah parsing IP (asumsi IP adalah wajib)
+    if (!is_port) group->node_count = i;
 }

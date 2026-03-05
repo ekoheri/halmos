@@ -23,13 +23,12 @@ HalmosFCGI_Pool fcgi_pool;
 
 static int create_backend_socket(const char *target, int port, bool is_unix);
 
-// Helper untuk menentukan index backend
-static int get_backend_index(int port) {
-    if (port == config.php_port)    return 0;
-    if (port == config.rust_port)   return 1;
-    if (port == config.python_port) return 2;
-    return 0; // Fallback
-}
+/*
+[TIANG UTAMA: IDENTITY MAPPER]
+Menghubungkan port fisik yang sedang aktif dengan ID grup (0, 1, atau 2).
+Tanpa ini, hitungan Adaptive Quota akan salah sasaran karena tidak tahu port mana milik siapa.
+*/
+static int get_backend_index(const char *target, int port);
 
 /**
  * Inisialisasi pool koneksi secara dinamis sesuai konfigurasi
@@ -47,6 +46,9 @@ void halmos_fcgi_pool_init(void) {
     for (int i = 0; i < 3; i++) {
         atomic_init(&fcgi_pool.active_counts[i], 0);
     }
+    atomic_init(&fcgi_pool.php_group.next_idx, 0);
+    atomic_init(&fcgi_pool.rust_group.next_idx, 0);
+    atomic_init(&fcgi_pool.python_group.next_idx, 0);
 
     pthread_mutex_init(&fcgi_pool.lock, NULL);
     for (int i = 0; i < fcgi_pool.pool_size; i++) {
@@ -71,7 +73,7 @@ void halmos_fcgi_pool_destroy(void) {
 
 int halmos_fcgi_conn_acquire(const char *target, int port) {
     bool is_unix = (port == 0 || port == -1); 
-    int idx = get_backend_index(port);
+    int idx = get_backend_index(target, port);
     int final_sock = -1;
 
     // --- AMBIL QUOTA DARI HASIL AUDIT ADAPTIVE (Bukan 16 lagi!) ---
@@ -81,6 +83,12 @@ int halmos_fcgi_conn_acquire(const char *target, int port) {
     else               target_quota = fcgi_pool.python_quota;
 
     // --- BAGIAN 1: TRY REUSE (Cek jatah backend spesifik secara atomic) ---
+    /*
+    [TIANG UTAMA: ADAPTIVE QUOTA]
+    Memeriksa skor beban global grup (PHP/Rust/Python) secara atomic.
+    Jika skor >= target_quota, Halmos akan menahan diri untuk tidak membuat koneksi baru
+    guna melindungi stabilitas PHP-FPM/Backend.
+    */
     if (atomic_load(&fcgi_pool.active_counts[idx]) < target_quota) {
         pthread_mutex_lock(&fcgi_pool.lock);
         for (int i = 0; i < fcgi_pool.pool_size; i++) {
@@ -90,6 +98,11 @@ int halmos_fcgi_conn_acquire(const char *target, int port) {
                     (!fcgi_pool.connections[i].is_unix && fcgi_pool.connections[i].target_port == port);
 
                 if (belongs) {
+                    /*
+                    [TIANG UTAMA: CONNECTION HEALTH - struct pollfd pfd]
+                    POLLRDHUP mendeteksi jika backend (PHP-FPM) sudah memutus koneksi secara sepihak.
+                    Ini mencegah "Ghost Connection" yang bisa menyebabkan error 502/Broken Pipe.
+                    */
                     struct pollfd pfd = { .fd = fcgi_pool.connections[i].sockfd, .events = POLLIN | POLLRDHUP };
                     if (poll(&pfd, 1, 0) == 0) {
                         fcgi_pool.connections[i].in_use = true;
@@ -121,7 +134,10 @@ int halmos_fcgi_conn_acquire(const char *target, int port) {
                         fcgi_pool.connections[i].in_use = true;
                         fcgi_pool.connections[i].is_unix = is_unix;
                         fcgi_pool.connections[i].target_port = port;
-                        if (is_unix) strncpy(fcgi_pool.connections[i].target_path, target, 107);
+                        if (is_unix) {
+                            strncpy(fcgi_pool.connections[i].target_path, target, sizeof(fcgi_pool.connections[i].target_path) - 1);
+                            fcgi_pool.connections[i].target_path[sizeof(fcgi_pool.connections[i].target_path) - 1] = '\0';
+                        }
                         
                         atomic_fetch_add(&fcgi_pool.active_counts[idx], 1);
                         stored = true;
@@ -144,7 +160,10 @@ void halmos_fcgi_conn_release(int sockfd) {
         if (fcgi_pool.connections[i].sockfd == sockfd) {
             
             // Identifikasi ini punya siapa (PHP/Rust/Python)
-            int idx = get_backend_index(fcgi_pool.connections[i].target_port);
+            int idx = get_backend_index(
+                fcgi_pool.connections[i].is_unix ? fcgi_pool.connections[i].target_path : NULL, 
+                fcgi_pool.connections[i].target_port
+            );
             
             // Cek kesehatan (logic kamu sudah bagus)
             int error = 0;
@@ -200,4 +219,37 @@ int create_backend_socket(const char *target, int port, bool is_unix) {
         }
     }
     return sock;
+}
+
+int get_backend_index(const char *target, int port) {
+    // 1. Cek Grup PHP
+    for (int i = 0; i < config.php.node_count; i++) {
+        if (target != NULL) {
+            // Kasus AF_UNIX: Bandingkan path socket
+            if (strcmp(config.php.ips[i], target) == 0) return 0;
+        } else {
+            // Kasus TCP: Bandingkan Port
+            if (config.php.ports[i] == port) return 0;
+        }
+    }
+
+    // 2. Cek Grup Rust
+    for (int i = 0; i < config.rust.node_count; i++) {
+        if (target != NULL) {
+            if (strcmp(config.rust.ips[i], target) == 0) return 1;
+        } else {
+            if (config.rust.ports[i] == port) return 1;
+        }
+    }
+
+    // 3. Cek Grup Python
+    for (int i = 0; i < config.python.node_count; i++) {
+        if (target != NULL) {
+            if (strcmp(config.python.ips[i], target) == 0) return 2;
+        } else {
+            if (config.python.ports[i] == port) return 2;
+        }
+    }
+
+    return 0; // Fallback ke PHP
 }

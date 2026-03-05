@@ -136,30 +136,26 @@ static void send_directory_listing_plain(int sock_client, const char *path, cons
  ********************************************************************/
 
 void http1_response_routing(int sock_client, RequestHeader *req) {
-    const char *t_ip = NULL;
-    int t_port = -1;
-    //fprintf(stderr, "[ROUTING DEBUG] Masuk routing. URI: %s, TLS: %s\n", 
-    //        req->uri, req->is_tls ? "YES" : "NO");
+    int backend_type = -1; // -1 berarti bukan FastCGI
 
-    // A. JALUR SSL: Balikkan ke Manager untuk diproses dengan SSL_write
-    // 1. CEK EKSTENSI BACKEND
-    if (has_extension(req->uri, req->path_info, ".php")) { // ".php"
-        t_ip = config.php_server;
-        t_port = config.php_port;
+    // 1. IDENTIFIKASI GRUP BACKEND BERDASARKAN EKSTENSI
+    if (has_extension(req->uri, req->path_info, ".php")) { 
+        backend_type = 0; // PHP
     } 
-    else if (has_extension(req->uri, req->path_info, config.rust_ext)) { // ".rs"
-        t_ip = config.rust_server;
-        t_port = config.rust_port;
+    else if (has_extension(req->uri, req->path_info, config.rust.ext)) { 
+        backend_type = 1; // Rust
     } 
-    else if (has_extension(req->uri, req->path_info, config.python_ext)) { // ".py"
-        t_ip = config.python_server;
-        t_port = config.python_port;
+    else if (has_extension(req->uri, req->path_info, config.python.ext)) { 
+        backend_type = 2; // Python
     }
 
-    // 2. EKSEKUSI JALUR FASTCGI (Jika cocok dengan salah satu backend)
-    if (t_ip && t_port > 0) {
-        // Ini akan memanggil acquire_conn yang sudah pakai atomic per-backend tadi
-        fcgi_api_request_stream(req, sock_client, t_ip, t_port, req->body_data, req->content_length);
+    // 2. JALUR FASTCGI (Delegasikan pemilihan Node ke API Request Stream)
+    if (backend_type != -1) {
+        /* KITA TIDAK KIRIM IP/PORT LAGI DISINI.
+           Kita kirim backend_type, biar di dalam sana Halmos melakukan Load Balancing.
+           Note: Jika fungsi api kamu masih butuh signature lama, kita kirim NULL & backend_type.
+        */
+        fcgi_api_request_stream(req, sock_client, backend_type, req->body_data, req->content_length);
         return;
     }
 

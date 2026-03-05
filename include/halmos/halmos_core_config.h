@@ -4,10 +4,21 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+#define MAX_BACKEND_NODES 8 // Maksimal 8 server per grup
+
 typedef struct {
     char host[256];
     char root[1024];
 } VHostEntry;
+
+// Struktur untuk menampung banyak node Load Balancing
+typedef struct {
+    char ips[MAX_BACKEND_NODES][64]; // Array IP/Path
+    int ports[MAX_BACKEND_NODES];    // Array Port
+    int node_count;                  // Jumlah node yang terdeteksi
+    char ext[16];                    // Ekstensi (untuk Rust/Python)
+    char lb_strategy[32];            // round_robin, dll
+} BackendGroup;
 
 // Struktur data untuk konfigurasi
 typedef struct {
@@ -27,18 +38,15 @@ typedef struct {
     bool anti_slow_loris_enabled;
     int max_requests_per_sec;
     int keep_alive_timeout;
-    //Backend_PHP
-    char php_server[256];
-    int php_port;
+    bool trust_proxy;
+
+    // --- REFAKTOR BACKEND ---
+    BackendGroup php;
+    BackendGroup rust;
+    BackendGroup python;
+
     char php_fpm_config_path[512];
-    //Backend_Rust
-    char rust_ext[256];
-    char rust_server[256];
-    int rust_port;
-    //Backend_Python
-    char python_ext[256];
-    char python_server[256];
-    int python_port;
+
     //Performance    
     int request_buffer_size;
     //Virtual Host
