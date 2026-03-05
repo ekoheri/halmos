@@ -36,7 +36,7 @@ static char* fast_trim(char *s) {
 bool http1_parser_parse_header(char *raw_data, size_t total_received, RequestHeader *req) {
     bool saved_tls = req->is_tls;
     // 0. RESET: Bersihkan struct agar tidak ada sisa data dari request sebelumnya
-    memset(req, 0, sizeof(RequestHeader));
+    //memset(req, 0, sizeof(RequestHeader));
     req->is_tls = saved_tls;
     
     req->is_keep_alive = true;
@@ -229,6 +229,27 @@ bool http1_parser_parse_header(char *raw_data, size_t total_received, RequestHea
                     req->is_keep_alive = false;
                 } else if (strcasestr(val, "keep-alive")) {
                     req->is_keep_alive = true;
+                }
+            } else if (strcasecmp(key, "X-Forwarded-For") == 0) {
+                if (config.trust_proxy == true) {
+                    // Ambil IP pertama sebelum koma (IP asli user)
+                    char *comma = strchr(val, ',');
+                    if (comma) {
+                        size_t ip_len = comma - val;
+                        if (ip_len < sizeof(req->client_ip)) {
+                            memcpy(req->client_ip, val, ip_len);
+                            req->client_ip[ip_len] = '\0';
+                            // Kadang ada spasi setelah koma, kita rapikan
+                            char *trimmed = fast_trim(req->client_ip);
+                            if (trimmed != req->client_ip) {
+                                memmove(req->client_ip, trimmed, strlen(trimmed) + 1);
+                            }
+                        }
+                    } else {
+                        // Kalau cuma satu IP, langsung copy
+                        strncpy(req->client_ip, val, sizeof(req->client_ip) - 1);
+                        req->client_ip[sizeof(req->client_ip) - 1] = '\0';
+                    }
                 }
             }
         }

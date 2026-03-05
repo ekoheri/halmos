@@ -43,6 +43,11 @@ typedef struct {
     bool in_use;
 } HalmosFCGI_Conn;
 
+typedef struct {
+    int node_count;               // Jumlah node yang terdeteksi dari config
+    atomic_int next_idx;     // Penunjuk untuk Round Robin
+} UpstreamGroup;
+
 /* Global Pool Manager */
 typedef struct {
     HalmosFCGI_Conn *connections;
@@ -51,6 +56,11 @@ typedef struct {
     /* --- Jatah Adaptive (Atomic per Backend) --- */
     // Index 0: PHP, 1: Rust, 2: Python
     atomic_int active_counts[3]; 
+
+    // Grouping
+    UpstreamGroup php_group;
+    UpstreamGroup rust_group;
+    UpstreamGroup python_group;
 
     /* Quota per backend (diambil dari config saat init) */
     int php_quota;
@@ -129,6 +139,6 @@ int  fcgi_io_splice_response(int fpm_fd, int sock_client, RequestHeader *req);
  * ==========================================
  */
 // Fungsi fasad yang dipanggil oleh manager http
-int fcgi_api_request_stream(RequestHeader *req, int sock_client, const char *target, int port, void *post_data, size_t content_length);
+int fcgi_api_request_stream(RequestHeader *req, int sock_client, int backend_type, void *post_data, size_t content_length);
 
 #endif

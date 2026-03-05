@@ -25,6 +25,8 @@
 #include <poll.h>
 #include <sys/stat.h>  // Biar kenal 'struct stat' dan 'stat()'
 #include <fcntl.h>     // Biar kenal 'open()' dan 'O_RDONLY'
+#include <netinet/in.h>  // <--- TAMBAHKAN INI
+#include <arpa/inet.h>   // <--- TAMBAHKAN INI
 
 /* --- FUNGSI INTERNAL (STATIC) --- */
 
@@ -171,6 +173,22 @@ static bool recv_http_body(int sock, RequestHeader *req, char **buf_ptr, size_t 
 /* --- FUNGSI UTAMA (PUBLIC) --- */
 
 int http1_manager_session(int sock_client, bool is_tls) {
+    // --- [TIANG IDENTITAS: AMBIL IP CLIENT SEKALI SAJA] ---
+    char current_client_ip[46] = "0.0.0.0"; 
+    
+    struct sockaddr_storage addr;
+    socklen_t addr_len = sizeof(addr);
+    
+    if (getpeername(sock_client, (struct sockaddr*)&addr, &addr_len) == 0) {
+        if (addr.ss_family == AF_INET) {
+            struct sockaddr_in *s = (struct sockaddr_in *)&addr;
+            inet_ntop(AF_INET, &s->sin_addr, current_client_ip, sizeof(current_client_ip));
+        } else if (addr.ss_family == AF_INET6) {
+            struct sockaddr_in6 *s = (struct sockaddr_in6 *)&addr;
+            inet_ntop(AF_INET6, &s->sin6_addr, current_client_ip, sizeof(current_client_ip));
+        }
+    }
+    // ------------------------------------------------------
     // CCTV 1: Cek apakah sesi dimulai
     //fprintf(stderr, "[DEBUG] Sesi dimulai. FD: %d, TLS: %s\n", sock_client, is_tls ? "YES" : "NO");
     //fprintf(stderr, "[DEBUG-MANAGER] FD %d: Memulai sesi HTTP1. TLS=%d\n", sock_client, is_tls);
@@ -185,6 +203,7 @@ int http1_manager_session(int sock_client, bool is_tls) {
     while (keep_alive) {
         RequestHeader req;
         memset(&req, 0, sizeof(RequestHeader));
+        memcpy(req.client_ip, current_client_ip, sizeof(req.client_ip));
         req.is_tls = is_tls; // Simpan status "KTP" TLS
 
         // 1. Tarik Header
