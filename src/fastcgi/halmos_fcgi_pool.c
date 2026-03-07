@@ -33,7 +33,7 @@ static int get_backend_index(const char *target, int port);
 /**
  * Inisialisasi pool koneksi secara dinamis sesuai konfigurasi
  */
-void halmos_fcgi_pool_init(void) {
+void fcgi_pool_init(void) {
     fcgi_pool.pool_size = g_fcgi_pool_size;
     fcgi_pool.connections = malloc(sizeof(HalmosFCGI_Conn) * fcgi_pool.pool_size);
     
@@ -58,7 +58,7 @@ void halmos_fcgi_pool_init(void) {
     write_log("[POOL] Initialized Multi-Backend Atomic Pool (%d slots)", fcgi_pool.pool_size);
 }
 
-void halmos_fcgi_pool_destroy(void) {
+void fcgi_pool_destroy(void) {
     pthread_mutex_lock(&fcgi_pool.lock);
     for (int i = 0; i < fcgi_pool.pool_size; i++) {
         if (fcgi_pool.connections[i].sockfd != -1) {
@@ -71,7 +71,7 @@ void halmos_fcgi_pool_destroy(void) {
     pthread_mutex_destroy(&fcgi_pool.lock);
 }
 
-int halmos_fcgi_conn_acquire(const char *target, int port) {
+int fcgi_pool_conn_acquire(const char *target, int port) {
     bool is_unix = (port == 0 || port == -1); 
     int idx = get_backend_index(target, port);
     int final_sock = -1;
@@ -152,7 +152,7 @@ int halmos_fcgi_conn_acquire(const char *target, int port) {
     return final_sock;
 }
 
-void halmos_fcgi_conn_release(int sockfd) {
+void fcgi_pool_conn_release(int sockfd) {
     if (sockfd < 0) return;
 
     pthread_mutex_lock(&fcgi_pool.lock);
