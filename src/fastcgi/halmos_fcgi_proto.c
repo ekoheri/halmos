@@ -27,7 +27,7 @@ static int safe_send_all(int sockfd, const void *buf, size_t len);
 /* --- CORE FUNCTIONS --- */
 
 int fcgi_proto_begin_request(const char *target, int port, unsigned char *gather_buf, int *g_ptr, int request_id) {
-    int fpm_sock = halmos_fcgi_conn_acquire(target, port);
+    int fpm_sock = fcgi_pool_conn_acquire(target, port);
     if (fpm_sock == -1) return -1;
 
     HalmosFCGI_Header *h = (HalmosFCGI_Header*)&gather_buf[*g_ptr];
@@ -167,7 +167,7 @@ int fcgi_proto_send_and_receive(int fpm_sock, int sock_client, RequestHeader *re
     
 cleanup:
     // HUKUM WAJIB: Apapun yang terjadi, kembalikan socket ke pool!
-    halmos_fcgi_conn_release(fpm_sock);
+    fcgi_pool_conn_release(fpm_sock);
     return status;    
 }
 

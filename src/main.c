@@ -53,10 +53,7 @@ int main() {
         sec_traffic_start_janitor();    
     }
     
-    halmos_fcgi_pool_init();
-
-    //halmos_fcgi_pool_init(&php_pool, config.php_server);
-    //halmos_fcgi_pool_init(&rust_pool, config.rust_server, config.rust_port);
+    fcgi_pool_init();
 
     // 6. Inisialisasi Server (Network & Epoll)
     // Memanggil halmos_server_init yang sudah kita integrasikan dengan network.c

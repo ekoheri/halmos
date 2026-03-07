@@ -226,6 +226,24 @@ int http1_manager_session(int sock_client, bool is_tls) {
             break;
         }
 
+        // --- [ PASANG RATE LIMIT DI SINI JIKA STATUS DI CONFIG = true] ---
+        if(config.rate_limit_enabled == true) {
+            // Gunakan limit dari config jika ada, atau default (misal: 50 req/sec)
+            int limit = (config.max_requests_per_sec > 0) ? config.max_requests_per_sec : 50;
+            
+            if (!sec_traffic_is_request_allowed(req.client_ip, limit)) {
+                // Kirim status 429 Too Many Requests
+                http1_response_send_mem(sock_client, 429, "Too Many Requests", 
+                                        "<h1>429 Too Many Requests</h1><p>Slow down, buddy.</p>", is_tls);
+                http1_parser_free_memory(&req);
+                
+                // Opsional: Langsung putus koneksi (break) atau lanjut (keep_alive = 0)
+                // Untuk pertahanan DoS, lebih baik langsung putus koneksi.
+                break; 
+            }
+        }
+        // -------------------------------------
+
         if (ws_is_upgrade_request(&req)) {
             //fprintf(stderr, "[DEBUG-MANAGER] FD %d: POSITIF WEBSOCKET UPGRADE!\n", sock_client);
             if (ws_upgrade_handshake(sock_client, &req) == 0) {

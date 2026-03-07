@@ -111,10 +111,10 @@ extern HalmosFCGI_Pool fcgi_pool;
  * 1. POOL MANAGEMENT (halmos_fcgi_pool.c)
  * ==========================================
  */
-void halmos_fcgi_pool_init(void);
-void halmos_fcgi_pool_destroy(void);
-int  halmos_fcgi_conn_acquire(const char *target, int port);
-void halmos_fcgi_conn_release(int sockfd);
+void fcgi_pool_init(void);
+void fcgi_pool_destroy(void);
+int  fcgi_pool_conn_acquire(const char *target, int port);
+void fcgi_pool_conn_release(int sockfd);
 
 /* * ==========================================
  * 2. PROTOCOL & MARSHALLING (halmos_fcgi_proto.c)
