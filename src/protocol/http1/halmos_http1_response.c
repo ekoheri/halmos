@@ -7,6 +7,7 @@
 #include "halmos_core_config.h"
 #include "halmos_http1_header.h"
 #include "halmos_http_utils.h"
+#include "halmos_http_vhost.h"
 #include "halmos_fcgi.h"
 #include "halmos_log.h"
 #include "halmos_http1_manager.h"
@@ -61,7 +62,10 @@ void http1_response_send_mem(int client_fd, int status_code, const char *status_
  * Hanya dipanggil oleh Manager jika req->is_tls == false
  ********************************************************************/
 void http1_response_zerocopy(int sock_client, RequestHeader *req) {
-    const char *active_root = get_active_root(req->host);
+    //const char *active_root = get_active_root(req->host);
+    VHostEntry *vh = http_vhost_get_context(req->host);
+    const char *active_root = (vh) ? vh->root : config.document_root;
+
     char *safe_path = sanitize_path(active_root, req->uri);
     struct stat st;
 
@@ -166,9 +170,14 @@ void http1_response_routing(int sock_client, RequestHeader *req) {
         return;
     }
 
+    // DAPATKAN KONTEKS VHOST
+    // Kita panggil context-nya di sini untuk menentukan root folder yang aktif.
+    VHostEntry *vh = http_vhost_get_context(req->host);
+    const char *active_root = (vh) ? vh->root : config.document_root;
+
     // --- MODIFIKASI DISINI: AUTO INDEX CHECK ---
     char full_path[4096];
-    snprintf(full_path, sizeof(full_path), "%s%s", get_active_root(req->host), req->directory);
+    snprintf(full_path, sizeof(full_path), "%s%s", active_root, req->directory);
     struct stat st;
 
     if (stat(full_path, &st) == 0 && S_ISDIR(st.st_mode)) {

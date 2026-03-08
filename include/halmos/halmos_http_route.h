@@ -6,6 +6,10 @@
 #define MAX_VAR_COUNT 10
 #define MAX_VAR_NAME_LEN 32
 
+// --- PERBAIKAN DI SINI ---
+struct VHostEntry;                  // Forward declaration tag
+typedef struct VHostEntry VHostEntry; // Beri nama alias agar VHostEntry *vh valid
+
 typedef enum {
     RT_NONE, 
     RT_QUERY, 
@@ -27,11 +31,13 @@ typedef struct {
     int var_count;
 } RouteTable;
 
+struct VHostEntry; // Forward declaration asli
+
 /* --- Global Variable untuk Tabel Rute --- */
 // Disimpan secara eksternal agar bisa diakses di main program
 /* --- Global Variable --- */
-extern RouteTable g_routes[MAX_ROUTES];
-extern int g_total_routes;
+//extern RouteTable g_routes[MAX_ROUTES];
+//extern int g_total_routes;
 extern const char *route_config_filename;
 
 /* --- Prototipe Fungsi Eksternal --- */
@@ -46,7 +52,7 @@ void http_route_auto_reload();
  * Mencocokkan URI request dengan tabel rute.
  * Digunakan untuk mencari baris mana yang cocok di memory.
  */
-RouteTable* http_route_match(const char *uri);
+RouteTable* http_route_match(VHostEntry *vh, const char *uri);
 
 /**
  * Melakukan transformasi URL.

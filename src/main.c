@@ -8,6 +8,8 @@
 #include "halmos_sec_traffic.h"
 #include "halmos_sec_tls.h"
 #include "halmos_fcgi.h"
+#include "halmos_http_route.h"
+#include "halmos_http_vhost.h"
 #include "halmos_ws_system.h"
 
 
@@ -41,6 +43,9 @@ int main() {
         write_log("[INIT] TLS Engine & Mapping ready.");
     }
     
+    // Inisialisasi Virtual Host
+    http_vhost_init_all();
+
     // Inisialisasi Registry & Hash Table WebSocket
     halmos_ws_system_init();
     write_log("[INIT] WebSocket Registry & Subsystems ready.");

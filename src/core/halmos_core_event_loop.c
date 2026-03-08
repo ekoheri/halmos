@@ -7,6 +7,7 @@
 #include "halmos_sec_traffic.h"
 #include "halmos_sec_tls.h"
 #include "halmos_http_route.h"
+#include "halmos_http_vhost.h"
 #include "halmos_ws_system.h"
 #include "halmos_ws_ipc.h"
 
@@ -69,7 +70,8 @@ void event_loop_start() {
 
 void event_loop_run() {
     while (server_running) {
-        http_route_auto_reload();
+        // http_route_auto_reload();
+        http_vhost_reload_routes();
 
         int num_fds = epoll_wait(epoll_fd, events, g_event_batch_size, 500); // awalnya -1
         if (num_fds < 0) {
