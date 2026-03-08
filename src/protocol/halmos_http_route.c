@@ -2,6 +2,7 @@
 #include "halmos_global.h"
 #include "halmos_core_config.h"
 #include "halmos_http_utils.h"
+#include "halmos_http_vhost.h"
 #include "halmos_log.h"
 
 #include <stdio.h>
@@ -72,23 +73,24 @@ void http_route_auto_reload() {
 }
 
 /**
- * Mencari rute yang cocok berdasarkan awalan (prefix) URI.
- * Kita mencari match yang paling panjang/spesifik terlebih dahulu.
+ * Mencari rute yang cocok berdasarkan konteks Virtual Host.
+ * Sekarang fungsi ini menerima pointer HalmosVHost agar pencarian spesifik.
  */
-RouteTable* http_route_match(const char *uri) {
+RouteTable* http_route_match(VHostEntry *vh, const char *uri) {
+    // 1. Safety check
+    if (!vh || vh->total_routes <= 0) return NULL;
+
     RouteTable *best_match = NULL;
     size_t max_len = 0;
 
-    for (int i = 0; i < g_total_routes; i++) {
-        size_t source_len = strlen(g_routes[i].source);
+    // 2. Iterasi pada rute milik VHost ini
+    for (int i = 0; i < vh->total_routes; i++) {
+        size_t source_len = strlen(vh->routes[i].source);
         
-        // Cek apakah URI dimulai dengan g_routes[i].source
-        if (strncmp(uri, g_routes[i].source, source_len) == 0) {
-            // Logika: ambil match yang paling panjang (paling spesifik)
-            // Contoh: /login-admin lebih spesifik daripada /login
+        if (strncmp(uri, vh->routes[i].source, source_len) == 0) {
             if (source_len > max_len) {
                 max_len = source_len;
-                best_match = &g_routes[i];
+                best_match = &vh->routes[i];
             }
         }
     }

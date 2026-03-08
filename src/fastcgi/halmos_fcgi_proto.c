@@ -2,6 +2,7 @@
 #include "halmos_log.h"
 #include "halmos_global.h"
 #include "halmos_http_utils.h"
+#include "halmos_http_vhost.h"
 #include "halmos_sec_traffic.h"
 
 #include <string.h>
@@ -61,7 +62,9 @@ void fcgi_proto_build_params(RequestHeader *req, int sock_client, size_t content
     int params_start = *g_ptr + sizeof(HalmosFCGI_Header);
     int p_offset = params_start;
 
-    const char *active_root = get_active_root(req->host);
+    //const char *active_root = get_active_root(req->host);
+    VHostEntry *vh = http_vhost_get_context(req->host);
+    const char *active_root = (vh) ? vh->root : config.document_root;
     char full_script_path[1024];
     char script_name_only[512] = {0};
 

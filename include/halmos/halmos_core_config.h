@@ -3,13 +3,22 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <time.h>
+
+#include "halmos_http_route.h"
 
 #define MAX_BACKEND_NODES 8 // Maksimal 8 server per grup
 
-typedef struct {
+struct VHostEntry{
     char host[256];
     char root[1024];
-} VHostEntry;
+    
+    /* --- TAMBAHAN FIELD UNTUK MODUL ROUTE (SI TAMU) --- */
+    RouteTable routes[MAX_ROUTES]; 
+    int total_routes;
+    time_t last_route_mtime;
+    unsigned long long request_count;
+};
 
 // Struktur untuk menampung banyak node Load Balancing
 typedef struct {

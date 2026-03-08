@@ -5,6 +5,7 @@
 #include "halmos_http_multipart.h"
 #include "halmos_http_utils.h"
 #include "halmos_http_route.h"
+#include "halmos_http_vhost.h"
 #include "halmos_log.h"
 
 #include <stdio.h>
@@ -124,7 +125,9 @@ bool http1_parser_parse_header(char *raw_data, size_t total_received, RequestHea
 
     if (req->is_valid) {
         // Cari di tabel apakah ada rute yang cocok (misal: /dhe-sedang)
-        RouteTable *match = http_route_match(req->uri);
+        VHostEntry *vh = http_vhost_get_context(req->host);
+
+        RouteTable *match = http_route_match(vh, req->uri);
 
         if (match != NULL) {
             char t_uri[128] = {0}, t_query[256] = {0}, t_path[128] = {0};
