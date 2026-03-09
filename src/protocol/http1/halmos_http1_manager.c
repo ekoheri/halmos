@@ -8,6 +8,7 @@
 #include "halmos_http1_header.h"
 #include "halmos_http1_parser.h"
 #include "halmos_http1_response.h"
+#include "halmos_http_vhost.h"
 #include "halmos_http_utils.h"
 #include "halmos_sec_traffic.h"
 #include "halmos_sec_tls.h"
@@ -294,7 +295,10 @@ static void wait_for_ssl_write(int fd) {
 void http1_manager_ssl_response(int sock_client, RequestHeader *req) {
     //fprintf(stderr, "[SSL DEBUG] Memulai respons SSL untuk URI: %s\n", req->uri ? req->uri : "NULL");
     
-    const char *active_root = get_active_root(req->host);
+    // 1. DAPATKAN KONTEKS VHOST (Gantikan get_active_root)
+    VHostEntry *vh = http_vhost_get_context(req->host);
+    const char *active_root = (vh) ? vh->root : config.document_root;
+
     char *safe_path = sanitize_path(active_root, req->uri);
     struct stat st;
 

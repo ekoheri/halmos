@@ -111,36 +111,6 @@ int has_extension(const char *uri, const char *path_info, const char *ext) {
     return (strcasecmp(temp_path + len_to_check - len_ext, ext) == 0);
 }
 
-/************************************
- * Fungsi untuk membaca daftar virtual host
-*************************************/
-const char* get_active_root(const char *incoming_host) {
-    // 1. Bersihkan incoming_host dari port jika ada (misal: localhost:8080 -> localhost)
-    char clean_host[256];
-    strncpy(clean_host, incoming_host, sizeof(clean_host) - 1);
-    clean_host[sizeof(clean_host) - 1] = '\0';
-    
-    char *port_ptr = strchr(clean_host, ':');
-    if (port_ptr) *port_ptr = '\0';
-
-    // --- LOGIKA SKIP WWW ---
-    // Jika user akses www.google.com, p_host akan jadi google.com
-    const char *p_host = clean_host;
-    if (strncasecmp(clean_host, "www.", 4) == 0) {
-        p_host += 4;
-    }
-    
-    // 2. Cari di daftar VHost
-    for (int i = 0; i < config.vhost_count; i++) {
-        if (strcasecmp(config.vhosts[i].host, clean_host) == 0) {
-            return config.vhosts[i].root;
-        }
-    }
-
-    // 3. Kalau nggak ada yang cocok, balik ke default_root dari [Storage]
-    return config.document_root;
-}
-
 char *sanitize_path(const char *root, const char *uri) {
     char full_path[PATH_MAX];
     char resolved_root[PATH_MAX];

@@ -7,6 +7,8 @@
 #include <sys/stat.h>
 #include <errno.h>
 
+static void _vhost_load_single_route_file(VHostEntry *vh, const char *path);
+
 /**
  * Mencari pointer ke struktur VHost berdasarkan header Host.
  * Jika tidak ditemukan, akan mengembalikan default context (jika ada).
@@ -63,65 +65,17 @@ void http_vhost_init_all() {
     //fprintf(stderr, "[DEBUG] Keluar http_vhost_init_all\n");
 }
 
-static void _vhost_load_single_route_file(VHostEntry *vh, const char *path) {
-    //fprintf(stderr, "[DEBUG] _vhost_load_single_route_file: %s\n", path);
-    if (!vh) { 
-        //fprintf(stderr, "[DEBUG] ERROR: vh is NULL!\n"); 
-        return; 
-    }
-
-    FILE *fp = fopen(path, "r");
-    if (!fp) { 
-        //fprintf(stderr, "[DEBUG] Gagal buka file: %s (errno: %d)\n", path, errno); 
-        return; 
-    }
-
-    vh->total_routes = 0;
-    char line[512];
-    
-    while (fgets(line, sizeof(line), fp) && vh->total_routes < MAX_ROUTES) {
-        if (line[0] == '#' || line[0] == '\n' || line[0] == '\r') continue;
-
-        //fprintf(stderr, "[DEBUG] Parsing baris %d: %s", vh->total_routes, line);
-        RouteTable *rt = &vh->routes[vh->total_routes];
-        char type_str[16], fcgi_str[16], vars_str[256] = {0};
-        
-        int n = sscanf(line, "%[^|]|%[^|]|%[^|]|%[^|]|%[^\n]", 
-                       type_str, rt->source, rt->target, fcgi_str, vars_str);
-
-        if (n >= 4) {
-            trim_whitespace(type_str); trim_whitespace(rt->source); 
-            trim_whitespace(rt->target); trim_whitespace(fcgi_str);
-
-            rt->type = (strcmp(type_str, "QUERY") == 0) ? RT_QUERY : 
-                       (strcmp(type_str, "PATH") == 0) ? RT_PATH : RT_NONE;
-            
-            if (strcmp(fcgi_str, "FCGI_PY") == 0) rt->fcgi_type = FCGI_PY;
-            else if (strcmp(fcgi_str, "FCGI_RS") == 0) rt->fcgi_type = FCGI_RS;
-            else rt->fcgi_type = FCGI_PHP;
-
-            rt->var_count = 0;
-            if (n == 5 && rt->type == RT_QUERY) {
-                char *start = strchr(vars_str, '[');
-                char *end = strchr(vars_str, ']');
-                if (start && end) {
-                    *end = '\0';
-                    char *token = strtok(start + 1, ",");
-                    while (token && rt->var_count < 10) {
-                        trim_whitespace(token);
-                        strncpy(rt->var_names[rt->var_count++], token, 31);
-                        token = strtok(NULL, ",");
-                    }
-                }
-            }
-            vh->total_routes++;
-        }
-    }
-    fclose(fp);
-}
-
 void http_vhost_reload_routes() {
     // Hapus static timer dulu buat debug supaya setiap dipanggil pasti jalan
+    static time_t last_check_time = 0;
+    time_t now = time(NULL);
+
+    // GERBANG: Cek file cuma setiap 5 detik sekali
+    if (now - last_check_time < 5) {
+        return; 
+    }
+    last_check_time = now;
+
     //fprintf(stderr, "[DEBUG] Masuk http_vhost_reload_routes\n");
     
     for (int i = 0; i < config.vhost_count; i++) {
@@ -163,4 +117,79 @@ void http_vhost_reload_routes() {
         }
     }
     //fprintf(stderr, "[DEBUG] Keluar http_vhost_reload_routes\n");
+}
+
+/*
+FUNGSI HELPER
+*/
+
+void _vhost_load_single_route_file(VHostEntry *vh, const char *path) {
+    if (!vh) return;
+
+    FILE *fp = fopen(path, "r");
+    if (!fp) {
+        // Jika file tidak bisa dibuka, kita biarkan rute lama tetap ada 
+        // atau bisa log error sesuai kebutuhan
+        return; 
+    }
+
+    // Gunakan variabel sementara untuk menghitung rute yang berhasil di-parse
+    int temp_count = 0;
+    char line[512];
+    
+    // Kita bersihkan dulu buffer rute sementara di vh (opsional tapi bagus untuk keamanan data)
+    // memset(vh->routes, 0, sizeof(vh->routes));
+
+    while (fgets(line, sizeof(line), fp) && temp_count < MAX_ROUTES) {
+        // Skip baris komentar (#) atau baris kosong
+        if (line[0] == '#' || line[0] == '\n' || line[0] == '\r' || line[0] == ' ') continue;
+
+        RouteTable *rt = &vh->routes[temp_count];
+        char type_str[16], fcgi_str[16], vars_str[256] = {0};
+        
+        // Parsing dengan delimiter |
+        // Format: TYPE|SOURCE|TARGET|FCGI_TYPE|VARS
+        int n = sscanf(line, "%[^|]|%[^|]|%[^|]|%[^|]|%[^\n]", 
+                       type_str, rt->source, rt->target, fcgi_str, vars_str);
+
+        if (n >= 4) {
+            // Bersihkan spasi di sekitar string
+            trim_whitespace(type_str); 
+            trim_whitespace(rt->source); 
+            trim_whitespace(rt->target); 
+            trim_whitespace(fcgi_str);
+
+            // Tentukan tipe rute (QUERY string atau PATH based)
+            rt->type = (strcmp(type_str, "QUERY") == 0) ? RT_QUERY : 
+                       (strcmp(type_str, "PATH") == 0) ? RT_PATH : RT_NONE;
+            
+            // Mapping tipe backend FastCGI
+            if (strcmp(fcgi_str, "FCGI_PY") == 0) rt->fcgi_type = FCGI_PY;
+            else if (strcmp(fcgi_str, "FCGI_RS") == 0) rt->fcgi_type = FCGI_RS;
+            else if (strcmp(fcgi_str, "FCGI_PHP") == 0) rt->fcgi_type = FCGI_PHP;
+            else rt->fcgi_type = FCGI_PHP;
+
+            // Parsing variabel tambahan jika tipe rute adalah QUERY (format: [var1,var2])
+            rt->var_count = 0;
+            if (n == 5 && rt->type == RT_QUERY) {
+                char *start = strchr(vars_str, '[');
+                char *end = strchr(vars_str, ']');
+                if (start && end) {
+                    *end = '\0';
+                    char *token = strtok(start + 1, ",");
+                    while (token && rt->var_count < 10) {
+                        trim_whitespace(token);
+                        strncpy(rt->var_names[rt->var_count++], token, 31);
+                        token = strtok(NULL, ",");
+                    }
+                }
+            }
+            temp_count++;
+        }
+    }
+    
+    // Update jumlah rute secara "Atomic" di akhir proses
+    vh->total_routes = temp_count;
+    
+    fclose(fp);
 }
