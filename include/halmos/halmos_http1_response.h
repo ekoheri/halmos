@@ -10,6 +10,6 @@ void http1_response_send_mem(int client_fd, int status_code, const char *status_
 
 void http1_response_routing(int sock_client, RequestHeader *req);
 
-void http1_response_zerocopy(int sock_client, RequestHeader *req);
+void http1_response_zerocopy(int sock_client, RequestHeader *req, VHostEntry *vh);
 
 #endif

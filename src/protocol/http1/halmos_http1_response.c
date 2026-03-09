@@ -61,11 +61,10 @@ void http1_response_send_mem(int client_fd, int status_code, const char *status_
  * 3. STATIC RESPONSE (ZERO-COPY STRATEGY)
  * Hanya dipanggil oleh Manager jika req->is_tls == false
  ********************************************************************/
-void http1_response_zerocopy(int sock_client, RequestHeader *req) {
-    //const char *active_root = get_active_root(req->host);
-    VHostEntry *vh = http_vhost_get_context(req->host);
+void http1_response_zerocopy(int sock_client, RequestHeader *req, VHostEntry *vh) {
     const char *active_root = (vh) ? vh->root : config.document_root;
 
+    // Sanitize path adalah WAJIB sebelum stat atau open
     char *safe_path = sanitize_path(active_root, req->uri);
     struct stat st;
 
@@ -175,34 +174,41 @@ void http1_response_routing(int sock_client, RequestHeader *req) {
     VHostEntry *vh = http_vhost_get_context(req->host);
     const char *active_root = (vh) ? vh->root : config.document_root;
 
-    // --- MODIFIKASI DISINI: AUTO INDEX CHECK ---
-    char full_path[4096];
-    snprintf(full_path, sizeof(full_path), "%s%s", active_root, req->directory);
-    struct stat st;
-
-    if (stat(full_path, &st) == 0 && S_ISDIR(st.st_mode)) {
-        char index_check[4150];
-        // Cek index.html
-        snprintf(index_check, sizeof(index_check), "%sindex.html", full_path);
-        if (access(index_check, F_OK) == 0) {
-            strcat(req->uri, "index.html"); 
-            http1_response_zerocopy(sock_client, req);
-            return;
-        }
-        // Cek index.php (kalau mau auto-index PHP juga)
-        snprintf(index_check, sizeof(index_check), "%sindex.php", full_path);
-        if (access(index_check, F_OK) == 0) {
-            strcat(req->uri, "index.php");
-            // Panggil ulang routing biar diproses via FastCGI
-            http1_response_routing(sock_client, req);
-            return;
-        }
-
-        // 2. Directory Listing (Hanya jalan kalau gak ada index.html/php)
-        send_directory_listing_plain(sock_client, full_path, req->uri);
+    // 3. AMANKAN PATH DIREKTORI
+    char *safe_dir_path = sanitize_path(active_root, req->directory);
+    if (!safe_dir_path) {
+        http1_response_send_mem(sock_client, 403, "Forbidden", "<h1>403 Forbidden</h1>", false);
         return;
     }
 
-    // 3. Static File (Plain - ZeroCopy)
-    http1_response_zerocopy(sock_client, req);
+    struct stat st;
+    if (stat(safe_dir_path, &st) == 0 && S_ISDIR(st.st_mode)) {
+        char index_check[PATH_MAX];
+        
+        // Cek index.html menggunakan path yang sudah disanitasi
+        snprintf(index_check, sizeof(index_check), "%s/index.html", safe_dir_path);
+        if (access(index_check, F_OK) == 0) {
+            strcat(req->uri, "index.html"); 
+            http1_response_zerocopy(sock_client, req, vh); // Oper vh
+            free(safe_dir_path);
+            return;
+        }
+
+        // Cek index.php
+        snprintf(index_check, sizeof(index_check), "%s/index.php", safe_dir_path);
+        if (access(index_check, F_OK) == 0) {
+            strcat(req->uri, "index.php");
+            free(safe_dir_path);
+            http1_response_routing(sock_client, req); // Rekursif aman
+            return;
+        }
+
+        send_directory_listing_plain(sock_client, safe_dir_path, req->uri);
+        free(safe_dir_path);
+        return;
+    }
+
+    // 4. Static File
+    if (safe_dir_path) free(safe_dir_path);
+    http1_response_zerocopy(sock_client, req, vh); // Oper vh
 }
