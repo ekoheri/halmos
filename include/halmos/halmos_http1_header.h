@@ -42,6 +42,7 @@ typedef struct {
     char *path_info;
     char *content_type;
     char *cookie_data;
+    void *vhost_context;
     FcgiBackend backend_type;
 
     // BUFFER FISIK (Landing Strip)

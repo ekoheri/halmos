@@ -9,17 +9,6 @@
 
 #define MAX_BACKEND_NODES 8 // Maksimal 8 server per grup
 
-struct VHostEntry{
-    char host[256];
-    char root[1024];
-    
-    /* --- TAMBAHAN FIELD UNTUK MODUL ROUTE (SI TAMU) --- */
-    RouteTable routes[MAX_ROUTES]; 
-    int total_routes;
-    time_t last_route_mtime;
-    unsigned long long request_count;
-};
-
 // Struktur untuk menampung banyak node Load Balancing
 typedef struct {
     char ips[MAX_BACKEND_NODES][64]; // Array IP/Path
@@ -28,6 +17,21 @@ typedef struct {
     char ext[16];                    // Ekstensi (untuk Rust/Python)
     char lb_strategy[32];            // round_robin, dll
 } BackendGroup;
+
+struct VHostEntry{
+    char host[256];
+    char root[1024];
+
+    BackendGroup php;
+    BackendGroup rust;
+    BackendGroup python;
+    
+    /* --- TAMBAHAN FIELD UNTUK MODUL ROUTE (SI TAMU) --- */
+    RouteTable routes[MAX_ROUTES]; 
+    int total_routes;
+    time_t last_route_mtime;
+    unsigned long long request_count;
+};
 
 // Struktur data untuk konfigurasi
 typedef struct {

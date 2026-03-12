@@ -50,19 +50,28 @@ VHostEntry* http_vhost_get_context(const char *incoming_host) {
  * Inisialisasi awal. Memastikan semua VHost mulai dengan 0 rute
  * dan melakukan load awal untuk semua .htroute yang tersedia.
  */
+/**
+ * Inisialisasi awal. Memastikan semua VHost mulai dengan 0 rute,
+ * membersihkan BackendGroup khusus, dan memuat .htroute.
+ */
 void http_vhost_init_all() {
-    //fprintf(stderr, "[DEBUG] Masuk http_vhost_init_all, count: %d\n", config.vhost_count);
-    
     for (int i = 0; i < config.vhost_count; i++) {
-        //fprintf(stderr, "[DEBUG] Init vhost index %d: %s\n", i, config.vhosts[i].host);
         config.vhosts[i].total_routes = 0;
         config.vhosts[i].last_route_mtime = 0;
         config.vhosts[i].request_count = 0;
+
+        /* * PENTING: Jika di config.c saat parsing data VHost tidak ditemukan,
+         * kita pastikan di sini node_count adalah 0. 
+         * Ini agar logika fallback ke Global Config berjalan aman.
+         */
+        // Hanya reset jika belum diisi oleh parser (safety first)
+        if (config.vhosts[i].python.node_count < 0) config.vhosts[i].python.node_count = 0;
+        if (config.vhosts[i].php.node_count < 0)    config.vhosts[i].php.node_count = 0;
+        if (config.vhosts[i].rust.node_count < 0)   config.vhosts[i].rust.node_count = 0;
     }
     
-    //fprintf(stderr, "[DEBUG] Memanggil reload_routes awal...\n");
+    // Melakukan load awal untuk semua file .htroute
     http_vhost_reload_routes();
-    //fprintf(stderr, "[DEBUG] Keluar http_vhost_init_all\n");
 }
 
 void http_vhost_reload_routes() {

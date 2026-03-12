@@ -171,8 +171,12 @@ void http1_response_routing(int sock_client, RequestHeader *req) {
 
     // DAPATKAN KONTEKS VHOST
     // Kita panggil context-nya di sini untuk menentukan root folder yang aktif.
-    VHostEntry *vh = http_vhost_get_context(req->host);
-    const char *active_root = (vh) ? vh->root : config.document_root;
+    //VHostEntry *vh = http_vhost_get_context(req->host);
+    //const char *active_root = (vh) ? vh->root : config.document_root;
+
+    // --- UBAH DI SINI: Jangan cari ulang, ambil dari req ---
+    VHostEntry *vh = (VHostEntry *)req->vhost_context; // <--- AMBIL DARI STRUCT
+    const char *active_root = (vh && vh->root[0] != '\0') ? vh->root : config.document_root;
 
     // 3. AMANKAN PATH DIREKTORI
     char *safe_dir_path = sanitize_path(active_root, req->directory);
