@@ -26,32 +26,45 @@ void core_config_load(const char *filename) {
         return;
     }
 
-    char line[1024];  // Buffer untuk membaca setiap baris
-    char section[256];  // Menyimpan nama section (misalnya [Performance])
+    char line[1024];  
+    char section[256] = "";  
+    int current_vh_idx = -1; // Penanda mode: -1 = Global, 0+ = Index VHost
 
     while (fgets(line, sizeof(line), file)) {
-        // 1. Bersihkan newline
         line[strcspn(line, "\n")] = '\0';
-
-        // 2. Gunakan trim dulu
         char *current_line = trim(line);
 
-        // 3. Lewati baris kosong atau komentar
         if (current_line[0] == '#' || current_line[0] == '\0') {
             continue;
         }
 
-        // 4. Potong komentar di tengah baris
         char *inline_comment = strchr(current_line, '#');
         if (inline_comment) *inline_comment = '\0';
 
-        // 5. Menangani bagian [Section]
+        // --- 1. DETEKSI SECTION [HEADER] ---
         if (current_line[0] == '[') {
-            sscanf(current_line, "[%255[^]]]", section);
+            if (sscanf(current_line, "[%255[^]]]", section) == 1) {
+                // Jika Section VHost Spesifik
+                if (strncmp(section, "VHost:", 6) == 0) {
+                    if (config.vhost_count < 32) {
+                        current_vh_idx = config.vhost_count;
+                        char *host_name = section + 6; 
+                        snprintf(config.vhosts[current_vh_idx].host, sizeof(config.vhosts[0].host), "%s", trim(host_name));
+                        
+                        // Inisialisasi node_count agar tidak sampah memori
+                        config.vhosts[current_vh_idx].python.node_count = 0;
+                        config.vhosts[current_vh_idx].php.node_count = 0;
+                        config.vhosts[current_vh_idx].rust.node_count = 0;
+                        
+                        config.vhost_count++;
+                    }
+                } else {
+                    current_vh_idx = -1; // Section global (Network, dll)
+                }
+            }
             continue;
         }
 
-        // 6. Sisanya gunakan strtok
         char *key = strtok(current_line, "=");
         char *value = strtok(NULL, "=");
 
@@ -59,73 +72,63 @@ void core_config_load(const char *filename) {
             key = trim(key);
             value = trim(value);
 
-            // --- LOGIKA KHUSUS VIRTUAL HOSTS ---
-            if (strcmp(section, "VirtualHosts") == 0) {
-                if (config.vhost_count < 32) {
-                    // Mengganti strncpy dengan snprintf untuk menghilangkan warning
-                    snprintf(config.vhosts[config.vhost_count].host, sizeof(config.vhosts[0].host), "%s", key);
-                    snprintf(config.vhosts[config.vhost_count].root, sizeof(config.vhosts[0].root), "%s", value);
-                    config.vhost_count++;
-                }
-                continue;
+            // --- 2. LOGIKA JIKA DI DALAM BLOK VHOST ---
+            if (current_vh_idx != -1) {
+                VHostEntry *vh = &config.vhosts[current_vh_idx];
+                
+                if (strcmp(key, "root") == 0) {
+                    snprintf(vh->root, sizeof(vh->root), "%s", value);
+                } 
+                else if (strcmp(key, "py_server") == 0) parse_csv_to_group(value, &vh->python, false);
+                else if (strcmp(key, "py_port") == 0)   parse_csv_to_group(value, &vh->python, true);
+                else if (strcmp(key, "py_lb") == 0)     snprintf(vh->python.lb_strategy, sizeof(vh->python.lb_strategy), "%s", value);
+                
+                else if (strcmp(key, "php_server") == 0) parse_csv_to_group(value, &vh->php, false);
+                else if (strcmp(key, "php_port") == 0)   parse_csv_to_group(value, &vh->php, true);
+                else if (strcmp(key, "php_lb") == 0)     snprintf(vh->php.lb_strategy, sizeof(vh->php.lb_strategy), "%s", value);
+                
+                else if (strcmp(key, "rs_server") == 0)  parse_csv_to_group(value, &vh->rust, false);
+                else if (strcmp(key, "rs_port") == 0)   parse_csv_to_group(value, &vh->rust, true);
+                else if (strcmp(key, "rs_lb") == 0)     snprintf(vh->rust.lb_strategy, sizeof(vh->rust.lb_strategy), "%s", value);
+                
+                continue; // Lanjut ke baris berikutnya, jangan tabrakan dengan global
             }
 
+            // --- 3. LOGIKA GLOBAL CONFIG (Lama & Tetap) ---
             // Network
             if (strcmp(key, "server_name") == 0) {
                 snprintf(config.server_name, sizeof(config.server_name), "%s", value);
             } else if (strcmp(key, "server_port") == 0) {
                 config.server_port = atoi(value);
-            // Storage
             } else if (strcmp(key, "document_root") == 0) {
                 snprintf(config.document_root, sizeof(config.document_root), "%s", value);
             } else if (strcmp(key, "default_page") == 0) {
                 snprintf(config.default_page, sizeof(config.default_page), "%s", value);
-            // Security
             } else if (strcmp(key, "max_body_size") == 0) {
                 config.max_body_size = (size_t)parse_size(value);
             } else if (strcmp(key, "tls_enabled") == 0) {
-                if (strcasecmp(value, "true") == 0) {
-                    config.tls_enabled = true;
-                } else {
-                    config.tls_enabled = false;
-                }
+                config.tls_enabled = (strcasecmp(value, "true") == 0);
             } else if (strcmp(key, "e2ee_enabled") == 0) {
-                if (strcasecmp(value, "true") == 0) {
-                    config.e2ee_enabled = true;
-                } else {
-                    config.e2ee_enabled = false;
-                }
+                config.e2ee_enabled = (strcasecmp(value, "true") == 0);
             } else if (strcmp(key, "ssl_certificate_file") == 0) {
                 snprintf(config.ssl_certificate_file, sizeof(config.ssl_certificate_file), "%s", value);
             } else if (strcmp(key, "ssl_private_key_file") == 0) {
                 snprintf(config.ssl_private_key_file, sizeof(config.ssl_private_key_file), "%s", value);
             } else if (strcmp(key, "rate_limit_enabled") == 0) {
-                if (strcasecmp(value, "true") == 0) {
-                    config.rate_limit_enabled = true;
-                } else {
-                    config.rate_limit_enabled = false;
-                }
+                config.rate_limit_enabled = (strcasecmp(value, "true") == 0);
             } else if (strcmp(key, "anti_slow_loris_enabled") == 0) {
-                if (strcasecmp(value, "true") == 0) {
-                    config.anti_slow_loris_enabled = true;
-                } else {
-                    config.anti_slow_loris_enabled = false;
-                }
+                config.anti_slow_loris_enabled = (strcasecmp(value, "true") == 0);
             } else if (strcmp(key, "max_requests_per_sec") == 0) {
                 config.max_requests_per_sec = atoi(value);
             } else if (strcmp(key, "keep_alive_timeout") == 0) {
                 config.keep_alive_timeout = atoi(value);
             } else if (strcmp(key, "trust_proxy") == 0) {
-                if (strcasecmp(value, "true") == 0) {
-                    config.trust_proxy = true;
-                } else {
-                    config.trust_proxy = false;
-                }
+                config.trust_proxy = (strcasecmp(value, "true") == 0);
             } else if (strcmp(key, "php_server") == 0) {
                 parse_csv_to_group(value, &config.php, false);
             } else if (strcmp(key, "php_port") == 0) {
                 parse_csv_to_group(value, &config.php, true);
-            } else if (strcmp(key, "php_fpm_config_path") == 0) { // <--- Tambahkan blok ini
+            } else if (strcmp(key, "php_fpm_config_path") == 0) {
                 snprintf(config.php_fpm_config_path, sizeof(config.php_fpm_config_path), "%s", value);
             } else if(strcmp(key, "php_lb_strategy") == 0) {
                 snprintf(config.php.lb_strategy, sizeof(config.php.lb_strategy), "%s", value);
@@ -145,7 +148,6 @@ void core_config_load(const char *filename) {
                 parse_csv_to_group(value, &config.python, true);
             } else if(strcmp(key, "python_lb_strategy") == 0) {
                 snprintf(config.python.lb_strategy, sizeof(config.python.lb_strategy), "%s", value);
-            // Performance
             } else if (strcmp(key, "request_buffer_size") == 0) {
                 config.request_buffer_size = atoi(value);
             }

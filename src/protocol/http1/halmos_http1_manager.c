@@ -296,8 +296,11 @@ void http1_manager_ssl_response(int sock_client, RequestHeader *req) {
     //fprintf(stderr, "[SSL DEBUG] Memulai respons SSL untuk URI: %s\n", req->uri ? req->uri : "NULL");
     
     // 1. DAPATKAN KONTEKS VHOST (Gantikan get_active_root)
-    VHostEntry *vh = http_vhost_get_context(req->host);
-    const char *active_root = (vh) ? vh->root : config.document_root;
+    //VHostEntry *vh = http_vhost_get_context(req->host);
+    //const char *active_root = (vh) ? vh->root : config.document_root;
+
+    VHostEntry *vh = (VHostEntry *)req->vhost_context;
+    const char *active_root = (vh && vh->root[0] != '\0') ? vh->root : config.document_root;
 
     char *safe_path = sanitize_path(active_root, req->uri);
     struct stat st;
