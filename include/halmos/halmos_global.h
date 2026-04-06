@@ -2,8 +2,8 @@
 #define HALMOS_GLOBAL_H
 
 #include "halmos_global.h"
-#include "halmos_config.h"
-#include "halmos_queue.h"
+#include "halmos_core_config.h"
+#include "halmos_core_queue.h"
 
 // --- Penampung Hasil Adaptive ---
 extern int g_event_batch_size;  // Untuk epoll_wait

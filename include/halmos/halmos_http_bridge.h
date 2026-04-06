@@ -31,6 +31,6 @@ typedef enum {
  * Menentukan arah aliran data. Fungsi ini yang akan memanggil handler 
  * masing-masing protokol setelah deteksi berhasil.
  */
-int bridge_dispatch(int sock_client);
+int http_bridge_dispatch(int sock_client);
 
 #endif

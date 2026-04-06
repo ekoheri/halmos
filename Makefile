@@ -8,89 +8,114 @@ RUNTIME_DIR = runtime
 SERVICE_NAME = halmos.service
 
 TARGET = $(BIN_DIR)/$(TARGET_NAME)
-VERSION := $(shell cat VERSION 2>/dev/null || echo "0.0.1")
+VERSION := $(shell cat VERSION 2>/dev/null || echo "0.2.4")
+
+# Warna untuk output
+GREEN  = \033[0;32m
+YELLOW = \033[0;33m
+BLUE   = \033[0;34m
+NC     = \033[0m # No Color
 
 # Path Sistem
 DEST_BIN     = /usr/bin/$(TARGET_NAME)
 DEST_CONF    = /etc/halmos
 DEST_SERVICE = /etc/systemd/system/$(SERVICE_NAME)
-DEST_WWW     = /var/www/halmos
+DEST_WWW     = /var/www
 
-# Compiler
+# Sub-folder WWW
+DEST_HTML   = $(DEST_WWW)/html
+DEST_PY     = $(DEST_WWW)/halmos-python
+DEST_RUST   = $(DEST_WWW)/halmos-rust
+
+# Compiler & Flags
 CC = gcc
 CFLAGS = -Wall -Wextra -O3 -I$(INC_DIR) -I$(INC_DIR)/halmos -DVERSION=\"$(VERSION)\" -D_GNU_SOURCE
-LDFLAGS = -lpthread -lm -lssl -lcrypto
+LDFLAGS = -lpthread -lm -lssl -lcrypto -ljson-c
 
+# Pencarian Source Files secara otomatis
 SRCS := $(shell find $(SRC_DIR) -name '*.c')
 OBJS := $(patsubst $(SRC_DIR)/%.c, $(OBJ_DIR)/%.o, $(SRCS))
 
+# ---------------------------------------------------------
+# TARGET UTAMA (Default: ketik 'make' saja)
+# ---------------------------------------------------------
 all: $(TARGET)
+	@echo "$(GREEN)==================================================$(NC)"
+	@echo "$(GREEN) [SUCCESS] Halmos v$(VERSION) Build Selesai!$(NC)"
+	@echo " Lokasi Binari: $(TARGET)"
+	@echo "$(GREEN)==================================================$(NC)"
+	@echo "Ketik 'sudo make install' untuk memasang ke sistem."
 
+# Proses Linking
 $(TARGET): $(OBJS)
 	@mkdir -p $(BIN_DIR)
+	@echo "$(BLUE)[LINK]$(NC) Menyatukan semua modul menjadi $(TARGET)..."
 	@$(CC) $(OBJS) -o $@ $(LDFLAGS)
 
+# Proses Kompilasi per file .c
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c
 	@mkdir -p $(dir $@)
+	@echo "$(YELLOW)[CC]$(NC) Mengompilasi: $<"
 	@$(CC) $(CFLAGS) -c $< -o $@
 
 # ---------------------------------------------------------
-# 1. INSTALL: Cuma copy file ke folder sistem (Tanpa Start)
+# 1. INSTALL: Pasang ke folder sistem
 # ---------------------------------------------------------
 install: all
-	@echo "[INSTALL] Menyalin file ke folder sistem..."
-	sudo install -d $(DEST_CONF)
-	sudo install -d $(DEST_WWW)
+	@echo "$(BLUE)[INSTALL]$(NC) Membuat struktur direktori..."
+	sudo mkdir -p $(DEST_HTML) $(DEST_PY) $(DEST_RUST) $(DEST_CONF)
+
+	@echo "$(BLUE)[INSTALL]$(NC) Menyalin binari dan konfigurasi..."
 	sudo install -m 755 $(TARGET) $(DEST_BIN)
 	sudo install -m 644 $(RUNTIME_DIR)/configs/halmos.conf $(DEST_CONF)/
 	sudo install -m 644 $(RUNTIME_DIR)/configs/$(SERVICE_NAME) $(DEST_SERVICE)
-	sudo cp -r $(RUNTIME_DIR)/examples/* $(DEST_WWW)/
+
+	@echo "$(BLUE)[INSTALL]$(NC) Menyalin konten web & backend secara aman..."
+	# Untuk folder, gunakan cp -a (archive) agar permission tetap terjaga
+	sudo cp -a $(RUNTIME_DIR)/www/html/halmos-example $(DEST_HTML)/
+	
+	# Untuk file index.html (Yang paling sering diakses), WAJIB gunakan install
+	sudo install -m 644 $(RUNTIME_DIR)/www/html/index.html $(DEST_HTML)/index.html
+
+	# Untuk isi folder backend
+	sudo cp -a $(RUNTIME_DIR)/www/halmos-python/. $(DEST_PY)/
+	sudo cp -a $(RUNTIME_DIR)/www/halmos-rust/. $(DEST_RUST)/
+
+	@echo "$(BLUE)[INSTALL]$(NC) Mendaftarkan service ke systemd..."
 	sudo systemctl daemon-reload
-	@echo "[OK] File terpasang. Gunakan 'make run' untuk menjalankan di background.Atau 'make debug' untuk menjalankan terminal."
+	@echo "\n$(GREEN)[OK] Halmos terpasang sempurna!$(NC)"
+	@echo "Gunakan 'make run' untuk jalan di background."
+	@echo "Atau 'make debug' untuk jalan di terminal."
 
 # ---------------------------------------------------------
-# 2. RUN: Jalankan sebagai service background (Systemd)
+# 2. RUN: Jalankan sebagai service (Background)
 # ---------------------------------------------------------
 run:
-	@echo "[RUN] Menjalankan Halmos di background (Systemd)..."
+	@echo "$(BLUE)[RUN]$(NC) Memulai layanan Halmos..."
 	-sudo systemctl stop $(TARGET_NAME) 2>/dev/null || true
 	sudo systemctl start $(TARGET_NAME)
-	@echo "[OK] Halmos Service Aktif!"
-	@systemctl status $(TARGET_NAME) | grep -E "Active|Main PID|Tasks|Memory"
+	@systemctl status $(TARGET_NAME) | grep -E "Active|Main PID"
 
 # ---------------------------------------------------------
-# 3. DEBUG: Jalankan di terminal (Foreground) + Cek Background
+# 3. DEBUG: Jalankan di Foreground (Terminal)
 # ---------------------------------------------------------
 debug: all
-	@echo "[CHECK] Memeriksa konflik background..."
+	@echo "$(YELLOW)[CHECK]$(NC) Memeriksa konflik..."
 	@if systemctl is-active --quiet $(TARGET_NAME); then \
-		echo "--------------------------------------------------------"; \
-		echo "WARNING: Ada Halmos versi BACKGROUND yang lagi jalan!"; \
-		echo "Matiin dulu bos, biar nggak bentrok port-nya."; \
-		echo "Ketik: sudo systemctl stop halmos"; \
-		echo "--------------------------------------------------------"; \
+		echo "Matikan service dulu: sudo systemctl stop halmos"; \
 		exit 1; \
 	fi
-	@if pgrep -x "$(TARGET_NAME)" > /dev/null; then \
-		echo "WARNING: Ada proses Halmos liar (zombie) ditemukan!"; \
-		echo "Gue bersihin dulu ya..."; \
-		sudo killall -9 $(TARGET_NAME); \
-	fi
-	@echo "[DEBUG] Memulai Halmos v$(VERSION) di terminal..."
 	sudo ./$(TARGET)
 
 # ---------------------------------------------------------
-# 4. CLEAN: Uninstall total & Bersihkan build
+# 4. CLEAN: Hapus file build & Uninstall
 # ---------------------------------------------------------
 clean:
-	@echo "[CLEAN] Menghapus build files & Uninstall dari sistem..."
+	@echo "$(YELLOW)[CLEAN]$(NC) Menghapus build files & Uninstall..."
 	-sudo systemctl stop $(TARGET_NAME) 2>/dev/null || true
-	-sudo systemctl disable $(TARGET_NAME) 2>/dev/null || true
 	sudo rm -rf $(OBJ_DIR) $(BIN_DIR)
-	sudo rm -f $(DEST_BIN)
-	sudo rm -f $(DEST_SERVICE)
-	sudo rm -f $(DEST_CONF)/halmos.conf
+	sudo rm -f $(DEST_BIN) $(DEST_SERVICE) $(DEST_CONF)/halmos.conf
 	sudo systemctl daemon-reload
-	@echo "[OK] Program Bersih total!"
+	@echo "$(GREEN)[OK] Bersih total!$(NC)"
 
 .PHONY: all install run debug clean

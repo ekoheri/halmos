@@ -1,0 +1,214 @@
+#include "halmos_http_utils.h"
+#include "halmos_global.h"
+#include "halmos_core_config.h"
+#include "halmos_log.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <fcntl.h>
+#include <ctype.h>
+#include <sys/time.h>
+#include <time.h>
+#include <sys/sysinfo.h> // untuk info CPU dan RAM
+#include <errno.h>
+
+#define PATH_MAX 1024
+
+// Fungsi untuk men-dekode URL
+// Contoh : ?nama=Eko+hHeri
+// Menjadi : ?nama = Eko Heri
+void url_decode(char *src) {
+    char *dst = src;
+    while (*src) {
+        if (*src == '+') {
+            // Dalam URL, '+' biasanya berarti spasi
+            *dst = ' ';
+        } else if (*src == '%' && isxdigit(src[1]) && isxdigit(src[2])) {
+            // Ambil 2 digit hex (misal %20)
+            char hex[3] = { src[1], src[2], '\0' };
+            *dst = (char)strtol(hex, NULL, 16);
+            src += 2;
+        } else {
+            *dst = *src;
+        }
+        src++;
+        dst++;
+    }
+    *dst = '\0';
+}
+
+// Fungsi untuk menghapus spasi sebelah kanan tulisan
+void trim_right(char *s) {
+    if (!s) return;
+    int len = strlen(s);
+    while (len > 0 && (s[len-1] == '\r' || s[len-1] == '\n' || isspace(s[len-1]))) {
+        s[len-1] = '\0';
+        len--;
+    }
+}
+
+// Fungsi untuk mengenkode satu pasangan parameter (name-value)
+void trim_whitespace(char *str) {
+    int len = strlen(str);
+    while (len > 0 && (str[len - 1] == ' ' || str[len - 1] == '\r' || str[len - 1] == '\n' || str[len - 1] == '\t')) {
+        str[len - 1] = '\0';
+        len--;
+    }
+}
+
+/****************************************
+ * Fungsi untuk mengambil nilai waktu sistem
+ * Tanggal, bulan, tahun, jam, menit, detik, milidetik
+****************************************/
+char *get_time_string() {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    
+    // Mengambil waktu dalam format struct tm (GMT)
+    struct tm *tm_info = localtime(&tv.tv_sec);
+
+    // Alokasikan buffer untuk waktu dan milidetik
+    char *buf = (char *)malloc(64);
+    if (!buf) return NULL; 
+
+    // Format waktu tanpa milidetik terlebih dahulu
+    strftime(buf, 64, "%a, %d %b %Y %H:%M:%S", tm_info);
+    
+    // Tambahkan milidetik ke string
+    int millis = tv.tv_usec / 1000;
+    snprintf(buf + strlen(buf), 64 - strlen(buf), ".%03d GMT", millis);
+
+    return buf;
+}
+
+// Fungsi pembantu: Cek apakah string berakhir dengan suffix tertentu
+// Lebih kencang dan akurat daripada strstr()
+int has_extension(const char *uri, const char *path_info, const char *ext) {
+    if (!uri || !ext || ext[0] == '\0') return 0;
+
+    char temp_path[1024];
+    size_t len_to_check;
+
+    // 1. Tentukan berapa banyak karakter yang harus dicek
+    if (path_info && path_info >= uri) { // Pastikan path_info memang di dalam/setelah uri
+        len_to_check = (size_t)(path_info - uri);
+    } else {
+        len_to_check = strlen(uri);
+    }
+
+    // 2. Batasi agar tidak overflow buffer temp
+    if (len_to_check >= sizeof(temp_path)) len_to_check = sizeof(temp_path) - 1;
+
+    // 3. Copy bagian file-nya saja ke buffer sementara agar aman dari "sampah" body
+    strncpy(temp_path, uri, len_to_check);
+    temp_path[len_to_check] = '\0';
+
+    // 4. Baru cari ekstasinya di temp_path
+    size_t len_ext = strlen(ext);
+    if (len_to_check < len_ext) return 0;
+
+    return (strcasecmp(temp_path + len_to_check - len_ext, ext) == 0);
+}
+
+char *sanitize_path(const char *root, const char *uri) {
+    char full_path[PATH_MAX];
+    char resolved_root[PATH_MAX];
+
+    // 1. Validasi Root di awal (hanya sekali atau jarang-jarang)
+    if (realpath(root, resolved_root) == NULL) {
+        return NULL; 
+    }
+
+    // 2. Hitung dan bersihkan trailing slash (Hanya sekali deklarasi)
+    size_t root_len = strlen(resolved_root);
+    if (root_len > 0 && resolved_root[root_len - 1] == '/') {
+        resolved_root[root_len - 1] = '\0';
+        root_len--; // Update panjangnya setelah slash dihapus
+    }
+
+    if (strlen(resolved_root) + strlen(uri) + 2 > PATH_MAX) {
+        write_log_error("[ERR] Path too long");
+        return NULL;
+    }
+
+    // Gabungkan dengan cerdas: cek apakah uri sudah punya slash
+    // 3. Gabungkan Path
+    if (uri[0] == '/') {
+        snprintf(full_path, sizeof(full_path), "%.512s%.511s", resolved_root, uri);
+    } else {
+        snprintf(full_path, sizeof(full_path), "%.512s/%.510s", resolved_root, uri);
+    }
+
+    char resolved_path[PATH_MAX];
+    if (realpath(full_path, resolved_path) == NULL) {
+        write_log_error("[ERR] Realpath failed for: %s. Reason: %s", full_path, strerror(errno));
+        return NULL;
+    }
+
+    if (strncmp(resolved_root, resolved_path, root_len) != 0) {
+        // TANDA BAHAYA: Percobaan Path Traversal!
+        write_log_error("[SECURITY] Path traversal attempt blocked: %s", resolved_path);
+        return NULL;
+    }
+
+    return strdup(resolved_path);
+}
+
+// WAJIB URUT ABJAD buat Binary Search
+static MimeMap mime_types[] = {
+    {".css",  "text/css"},
+    {".gif",  "image/gif"},
+    {".html", "text/html"},
+    {".ico",  "image/x-icon"},
+    {".js",   "text/javascript"}, 
+    {".jpg",  "image/jpeg"},
+    {".png",  "image/png"},
+    {".txt",  "text/plain"}
+};
+
+const char *get_mime_type(const char *file) {
+    const char *dot = strrchr(file, '.');
+    if (!dot) return "text/html";
+
+    // Pake Binary Search (bsearch) bawaan C
+    // Kecepatannya O(log n), jauh lebih kenceng dari else-if
+    int low = 0, high = sizeof(mime_types) / sizeof(MimeMap) - 1;
+    while (low <= high) {
+        int mid = (low + high) / 2;
+        int res = strcmp(dot, mime_types[mid].ext);
+        if (res == 0) return mime_types[mid].type;
+        if (res < 0) high = mid - 1;
+        else low = mid + 1;
+    }
+
+    return "application/octet-stream"; // Default buat file gak dikenal
+}
+
+const char* get_status_text(int code) {
+    switch (code) {
+        case 100: return "Continue";
+        case 101: return "Switching Protocols";
+        case 200: return "OK";
+        case 201: return "Created";         // Penting untuk PUT
+        case 202: return "Accepted";
+        case 204: return "No Content";      // Penting untuk DELETE
+        case 206: return "Partial Content";
+        case 301: return "Moved Permanently";
+        case 302: return "Found";
+        case 303: return "See Other";
+        case 304: return "Not Modified";
+        case 400: return "Bad Request";
+        case 401: return "Unauthorized";
+        case 403: return "Forbidden";
+        case 404: return "Not Found";
+        case 405: return "Method Not Allowed";
+        case 413: return "Payload Too Large";
+        case 500: return "Internal Server Error";
+        case 501: return "Not Implemented";
+        case 502: return "Bad Gateway";
+        case 503: return "Service Unavailable";
+        case 504: return "Gateway Timeout";
+        default:  return "Unknown Status";
+    }
+}

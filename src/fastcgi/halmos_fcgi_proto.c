@@ -2,7 +2,8 @@
 #include "halmos_log.h"
 #include "halmos_global.h"
 #include "halmos_http_utils.h"
-#include "halmos_security.h"
+#include "halmos_http_vhost.h"
+#include "halmos_sec_traffic.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -12,39 +13,22 @@
 #include <errno.h>
 #include <unistd.h>
 
-/* --- INTERNAL HELPER --- */
+#ifndef GATHER_BUF_SIZE
+#define GATHER_BUF_SIZE 65536
+#endif
 
-int add_fcgi_pair(unsigned char* dest, const char *name, const char *value, int offset, int max_len) {
-    int name_len = (int)strlen(name);
-    const char* val_ptr = value ? value : "";
-    int value_len = (int)strlen(val_ptr);
+// Helper internal untuk pasangan key-value
+static int  fcgi_proto_add_pair(unsigned char* dest, const char *name, const char *value, int offset, int max_len);
 
-    if (offset + name_len + value_len + 8 > max_len) return offset;
+// Mengirim data STDIN (Body POST)
+static void fcgi_proto_send_stdin(int sockfd, int request_id, const void *data, int data_len);
 
-    if (name_len > 127) {
-        dest[offset++] = (unsigned char)((name_len >> 24) | 0x80);
-        dest[offset++] = (unsigned char)((name_len >> 16) & 0xFF);
-        dest[offset++] = (unsigned char)((name_len >> 8) & 0xFF);
-        dest[offset++] = (unsigned char)(name_len & 0xFF);
-    } else dest[offset++] = (unsigned char)name_len;
-
-    if (value_len > 127) {
-        dest[offset++] = (unsigned char)((value_len >> 24) | 0x80);
-        dest[offset++] = (unsigned char)((value_len >> 16) & 0xFF);
-        dest[offset++] = (unsigned char)((value_len >> 8) & 0xFF);
-        dest[offset++] = (unsigned char)(value_len & 0xFF);
-    } else dest[offset++] = (unsigned char)value_len;
-
-    memcpy(dest + offset, name, name_len);
-    offset += name_len;
-    memcpy(dest + offset, val_ptr, value_len);
-    return offset + value_len;
-}
+static int safe_send_all(int sockfd, const void *buf, size_t len);
 
 /* --- CORE FUNCTIONS --- */
 
-int halmos_fcgi_begin_request(const char *target, int port, unsigned char *gather_buf, int *g_ptr, int request_id) {
-    int fpm_sock = halmos_fcgi_conn_acquire(target, port);
+int fcgi_proto_begin_request(const char *target, int port, unsigned char *gather_buf, int *g_ptr, int request_id) {
+    int fpm_sock = fcgi_pool_conn_acquire(target, port);
     if (fpm_sock == -1) return -1;
 
     HalmosFCGI_Header *h = (HalmosFCGI_Header*)&gather_buf[*g_ptr];
@@ -65,20 +49,22 @@ int halmos_fcgi_begin_request(const char *target, int port, unsigned char *gathe
     return fpm_sock;
 }
 
-void halmos_fcgi_build_params(RequestHeader *req, int sock_client, size_t content_length, unsigned char *gather_buf, int *g_ptr, int request_id) {
+void fcgi_proto_build_params(RequestHeader *req, int sock_client, size_t content_length, unsigned char *gather_buf, int *g_ptr, int request_id) {
     (void)sock_client;
     #define FCGI_ADD_PARAM(buf, key, val, offset) \
     do { \
         const char *v__ = (const char *)(val); \
         if (v__) { \
-            offset = add_fcgi_pair(buf, key, v__, offset, 16384); \
+            offset = fcgi_proto_add_pair(buf, key, v__, offset, GATHER_BUF_SIZE); \
         } \
     } while (0)
 
     int params_start = *g_ptr + sizeof(HalmosFCGI_Header);
     int p_offset = params_start;
 
-    const char *active_root = get_active_root(req->host);
+    //const char *active_root = get_active_root(req->host);
+    VHostEntry *vh = http_vhost_get_context(req->host);
+    const char *active_root = (vh) ? vh->root : config.document_root;
     char full_script_path[1024];
     char script_name_only[512] = {0};
 
@@ -91,7 +77,7 @@ void halmos_fcgi_build_params(RequestHeader *req, int sock_client, size_t conten
     }
 
     if (script_len < sizeof(script_name_only)) {
-        strncpy(script_name_only, req->directory, script_len);
+        memcpy(script_name_only, req->directory, script_len);
         script_name_only[script_len] = '\0';
     }
 
@@ -117,6 +103,7 @@ void halmos_fcgi_build_params(RequestHeader *req, int sock_client, size_t conten
         FCGI_ADD_PARAM(gather_buf, "REQUEST_SCHEME", "http", p_offset);
     }
 
+    // fprintf(stderr, "Client IP %s\n", req->client_ip);
     // --- REMOTE & SERVER INFO ---
     FCGI_ADD_PARAM(gather_buf, "REMOTE_ADDR",     req->client_ip, p_offset);
     FCGI_ADD_PARAM(gather_buf, "SERVER_NAME",     req->host ? req->host : config.server_name, p_offset);
@@ -159,39 +146,44 @@ void halmos_fcgi_build_params(RequestHeader *req, int sock_client, size_t conten
     *g_ptr += sizeof(HalmosFCGI_Header);
 }
 
-int halmos_fcgi_send_and_receive(int fpm_sock, int sock_client, RequestHeader *req, int request_id, unsigned char *gather_buf, int g_ptr, void *post_data, size_t content_length) {
+int fcgi_proto_send_and_receive(int fpm_sock, int sock_client, RequestHeader *req, int request_id, unsigned char *gather_buf, int g_ptr, void *post_data, size_t content_length) {
+    int status = 0;
     // 1. Kirim Semua Header Params ke PHP-FPM
-    if (send(fpm_sock, gather_buf, g_ptr, 0) < 0) {
-        halmos_fcgi_conn_release(fpm_sock);
-        return -1;
+    if (safe_send_all(fpm_sock, gather_buf, g_ptr) < 0) {
+        status = -1;
+        goto cleanup;
     }
 
     // 2. Kirim Body (STDIN)
     if (content_length > 0 && post_data != NULL) {
-        halmos_fcgi_send_stdin(fpm_sock, request_id, post_data, (int)content_length);
+        fcgi_proto_send_stdin(fpm_sock, request_id, post_data, (int)content_length);
     }
-    halmos_fcgi_send_stdin(fpm_sock, request_id, NULL, 0); // End of STDIN
+    fcgi_proto_send_stdin(fpm_sock, request_id, NULL, 0); // End of STDIN
 
     // 3. Baca & Teruskan Response (Splice)
     // Di sini req->is_tls akan menentukan apakah kirim ke client pakai SSL_write atau send
-    int status = halmos_fcgi_splice_response(fpm_sock, sock_client, req);
+    status = fcgi_io_splice_response(fpm_sock, sock_client, req);
     
     if (status != 0) {
         write_log_error("[FCGI] Backend error for URI: %s", req->uri);
     }
     
-    halmos_fcgi_conn_release(fpm_sock);
-    return status;
+cleanup:
+    // HUKUM WAJIB: Apapun yang terjadi, kembalikan socket ke pool!
+    fcgi_pool_conn_release(fpm_sock);
+    return status;    
 }
 
-void halmos_fcgi_send_stdin(int sockfd, int request_id, const void *data, int data_len) {
+void fcgi_proto_send_stdin(int sockfd, int request_id, const void *data, int data_len) {
     if (data_len > 0 && data != NULL) {
-        int sent = 0;
-        while (sent < data_len) {
-            int chunk = (data_len - sent > 32768) ? 32768 : (data_len - sent);
+        int sent_payload = 0;
+        while (sent_payload < data_len) {
+            // 1. Tentukan ukuran chunk (Max 32KB agar tidak memenuhi buffer kernel)
+            int chunk = (data_len - sent_payload > 32768) ? 32768 : (data_len - sent_payload);
             int pad = (8 - (chunk % 8)) % 8;
             unsigned char padding[8] = {0};
 
+            // 2. Siapkan Header FastCGI
             HalmosFCGI_Header h = {0};
             h.version = FCGI_VERSION_1;
             h.type = FCGI_STDIN;
@@ -201,20 +193,116 @@ void halmos_fcgi_send_stdin(int sockfd, int request_id, const void *data, int da
             h.contentLengthB0 = chunk & 0xFF;
             h.paddingLength = pad;
 
+            // 3. Vectorized I/O (Header + Payload + Padding)
             struct iovec iov[3] = {
-                {&h, 8},
-                {(char*)data + sent, chunk},
+                {&h, sizeof(h)},
+                {(char*)data + sent_payload, chunk},
                 {padding, pad}
             };
-            if (writev(sockfd, iov, 3) < 0) break;
-            sent += chunk;
+
+            // 4. Loop untuk menangani Partial Write pada writev
+            int total_to_write = sizeof(h) + chunk + pad;
+            int total_written = 0;
+
+            while (total_written < total_to_write) {
+                // Catatan: writev tidak punya flag MSG_NOSIGNAL. 
+                // WAJIB panggil signal(SIGPIPE, SIG_IGN) di main()!
+                ssize_t n = writev(sockfd, iov, 3);
+                
+                if (n <= 0) {
+                    if (n < 0 && (errno == EINTR || errno == EAGAIN)) continue;
+                    write_log_error("[FCGI] Critical: Failed to send STDIN payload to backend");
+                    return; // Jika gagal total, hentikan pengiriman
+                }
+
+                total_written += n;
+
+                // Logika pemulihan iovec jika terjadi partial write:
+                // Ini bagian rumitnya writev. Untuk simplifikasi di level middleware,
+                // jika n < total_to_write, kita biasanya tidak bisa mengulang iov dengan mudah.
+                // Strategi terbaik: Jika partial write terjadi di writev, 
+                // asumsikan koneksi tidak stabil dan return error.
+                if (n < total_to_write) {
+                     write_log_error("[FCGI] Partial writev detected. Stream might be corrupted.");
+                     return; 
+                }
+            }
+            sent_payload += chunk;
         }
-    } else {
-        HalmosFCGI_Header empty_h = {0};
-        empty_h.version = FCGI_VERSION_1;
-        empty_h.type = FCGI_STDIN;
-        empty_h.requestIdB1 = (request_id >> 8) & 0xFF;
-        empty_h.requestIdB0 = request_id & 0xFF;
-        send(sockfd, &empty_h, 8, MSG_NOSIGNAL);
     }
+
+    // 5. Kirim Empty STDIN (Tanda akhir stream)
+    HalmosFCGI_Header empty_h = {0};
+    empty_h.version = FCGI_VERSION_1;
+    empty_h.type = FCGI_STDIN;
+    empty_h.requestIdB1 = (request_id >> 8) & 0xFF;
+    empty_h.requestIdB0 = request_id & 0xFF;
+    
+    // Gunakan safe_send_all yang sudah kita buat tadi untuk penutup yang aman
+    safe_send_all(sockfd, &empty_h, sizeof(empty_h));
+}
+
+/* --- INTERNAL HELPER --- */
+
+int fcgi_proto_add_pair(unsigned char* dest, const char *name, const char *value, int offset, int max_len) {
+    int name_len = (int)strlen(name);
+    const char* val_ptr = value ? value : "";
+    int value_len = (int)strlen(val_ptr);
+
+    // Hitung header size (1 atau 4 byte)
+    int h_name = (name_len > 127) ? 4 : 1;
+    int h_val  = (value_len > 127) ? 4 : 1;
+    
+    // VALIDASI TUNGGAL & AKURAT (Hapus yang + 8 > max_len itu)
+    if (offset + h_name + h_val + name_len + value_len > max_len) {
+        write_log_error("[FCGI] Buffer overflow prevented for param: %s (Limit: %d)", name, max_len);
+        return offset; 
+    }
+
+    // Tulis Header Name
+    if (name_len > 127) {
+        dest[offset++] = (unsigned char)((name_len >> 24) | 0x80);
+        dest[offset++] = (unsigned char)((name_len >> 16) & 0xFF);
+        dest[offset++] = (unsigned char)((name_len >> 8) & 0xFF);
+        dest[offset++] = (unsigned char)(name_len & 0xFF);
+    } else {
+        dest[offset++] = (unsigned char)name_len;
+    }
+
+    // Tulis Header Value
+    if (value_len > 127) {
+        dest[offset++] = (unsigned char)((value_len >> 24) | 0x80);
+        dest[offset++] = (unsigned char)((value_len >> 16) & 0xFF);
+        dest[offset++] = (unsigned char)((value_len >> 8) & 0xFF);
+        dest[offset++] = (unsigned char)(value_len & 0xFF);
+    } else {
+        dest[offset++] = (unsigned char)value_len;
+    }
+
+    memcpy(dest + offset, name, name_len);
+    offset += name_len;
+    memcpy(dest + offset, val_ptr, value_len);
+    
+    return offset + value_len;
+}
+
+/* --- HELPER: GUARANTEED SEND --- */
+int safe_send_all(int sockfd, const void *buf, size_t len) {
+    size_t total_sent = 0;
+    const unsigned char *ptr = (const unsigned char *)buf;
+
+    while (total_sent < len) {
+        ssize_t n = send(sockfd, ptr + total_sent, len - total_sent, MSG_NOSIGNAL);
+        if (n <= 0) {
+            if (errno == EINTR) continue; // Terganggu sinyal, coba lagi
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                // Di sini biasanya kita pakai poll/select, 
+                // tapi untuk FCGI kita asumsikan blocking mode yang aman.
+                continue; 
+            }
+            return -1; // Error beneran (koneksi putus/SIGPIPE)
+        }
+        total_sent += n;
+    }
+    return 0;
 }

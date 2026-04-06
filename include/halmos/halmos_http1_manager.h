@@ -4,8 +4,8 @@
 #include <stdbool.h>
 #include "halmos_http1_header.h" // Pastikan RequestHeader terdefinisi
 
-int handle_http1_session(int sock_client, bool is_tls);
+int http1_manager_session(int sock_client, bool is_tls);
 
 // Tambahkan ini biar Response bisa manggil Manager balik
-void handle_ssl_response_logic(int sock_client, RequestHeader *req);
+void http1_manager_ssl_response(int sock_client, RequestHeader *req);
 #endif

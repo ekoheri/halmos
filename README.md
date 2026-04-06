@@ -1,4 +1,4 @@
-# Halmos Web Server Engine v0.2.x
+# Halmos Web Server Engine v0.2.4
 
 Halmos adalah engine web server berbasis C yang dirancang untuk performa tinggi dan integrasi sistem Linux yang erat.Batasan sistem ini hanya bisa berjalan di lingkungan Sistem Operasi Linux
 
@@ -35,6 +35,7 @@ cd halmos
 ### Memasang ke Sistem
 Perintah ini akan menyalin binary ke /usr/bin, konfigurasi ke /etc/halmos, dan mendaftarkan service ke systemd.
 ```bash
+make
 sudo make install
 ```
 ### Konfigurasi Sistem
@@ -59,11 +60,11 @@ make debug
 ```
 Catatan: make debug akan mengecek konflik port dengan service background secara otomatis.
 
-## 5. Fitur Baru: Dynamic Routing & TLS
+## 5. Fitur Baru: Dynamic Routing, TLS/SSL dan Websocket
 Versi 0.2.2 memperkenalkan sistem manajemen yang lebih fleksibel:
- - Dynamic Routing: Halmos secara otomatis mendeteksi file .htroute di direktori root dokumen Anda. Jika file tidak ada, Halmos akan membuatnya secara otomatis.
+ - Dynamic Routing: Mendukung resolusi jalur fleksibel menggunakan konfigurasi eksternal /var/www/html/.htroute, memungkinkan pemetaan URL dinamis secara instan tanpa perlu kompilasi ulang atau restart server.
  - TLS/SSL Support: Mendukung enkripsi HTTPS menggunakan OpenSSL.
- - Auto Reload: Server akan memantau perubahan pada konfigurasi route setiap 5 detik tanpa perlu restart manual. Tabel routing terletak di /var/www/halmos/html/.htroute
+ - Websocket : Mendukung komunikasi full-duplex real-time berbasis RFC 6455 dengan manajemen registry FD yang efisien, fitur pub/sub terintegrasi, dan performa tinggi melalui arsitektur non-blocking epoll.
 
 ## 6. Uji Web Server
 Setelah service berjalan, Anda dapat memverifikasi hasilnya dengan beberapa cara:
@@ -75,11 +76,10 @@ curl -l http://localhost:8080
 ### Cek via Browser
 Buka browser dan akses: http://localhost:8080 atau http://ip-server-anda:8080. 
 
-Pastikan file index sudah tersedia di direktori /var/www/halmos/html, dan pastikan port sesuai dengan konfigurasi port anda.
+Pastikan file index sudah tersedia di direktori /var/www/html, dan pastikan port sesuai dengan konfigurasi port anda.
 
 ## 7. Pembersihan (Uninstall)
 Untuk menghapus seluruh file build dan menghapus Halmos dari sistem secara total:
 ```bash
-make clean
+sudo make clean
 ```
-

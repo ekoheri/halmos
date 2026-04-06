@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Halmos Client Tester</title>
+    <style>
+        body { font-family: sans-serif; background: #222; color: #fff; padding: 20px; }
+        #log { background: #000; border: 1px solid #444; height: 300px; overflow-y: scroll; padding: 10px; margin-top: 10px; color: #0f0; font-family: monospace; }
+        .input-group { margin-bottom: 10px; }
+        input { padding: 8px; width: 200px; }
+        button { padding: 8px 15px; cursor: pointer; background: #007bff; color: white; border: none; }
+    </style>
+</head>
+<body>
+    <h2>Halmos WebSocket Tester</h2>
+    
+    <div class="input-group">
+        <input type="text" id="username" placeholder="Masukkan Username (Contoh: Eko)">
+        <button onclick="connect()">Connect & Login</button>
+    </div>
+
+    <div id="log">--- System Log ---<br></div>
+
+    <script>
+        let ws;
+        const logDiv = document.getElementById('log');
+
+        function addLog(msg) {
+            logDiv.innerHTML += `> ${new Date().toLocaleTimeString()}: ${msg}<br>`;
+            logDiv.scrollTop = logDiv.scrollHeight;
+        }
+
+        function connect() {
+            const user = document.getElementById('username').value;
+            if (!user) return alert("Isi username dulu!");
+
+            // 1. Buka Koneksi ke Server Halmos (Sesuaikan IP/Port)
+            ws = new WebSocket("ws://localhost:8080");
+
+            ws.onopen = () => {
+                addLog("Connected to Halmos!");
+                
+                // 2. OTOMATIS KIRIM AUTH (Ini yang ditunggu fungsi on_message di C)
+                const authPacket = {
+                    "header": {
+                        "action": "AUTH", 
+                        "dst": "server",
+                        "src": user
+                    },
+                    "payload": user
+                };
+                ws.send(JSON.stringify(authPacket));
+                addLog("Sent AUTH for user: " + user);
+            };
+
+            ws.onmessage = (e) => {
+                addLog("PESAN MASUK: " + e.data);
+            };
+
+            ws.onclose = () => addLog("Connection Closed.");
+            ws.onerror = (err) => addLog("Error: " + err);
+        }
+    </script>
+</body>
+</html>
