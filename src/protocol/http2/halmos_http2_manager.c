@@ -141,7 +141,7 @@ void http2_handle_headers_frame(HTTP2Session *session, HTTP2FrameHeader *head, c
         // 2. Cek apakah END_HEADERS flag aktif
         if (head->flags & 0x04) {
             
-            // 3. SAFETY CHECK: Jangan biarkan printf atau routing memproses NULL
+            // 3. SAFETY CHECK: Jangan biarkan printf atau routing memproses string kosong '\0'
             if (stream->http1_compat.method[0] == '\0' || stream->http1_compat.uri[0] == '\0') {
                 fprintf(stderr, "[H2 ERROR] Stream %u: Invalid Headers (NULL Method/URI)\n", stream->stream_id);
             } else {
