@@ -148,7 +148,8 @@ void ws_registry_broadcast(const char *message) {
                 if (c->ssl) {
                     SSL_write(c->ssl, frame, (int)frame_len);
                 } else {
-                    write(c->fd, frame, frame_len);
+                    //write(c->fd, frame, frame_len);
+                    send(c->fd, frame, frame_len, MSG_NOSIGNAL);
                 }
                 pthread_mutex_unlock(&c->client_lock);
             }

@@ -28,6 +28,8 @@
 #include <fcntl.h>     // Biar kenal 'open()' dan 'O_RDONLY'
 #include <netinet/in.h>  // <--- TAMBAHKAN INI
 #include <arpa/inet.h>   // <--- TAMBAHKAN INI
+#include <stdint.h>
+#include <stddef.h>
 
 /* --- FUNGSI INTERNAL (STATIC) --- */
 
@@ -146,12 +148,23 @@ static bool recv_http_body(int sock, RequestHeader *req, char **buf_ptr, size_t 
     size_t header_len = (char*)req->body_data - *buf_ptr;
     size_t total_needed = header_len + req->content_length;
 
-    // Ekspansi buffer jika body lebih besar dari buffer awal
     if (total_needed > *limit) {
+        // 1. Simpan alamat sebagai integer
+        uintptr_t old_addr = (uintptr_t)(*buf_ptr);
+        
+        // 2. Realloc seperti biasa
         char *new_buf = realloc(*buf_ptr, total_needed + 1);
         if (!new_buf) return false;
         
-        update_header_pointers(req, new_buf - *buf_ptr);
+        // 3. Hitung selisih menggunakan nilai integer
+        ptrdiff_t diff = (ptrdiff_t)((uintptr_t)new_buf - old_addr);
+        
+        // 4. Update pointer internal jika ada pergeseran memori
+        if (diff != 0) {
+            update_header_pointers(req, diff);
+        }
+
+        // 5. Update state
         *buf_ptr = new_buf;
         *limit = total_needed + 1;
     }

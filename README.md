@@ -6,7 +6,7 @@ Halmos adalah engine web server berbasis C yang dirancang untuk performa tinggi 
 Sebelum melakukan kompilasi, pastikan sistem Anda memiliki alat pengembangan dasar:
 ```bash
 sudo apt update
-sudo apt install build-essential gcc make git libpthread-stubs0-dev libssl-dev
+sudo apt install build-essential gcc make git libpthread-stubs0-dev libssl-dev libjson-c-dev
 ```
 ## 2. Instalasi Dependency (PHP, Rust, Python)
 Halmos mendukung berbagai backend melalui FastCGI. Instal komponen berikut untuk dukungan penuh:
