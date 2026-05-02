@@ -65,7 +65,7 @@ void fcgi_proto_build_params(RequestHeader *req, int sock_client, size_t content
     //const char *active_root = get_active_root(req->host);
     VHostEntry *vh = http_vhost_get_context(req->host);
     const char *active_root = (vh) ? vh->root : config.document_root;
-    char full_script_path[1024];
+    char full_script_path[4096];
     char script_name_only[512] = {0};
 
     // Script & Path Logic
@@ -116,7 +116,7 @@ void fcgi_proto_build_params(RequestHeader *req, int sock_client, size_t content
 
     // Content Handling
     if (content_length > 0) {
-        char cl_str[20];
+        char cl_str[24];
         snprintf(cl_str, sizeof(cl_str), "%zu", content_length);
         FCGI_ADD_PARAM(gather_buf, "CONTENT_LENGTH", cl_str, p_offset);
         FCGI_ADD_PARAM(gather_buf, "CONTENT_TYPE", req->content_type ? req->content_type : "application/x-www-form-urlencoded", p_offset);

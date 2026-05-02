@@ -13,7 +13,7 @@
 #include <sys/sysinfo.h> // untuk info CPU dan RAM
 #include <errno.h>
 
-#define PATH_MAX 1024
+#define PATH_MAX 4096
 
 // Fungsi untuk men-dekode URL
 // Contoh : ?nama=Eko+hHeri
