@@ -26,6 +26,18 @@ SSL_CTX *halmos_tls_ctx = NULL;
 static SSL** fd_to_ssl_map = NULL;
 static int current_max_limit = 0;
 
+// Tambahkan fungsi callback ini di atas ssl_init
+static int alpn_select_cb(SSL *ssl, const unsigned char **out, unsigned char *outlen,
+                          const unsigned char *in, unsigned int inlen, void *arg) {
+    (void)ssl;
+    // Fungsi pembantu OpenSSL untuk memilih protokol terbaik
+    // arg berisi daftar protokol kita (protos)
+    if (SSL_select_next_proto((unsigned char **)out, outlen, (const unsigned char *)arg, 12, in, inlen) 
+        != OPENSSL_NPN_NEGOTIATED) {
+        return SSL_TLSEXT_ERR_NOACK;
+    }
+    return SSL_TLSEXT_ERR_OK;
+}
 
 // Fungsi untuk mengaktifkan SSL
 
@@ -47,6 +59,25 @@ void ssl_init() {
         exit(EXIT_FAILURE);
     }
 
+    // SEKARANG BARU BOLEH PASANG ALPN
+    // INI UNTK HTTP2
+    /*static unsigned char protos[] = {
+        2, 'h', '2',
+        8, 'h', 't', 't', 'p', '/', '1', '.', '1'
+    };*/
+
+    // INI KITA PAKSA KE HTTP1 DULU YA!
+    static unsigned char protos[] = {
+        8, 'h', 't', 't', 'p', '/', '1', '.', '1'
+    };
+
+    // 1. Beritahu protokol apa yang kita tawarkan (untuk Client-side)
+    SSL_CTX_set_alpn_protos(halmos_tls_ctx, protos, sizeof(protos));
+    
+    // 2. Pasang pemilih otomatis (untuk Server-side / Browser)
+    // Ini yang paling krusial buat Chrome/Firefox!
+    SSL_CTX_set_alpn_select_cb(halmos_tls_ctx, alpn_select_cb, protos);
+    
     // 3. Load Certificate & Private Key (Nama file bisa diambil dari config)
     if (SSL_CTX_use_certificate_file(halmos_tls_ctx, config.ssl_certificate_file, SSL_FILETYPE_PEM) <= 0) {
         write_log_error("[SEC] Failed to load certificate file: %s", 
