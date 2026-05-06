@@ -96,7 +96,7 @@ typedef struct {
     pthread_mutex_t hpack_lock;
 
     /* --- STREAM MANAGEMENT (Multiplexing) --- */
-    HTTP2Stream *streams;
+    HTTP2Stream streams[10];
     pthread_mutex_t streams_lock; 
     
     uint32_t last_stream_id;

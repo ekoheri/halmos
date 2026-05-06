@@ -1,8 +1,9 @@
-#include "halmos_http2_response.h"
 #include "halmos_http1_response.h"
+#include "halmos_http2_response.h"
 #include "halmos_http2_manager.h"
 #include "halmos_global.h"
 #include "halmos_http_utils.h"
+#include "halmos_http_multipart.h"
 #include "halmos_fcgi.h"
 
 #include <stdio.h>
@@ -15,11 +16,17 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/un.h>     // Untuk AF_UNIX
+#include <sys/types.h>  // Wajib untuk ssize_t
+#include <stddef.h>     // Untuk size_t
+#include <ctype.h>
+#include <time.h>
+
+static void http2_response_send_complex_header(HTTP2Session *session, HTTP2Stream *stream, char *raw_headers);
 
 void http2_response_routing_bridge(HTTP2Session *session, HTTP2Stream *stream) {
     RequestHeader *req = &stream->http1_compat;
     
-    // 1. IDENTIFIKASI BACKEND (Gunakan logika yang sama dengan HTTP/1.1 Mas)
+    // 1. IDENTIFIKASI BACKEND
     int backend_type = -1; 
     if (has_extension(req->uri, req->path_info, ".php")) { 
         backend_type = 0; // PHP
@@ -31,78 +38,79 @@ void http2_response_routing_bridge(HTTP2Session *session, HTTP2Stream *stream) {
         backend_type = 2; // Python
     }
 
-    // 2. JALUR FASTCGI
+    // 2. LOGIKA MULTIPART PARSER
+    if (backend_type == -1 && req->method[0] != '\0' && strcasecmp(req->method, "POST") == 0 && 
+        req->content_type && strstr(req->content_type, "multipart/form-data")) {
+        //fprintf(stderr, "[TRACE-H2] Parsing multipart data\n");
+        http2_multipart_parse(req);
+    }
+
+    //fprintf(stderr, "[DEBUG-H2] URI: %s | Backend: %d\n", req->uri ? req->uri : "NULL", backend_type);
+
+    // 3. JALUR FASTCGI (PHP, DLL)
     if (backend_type != -1) {
-        // --- INI SOLUSINYA: KITA BUAT SOCK_CLIENT PALSU (VIRTUAL) ---
-        int sv[2];
-        if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0) {
+        char *backend_data = NULL;
+        ssize_t data_len = fcgi_api_request_http2(req, backend_type, req->body_data, req->content_length, &backend_data);
+        
+        if (data_len > 0 && backend_data) {
+            char *divider = strstr(backend_data, "\r\n\r\n");
             
-            // Mas kasih sv[1] ke FastCGI API. 
-            // Si FastCGI akan mengira ini sock_client asli!
-            fcgi_api_request_stream(req, sv[1], backend_type, req->body_data, req->content_length);
-            close(sv[1]); // Tutup ujung tulis
+            if (divider) {
+                *divider = '\0'; // Pisahkan Header dan Body
+                char *body_start = divider + 4;
+                
+                // --- DETEKSI STATUS CODE ---
+                char *status_ptr = strcasestr(backend_data, "Status:");
+                int s_code = status_ptr ? atoi(status_ptr + 7) : 200;
+                
+                // a. Kirim HEADERS Frame
+                http2_response_send_complex_header(session, stream, backend_data);
 
-            // Nah, di sini tugas HTTP/2 (Penerjemah)
-            // Baca teks dari sv[0], bungkus ke Frame, kirim ke session->fd
-            unsigned char proxy_buf[16384];
-            ssize_t n;
-            bool headers_done = false;
-            bool body_found = false;
-
-            while ((n = read(sv[0], proxy_buf, sizeof(proxy_buf))) > 0) {
-                if (!body_found) {
-                    // Cari pembatas header FastCGI (\r\n\r\n)
-                    char *divider = strstr((char*)proxy_buf, "\r\n\r\n");
-                    
-                    if (divider) {
-                        body_found = true;
-                        // 1. Kirim Header Biner H2 (Hanya sekali!)
-                        if (!headers_done) {
-                            http2_response_send_header(session, stream, 200);
-                            headers_done = true;
-                        }
-
-                        // 2. Kirim sisanya (Body saja)
-                        char *body_data = divider + 4;
-                        size_t body_len = n - (body_data - (char*)proxy_buf);
-                        if (body_len > 0) {
-                            http2_response_send_data(session, stream, body_data, body_len, false);
-                        }
+                // b. Kirim DATA Frame HANYA jika bukan Redirect (3xx)
+                if (s_code < 300 || s_code >= 400) {
+                    size_t body_len = (size_t)(data_len - (body_start - backend_data));
+                    if (body_len > 0) {
+                        //fprintf(stderr, "[H2-TRACE] Sending Data Frame, Len: %zu\n", body_len);
+                        http2_response_send_data(session, stream, body_start, body_len, true);
+                    } else {
+                        //fprintf(stderr, "[H2-TRACE] Body empty, sending empty DATA with END_STREAM\n");
+                        http2_response_send_data(session, stream, NULL, 0, true);
                     }
-                    // Jika divider tidak ketemu, data ini kita BUANG 
-                    // (karena ini adalah raw header HTTP/1.1 yang tidak dibutuhkan H2)
-                } else {
-                    // Sudah di jalur body, kirim semua sebagai DATA frame
-                    http2_response_send_data(session, stream, proxy_buf, (size_t)n, false);
-                }
+                } /*else {
+                    fprintf(stderr, "[H2-SUCCESS] Redirect %d handled, stream closed via HEADERS flags.\n", s_code);
+                }*/
+            } else {
+                //fprintf(stderr, "[ERROR-H2] Divider not found in backend data\n");
+                http2_response_send_complex_header(session, stream, backend_data);
             }
-            // Tutup Stream dengan END_STREAM
-            http2_response_send_data(session, stream, NULL, 0, true);
-            close(sv[0]);
+            free(backend_data);
+        } else {
+            //fprintf(stderr, "[ERROR-H2] No data from FCGI backend\n");
+            http2_response_send_header(session, stream, 502);
+            http2_response_send_data(session, stream, "Bad Gateway", 11, true);
         }
         return;
     }
 
-    // 3. JALUR FILE STATIS (Logic asli Mas Eko)
+    // 4. JALUR FILE STATIS
     VHostEntry *vh = (VHostEntry *)req->vhost_context;
     const char *active_root = (vh && vh->root[0] != '\0') ? vh->root : config.document_root;
-
     char *safe_path = sanitize_path(active_root, req->uri);
     struct stat st;
 
-    // Cek keberadaan file
     if (!safe_path || stat(safe_path, &st) != 0 || S_ISDIR(st.st_mode)) {
+        //fprintf(stderr, "[TRACE-H2] File not found or invalid: %s\n", safe_path ? safe_path : "NULL");
         http2_response_send_header(session, stream, 404);
         http2_response_send_data(session, stream, "Not Found", 9, true);
         if(safe_path) free(safe_path);
         return;
     }
 
-    // 4. KIRIM HEADER (Hanya untuk File Statis)
-    // Ingat: Untuk PHP, Header dikirim oleh http2_handle_fastcgi setelah dpt response dari PHP-FPM
+    // 5. KIRIM HEADER FILE STATIS
+    //fprintf(stderr, "[TRACE-H2] Serving static file: %s\n", safe_path);
     http2_response_send_header(session, stream, 200);
 
-    // 5. KIRIM FILE (Logika Buffer & h2_send_frame)
+    // 6. KIRIM DATA FILE STATIS
     int fd = open(safe_path, O_RDONLY);
     if (fd == -1) {
         http2_response_send_data(session, stream, "Forbidden", 9, true);
@@ -117,8 +125,8 @@ void http2_response_routing_bridge(HTTP2Session *session, HTTP2Stream *stream) {
         } else {
             while ((n = read(fd, buffer, sizeof(buffer))) > 0) {
                 total_sent += n;
-                // is_end true jika byte yang dibaca sudah mencapai akhir file
                 bool is_end = (total_sent >= file_size);
+                //fprintf(stderr, "[H2-TRACE] Sending static data chunk, size: %zd, end: %d\n", n, is_end);
                 http2_response_send_data(session, stream, buffer, (size_t)n, is_end);
             }
         }
@@ -129,39 +137,173 @@ void http2_response_routing_bridge(HTTP2Session *session, HTTP2Stream *stream) {
 }
 
 void http2_response_send_header(HTTP2Session *session, HTTP2Stream *stream, int status_code) {
-    unsigned char hpack_buf[256];
+    unsigned char hpack_buf[512]; // Perbesar sedikit buat jaga-jaga
     int pos = 0;
 
-    // 1. Status Code (Sangat aman, pakai Indexed Header)
+    // 1. Status Code
     switch(status_code) {
-        case 200: hpack_buf[pos++] = 0x88; break; // :status: 200
-        case 404: hpack_buf[pos++] = 0x8D; break; // :status: 404
-        default:  hpack_buf[pos++] = 0x8F; break; // :status: 500
+        case 200: hpack_buf[pos++] = 0x88; break; // Index 8
+        case 204: hpack_buf[pos++] = 0x89; break; // Index 9
+        case 206: hpack_buf[pos++] = 0x8F; break; // Index 15 (Pindahkan ke sini kalau emang butuh)
+        case 301: hpack_buf[pos++] = 0x89; break; // HATI-HATI: Index 9 itu 204, 301 itu index 10 (0x8A)
+        case 302: hpack_buf[pos++] = 0x8B; break; // Index 11 (0x8B)
+        case 304: hpack_buf[pos++] = 0x8C; break; // Index 12
+        case 400: hpack_buf[pos++] = 0x8E; break; // Index 14
+        case 404: hpack_buf[pos++] = 0x8D; break; // Index 13
+        case 500: hpack_buf[pos++] = 0x91; break; // Index 17
+        default:  
+            // Jangan kasih 206! Kasih literal 200 atau 500
+            hpack_buf[pos++] = 0x88; 
+            break;
     }
 
-    // 2. Content-Type (Pakai Literal Header Field with Incremental Indexing - Indexed Name)
-    // Rumusnya: 0x40 | Index. Index 'content-type' adalah 31 (0x1f).
-    // Jadi: 0x40 | 0x1f = 0x5F.
-    hpack_buf[pos++] = 0x5F; 
-
-    const char *mime = get_mime_type(stream->http1_compat.uri);
-    size_t mime_len = strlen(mime);
-
-    // 3. String Length (Tanpa Huffman)
-    hpack_buf[pos++] = (unsigned char)mime_len; 
+    // 2. Tentukan MIME Type
+    const char *mime_to_use;
+    if (stream->http1_compat.uri && strstr(stream->http1_compat.uri, ".php")) {
+        mime_to_use = "text/html";
+    } else {
+        mime_to_use = get_mime_type(stream->http1_compat.uri);
+    }
     
-    // 4. String Value
-    memcpy(&hpack_buf[pos], mime, mime_len);
-    pos += mime_len;
+    if (!mime_to_use) mime_to_use = "text/plain"; 
 
-    // KIRIM: Type 0x01 (HEADERS), Flag 0x04 (END_HEADERS)
+    // 3. Masukkan ke HPACK (Content-Type)
+    // 0x5F = Literal Header Field with Incremental Indexing — Indexed Name (index 31)
+    hpack_buf[pos++] = 0x5F; 
+    
+    size_t mlen = strlen(mime_to_use);
+    if (mlen > 255) mlen = 255; // Safety limit
+    
+    hpack_buf[pos++] = (unsigned char)mlen; 
+    memcpy(&hpack_buf[pos], mime_to_use, mlen);
+    pos += mlen;
+
+    // 4. KIRIM: Type 0x01 (HEADERS), Flag 0x04 (END_HEADERS)
     h2_send_frame(session->fd, session->is_tls, 0x01, 0x04, stream->stream_id, hpack_buf, (uint32_t)pos);
+    
+    //fprintf(stderr, "[H2-DEBUG] Header sent for %s with mime %s\n", 
+    //        stream->http1_compat.uri, mime_to_use);
 }
 
 void http2_response_send_data(HTTP2Session *session, HTTP2Stream *stream, const void *data, size_t len, bool is_end) {
-    // Type 0x00 (DATA), Flag 0x01 (END_STREAM jika is_end true)
-    uint8_t flags = is_end ? 0x01 : 0x00;
-    h2_send_frame(session->fd, session->is_tls, 0x00, flags, stream->stream_id, data, (uint32_t)len);
+    const unsigned char *ptr = (const unsigned char *)data;
+    size_t remaining = len;
+    uint32_t max_frame = 16384; // Batas standar HTTP/2 (16KB)
+
+    // Kasus khusus: Data kosong tapi stream harus ditutup (END_STREAM)
+    if (len == 0 && is_end) {
+        h2_send_frame(session->fd, session->is_tls, 0x00, 0x01, stream->stream_id, NULL, 0);
+        return;
+    }
+
+    // Loop untuk memecah data besar menjadi potongan-potongan 16KB
+    while (remaining > 0) {
+        uint32_t chunk = (remaining > (size_t)max_frame) ? max_frame : (uint32_t)remaining;
+        
+        // Flag END_STREAM (0x01) hanya dikirim jika ini adalah potongan terakhir 
+        // DAN parameter is_end bernilai true.
+        uint8_t flags = (is_end && remaining == chunk) ? 0x01 : 0x00;
+
+        h2_send_frame(session->fd, session->is_tls, 0x00, flags, stream->stream_id, ptr, chunk);
+
+        ptr += chunk;
+        remaining -= chunk;
+    }
 }
 
+/*
+Internal Helper
+*/
 
+void http2_response_send_complex_header(HTTP2Session *session, HTTP2Stream *stream, char *raw_headers) {
+    unsigned char hpack_buf[4096];
+    int pos = 0;
+    int final_status = 200;
+
+    //fprintf(stderr, "[TRACE-H2] Entering complex_header for Stream %u\n", stream->stream_id);
+    
+    // 1. Deteksi Status
+    char *status_ptr = strcasestr(raw_headers, "Status:");
+    if (status_ptr) {
+        char *p = status_ptr + 7;
+        while (*p == ' ' || *p == '\t') p++;
+        final_status = atoi(p);
+    }
+
+    // 2. Encode :status
+    if (final_status == 200)      hpack_buf[pos++] = 0x88; // :status: 200
+    else if (final_status == 301) hpack_buf[pos++] = 0x8A; // :status: 301
+    else if (final_status == 304) hpack_buf[pos++] = 0x8C; // :status: 304 (Indeks asli 12)
+    else {
+        // Untuk 302 dan lainnya yang tidak ada di tabel statis shortcut 1-byte
+        // Kita pakai Indeks 8 (Nama: :status) + Literal Value
+        hpack_buf[pos++] = 0x08; 
+        char s_str[10];
+        int s_len = sprintf(s_str, "%d", final_status);
+        hpack_buf[pos++] = (unsigned char)s_len;
+        memcpy(hpack_buf + pos, s_str, (size_t)s_len);
+        pos += s_len;
+    }
+
+    // --- BAGIAN CONTENT-LENGTH 0 DIHAPUS ---
+    // Jangan paksa content-length: 0, biarkan PHP yang menentukan.
+
+    // 3. Loop Header Lain
+    char *saveptr;
+    char *headers_copy = strdup(raw_headers);
+    char *line = strtok_r(headers_copy, "\r\n", &saveptr);
+    
+    while (line != NULL) {
+        char *colon = strchr(line, ':');
+        if (colon) {
+            *colon = '\0';
+            char *key = line;
+            char *value = colon + 1;
+
+            while (isspace((unsigned char)*key)) key++;
+            char *v_end = value + strlen(value) - 1;
+            while (v_end >= value && isspace((unsigned char)*v_end)) {
+                *v_end = '\0';
+                v_end--;
+            }
+            while (isspace((unsigned char)*value)) value++;
+            
+            for (char *p = key; *p; p++) *p = (char)tolower((unsigned char)*p);
+
+            // Filter status saja, content-length biarkan lewat kalau ada dari PHP
+            if (strcmp(key, "status") == 0) {
+                line = strtok_r(NULL, "\r\n", &saveptr);
+                continue;
+            }
+
+            hpack_buf[pos++] = 0x10; 
+            size_t klen = strlen(key);
+            hpack_buf[pos++] = (unsigned char)klen;
+            memcpy(hpack_buf + pos, key, klen);
+            pos += (int)klen;
+            
+            size_t vlen = strlen(value);
+            hpack_buf[pos++] = (unsigned char)vlen;
+            memcpy(hpack_buf + pos, value, vlen);
+            pos += (int)vlen;
+
+            //fprintf(stderr, "[TRACE-H2] Header Encoded -> %s: %s (Len: %zu)\n", key, value, vlen);
+        }
+        line = strtok_r(NULL, "\r\n", &saveptr);
+    }
+    free(headers_copy);
+
+    // 4. Hex Dump & Kirim
+    /*fprintf(stderr, "[DEBUG-HPACK-HEX] ");
+    for (int i = 0; i < pos; i++) fprintf(stderr, "%02X ", hpack_buf[i]);
+    fprintf(stderr, "\n");*/
+
+    // Flag END_HEADERS (0x04) saja. END_STREAM nanti di DATA frame.
+    unsigned char flags = (final_status >= 300 && final_status < 400) ? 0x05 : 0x04;
+    
+    //fprintf(stderr, "[H2-SEND-TRACE] Final Status: %d, Using Flags: 0x%02X\n", final_status, flags);
+            
+    h2_send_frame(session->fd, session->is_tls, 0x01, flags, stream->stream_id, hpack_buf, (uint32_t)pos);
+    
+    //fprintf(stderr, "[TRACE-H2] complex_header DONE for Stream %u\n", stream->stream_id);
+}

@@ -61,15 +61,15 @@ void ssl_init() {
 
     // SEKARANG BARU BOLEH PASANG ALPN
     // INI UNTK HTTP2
-    /*static unsigned char protos[] = {
+    static unsigned char protos[] = {
         2, 'h', '2',
         8, 'h', 't', 't', 'p', '/', '1', '.', '1'
-    };*/
+    };
 
     // INI KITA PAKSA KE HTTP1 DULU YA!
-    static unsigned char protos[] = {
+    /*static unsigned char protos[] = {
         8, 'h', 't', 't', 'p', '/', '1', '.', '1'
-    };
+    };*/
 
     // 1. Beritahu protokol apa yang kita tawarkan (untuk Client-side)
     SSL_CTX_set_alpn_protos(halmos_tls_ctx, protos, sizeof(protos));

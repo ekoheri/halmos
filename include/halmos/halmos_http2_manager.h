@@ -19,6 +19,8 @@ void http2_send_settings(int fd, bool is_tls);
  */
 void h2_send_frame(int fd, bool is_tls, uint8_t type, uint8_t flags, uint32_t stream_id, const void *payload, uint32_t len);
 
+void h2_send_data_chunked(int fd, bool is_tls, uint32_t stream_id, const void *payload, uint32_t total_len);
+
 void http2_handle_headers_frame(HTTP2Session *session, HTTP2FrameHeader *head, const unsigned char *payload);
 
 void http2_handle_data_frame(HTTP2Session *session, HTTP2FrameHeader *head, const unsigned char *payload);

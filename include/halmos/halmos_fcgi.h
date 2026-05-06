@@ -8,6 +8,8 @@
 #include <stdbool.h>
 #include <sys/un.h> // Include untuk AF_UNIX
 #include <stdatomic.h> // untuk operasi lock-free atomic_int
+#include <sys/types.h>  // Wajib untuk ssize_t
+#include <stddef.h>     // Untuk size_t
 
 
 /* FastCGI Protocol Definitions */
@@ -121,11 +123,17 @@ void fcgi_pool_conn_release(int sockfd);
  * ==========================================
  */
 // Merakit semua Params menjadi satu buffer besar
+
+int safe_send_all(int sockfd, const void *buf, size_t len);
+
 int fcgi_proto_begin_request(const char *target, int port, unsigned char *gather_buf, int *g_ptr, int request_id);
 
 void fcgi_proto_build_params(RequestHeader *req, int sock_client, size_t content_length, unsigned char *gather_buf, int *g_ptr, int request_id);
 
 int fcgi_proto_send_and_receive(int fpm_sock, int sock_client, RequestHeader *req, int request_id, unsigned char *gather_buf, int g_ptr, void *post_data, size_t content_length);
+
+// Mengirim data STDIN (Body POST)
+void fcgi_proto_send_stdin(int sockfd, int request_id, const void *data, int data_len);
 
 /* * ==========================================
  * 3. I/O & STREAMING (halmos_fcgi_io.c)
@@ -141,4 +149,5 @@ int  fcgi_io_splice_response(int fpm_fd, int sock_client, RequestHeader *req);
 // Fungsi fasad yang dipanggil oleh manager http
 int fcgi_api_request_stream(RequestHeader *req, int sock_client, int backend_type, void *post_data, size_t content_length);
 
+ssize_t fcgi_api_request_http2(RequestHeader *req, int backend_type, void *post_data, size_t content_length, char **out_buf);
 #endif
