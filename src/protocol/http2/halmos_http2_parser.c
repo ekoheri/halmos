@@ -69,7 +69,7 @@ void hpack_dynamic_table_add(HTTP2Session *session, const char *name, const char
     if (!session || !name || !value) return;
 
     if (session->dyn_table.entries == NULL) {
-        fprintf(stderr, "[H2-ERR] Dynamic Table entries is NULL!\n");
+        //fprintf(stderr, "[H2-ERR] Dynamic Table entries is NULL!\n");
         return; 
     }
     
@@ -126,7 +126,7 @@ static uint32_t hpack_decode_int(const unsigned char **pos, const unsigned char 
         if (!(b & 128)) break;
         shift += 7;
         if (shift > 28) { // Proteksi overflow
-            fprintf(stderr, "  [H2-ERR] HPACK Integer Overflow!\n");
+            //fprintf(stderr, "  [H2-ERR] HPACK Integer Overflow!\n");
             break; 
         }
     }
@@ -164,42 +164,30 @@ static char* hpack_decode_string(const unsigned char **pos, const unsigned char 
     return str;
 }
 
+static void process_literal_header_with_name(const char *name, const char *value, RequestHeader *req) {
+    if (!name || !value) return;
 
-static void process_literal_header_with_index(uint32_t index, const char *value, RequestHeader *req) {
-    if (!value) return;
-
-    switch (index) {
-        case 1: // :authority
-        case 23: // authority (regular)
-            if (req->host) free(req->host); 
-            req->host = strdup(value); 
-            break;
-        case 2: // :method GET
-        case 3: // :method POST
-            strncpy(req->method, value, sizeof(req->method) - 1);
-            break;
-        case 4: // :path /
-        case 5: // :path /index.html
-            if (req->uri) free(req->uri);
-            req->uri = strdup(value);
-            char *qs = strchr(req->uri, '?');
-            if (qs) { *qs = '\0'; req->query_string = qs + 1; }
-            req->directory = req->uri;
-            break;
-        case 20: // content-type
-            if (req->content_type) free(req->content_type); 
-            req->content_type = strdup(value); 
-            break;
-        case 28: // content-length
-            req->content_length = strtol(value, NULL, 10); 
-            break;
-        case 32: // cookie
-            if (req->cookie_data) free(req->cookie_data); 
-            req->cookie_data = strdup(value); 
-            break;
-        case 58: // user-agent
-            // Jika kamu butuh log user-agent, tambahkan field di RequestHeader
-            break;
+    if (strcasecmp(name, "content-type") == 0) {
+        if (req->content_type) free(req->content_type);
+        req->content_type = strdup(value);
+    } else if (strcasecmp(name, "content-length") == 0) {
+        req->content_length = strtol(value, NULL, 10);
+    } else if (strcasecmp(name, "cookie") == 0) {
+        if (req->cookie_data == NULL) {
+            req->cookie_data = strdup(value);
+        } else {
+            char *old = req->cookie_data;
+            asprintf(&req->cookie_data, "%s; %s", old, value);
+            free(old);
+        }
+    } else if (strcasecmp(name, ":authority") == 0 || strcasecmp(name, "host") == 0) {
+        if (req->host) free(req->host);
+        req->host = strdup(value);
+    } else if (strcasecmp(name, ":method") == 0) {
+        strncpy(req->method, value, sizeof(req->method) - 1);
+    } else if (strcasecmp(name, ":path") == 0) {
+        if (req->uri) free(req->uri);
+        req->uri = strdup(value);
     }
 }
 
@@ -212,10 +200,15 @@ static void process_indexed_header(HTTP2Session *session, uint32_t index, Reques
     // Sekarang mendukung Static Table (1-61) dan Dynamic Table (>61)
     if (hpack_get_header(session, index, &name, &value)) {
         
-        // 1. Mapping Header Umum (content-type, host, dll)
-        process_literal_header_with_index(index, value, req);
+        // TRACE: Supaya kelihatan di log index mana yang kena
+        //fprintf(stderr, "[H2-HPACK-TRACE] Kategori 1 (Indexed) -> Index: %u, Name: %s, Value: %s\n", 
+        //        index, name ? name : "NULL", value ? value : "NULL");
+
+        // 1. Gunakan fungsi with_name untuk semua header umum (content-type, content-length, dll)
+        // Ini lebih aman karena menangani string name secara case-insensitive
+        process_literal_header_with_name(name, value, req);
         
-        // 2. Mapping Pseudo-Headers (Wajib untuk HTTP/2)
+        // 2. Mapping Pseudo-Headers & Specific Logic (Tetap perlu strcmp untuk kecepatan)
         if (name) {
             if (strcmp(name, ":method") == 0) {
                 strncpy(req->method, value, sizeof(req->method)-1);
@@ -227,9 +220,21 @@ static void process_indexed_header(HTTP2Session *session, uint32_t index, Reques
                 req->host = strdup(value);
             } else if (strcmp(name, ":scheme") == 0) {
                 req->is_tls = (strcmp(value, "https") == 0);
+            } else if (strcasecmp(name, "cookie") == 0) {
+                if (req->cookie_data == NULL) {
+                    req->cookie_data = strdup(value);
+                } else {
+                    // Gabungkan dengan pemisah "; "
+                    char *old = req->cookie_data;
+                    if (asprintf(&req->cookie_data, "%s; %s", old, value) != -1) {
+                        free(old);
+                    }
+                }
             }
         }
-    }
+    } /*else {
+        fprintf(stderr, "[H2-HPACK-ERR] Gagal ambil header untuk Index: %u\n", index);
+    }*/
 }
 
 /**
@@ -276,6 +281,10 @@ char* http2_huffman_decode(const unsigned char *src, size_t len) {
  * http2_hpack_decode - DENGAN DEBUG TRACE LENGKAP
  */
 
+ /**
+ * http2_hpack_decode
+ * Membedah payload HEADERS frame dan memetakan ke struct RequestHeader Halmos.
+ */
 bool http2_hpack_decode(HTTP2Session *session, HTTP2Stream *stream, const unsigned char *payload, size_t len) {
     if (!payload || len == 0) return false;
     
@@ -283,9 +292,11 @@ bool http2_hpack_decode(HTTP2Session *session, HTTP2Stream *stream, const unsign
     const unsigned char *end = payload + len;
     RequestHeader *req = &stream->http1_compat;
 
+    // Bersihkan method sebelum mulai
     memset(req->method, 0, sizeof(req->method));
     
-    // 1. CHROME PRIORITY SKIP
+    // 1. CHROME/FIREFOX PRIORITY SKIP
+    // Browser sering menyisipkan 5 byte data prioritas (E-bit + Stream Dep + Weight)
     if (len > 5 && (payload[0] & 0x7F) == 0 && payload[1] == 0 && payload[2] == 0) {
         pos += 5;
     }
@@ -295,12 +306,12 @@ bool http2_hpack_decode(HTTP2Session *session, HTTP2Stream *stream, const unsign
     while (pos < end) {
         uint8_t b = *pos;
         
-        // --- KATEGORI 1: Indexed Header Field (1xxx xxxx) ---
+        // KATEGORI 1: Indexed Header Field (1xxx xxxx)
         if (b & 0x80) { 
             uint32_t index = hpack_decode_int(&pos, end, 0x7F);
             process_indexed_header(session, index, req);
         } 
-        // --- KATEGORI 2: Literal Header Field with Incremental Indexing (01xx xxxx) ---
+        // KATEGORI 2: Literal Header Field with Incremental Indexing (01xx xxxx)
         else if ((b & 0xC0) == 0x40) { 
             uint32_t index = hpack_decode_int(&pos, end, 0x3F);
             char *name = NULL;
@@ -311,21 +322,21 @@ bool http2_hpack_decode(HTTP2Session *session, HTTP2Stream *stream, const unsign
                 if (hpack_get_header(session, index, &s_name, &s_value)) name = strdup(s_name);
             }
             char *value = hpack_decode_string(&pos, end);
+            
             if (name && value) {
-                process_literal_header_with_index(index, value, req);
-                // UPDATE TABLE DINAMIS: Ini kunci biar Stream 3 kenal Stream 1
+                // PERBAIKAN: Gunakan pengecekan nama, bukan cuma index
+                //fprintf(stderr, "[H2-PARSER-TRACE] Found Header -> %s: %s\n", name, value);
+                process_literal_header_with_name(name, value, req);
                 hpack_dynamic_table_add(session, name, value);
             }
             if (name) free(name);
             if (value) free(value);
         }
-        // --- KATEGORI 3: Dynamic Table Size Update (001x xxxx) ---
-        // INI YANG ADA DI LOG KAMU (0xDB)
+        // KATEGORI 3: Dynamic Table Size Update (001x xxxx)
         else if ((b & 0xE0) == 0x20) { 
             hpack_decode_int(&pos, end, 0x1F); 
-            // Kita skip saja nilainya, tapi pointer pos sudah maju dengan benar
         }
-        // --- KATEGORI 4: Literal Header Field Never/Without Indexing (000x xxxx atau 0000 xxxx) ---
+        // KATEGORI 4: Literal Header Field Without Indexing
         else if ((b & 0xF0) == 0x00 || (b & 0xF0) == 0x10) {
             uint32_t index = hpack_decode_int(&pos, end, 0x0F);
             char *name = NULL;
@@ -336,56 +347,140 @@ bool http2_hpack_decode(HTTP2Session *session, HTTP2Stream *stream, const unsign
                 if (hpack_get_header(session, index, &s_name, &s_value)) name = strdup(s_name);
             }
             char *value = hpack_decode_string(&pos, end);
+            
             if (name && value) {
-                process_literal_header_with_index(index, value, req);
+                // TAMBAHAN FPRINTF UNTUK TRACE
+                //fprintf(stderr, "[H2-HPACK-TRACE] Kategori 4 -> Name: %s, Value: %s (Index: %u)\n", name, value, index);
+                
+                // PERBAIKAN: Gunakan _with_name agar string-nya dicek
+                process_literal_header_with_name(name, value, req);
             }
+            
             if (name) free(name);
             if (value) free(value);
         }
         else {
-            // Jika ada byte aneh, maju satu biar gak infinite loop
             pos++;
         }
     }
 
     pthread_mutex_unlock(&session->hpack_lock);
 
-    // Re-check validitas setelah decode selesai
-    req->is_valid = (req->method[0] != '\0' && req->uri != NULL);
+    // --- HALMOS LOGIC BRIDGE: SINKRONISASI URI, QUERY, & PATH_INFO ---
     
-    // Integrasi VHost (Tetap seperti kode kamu sebelumnya)
-    // Finalisasi VHost & Routing (Pastikan req->host ada)
-    // Di bagian akhir sebelum return
-    if (req->host && req->uri) {
-        VHostEntry *vh = (VHostEntry *)http_vhost_get_context(req->host);
-        req->vhost_context = vh;
-        RouteTable *match = http_route_match(vh, req->uri);
-        if (match) {
-            char t_uri[128], t_query[256], t_path[128];
-            http_route_apply_logic(match, req->uri, t_uri, t_query, t_path);
-            
-            // Perbaikan: Hapus uri lama sebelum strdup yang baru
-            // Tapi pastikan req->uri tidak menunjuk ke static_table atau route_result buffer
-            if (req->uri) free(req->uri); 
-            req->uri = strdup(t_uri);
-            
-            req->backend_type = match->fcgi_type;
+    if (req->uri) {
+        // 1. Ekstrak Query String jika ada (misal: /test.php?id=1)
+        char *qs = strchr(req->uri, '?');
+        if (qs) {
+            *qs = '\0';             // Putus string di tanda '?'
+            req->query_string = qs + 1;
         }
+
+        // 2. Deteksi Path Info untuk Backend (PHP/Rust/Python)
+        // Kita cari titik ekstensi untuk memisahkan file utama dengan path tambahan
+        const char *exts_list[] = {".php", ".rs", ".py", ".sh"};
+        req->path_info = NULL; 
+        for (int i = 0; i < 4; i++) {
+            char *ptr_ext = strcasestr(req->uri, exts_list[i]);
+            if (ptr_ext) {
+                size_t elen = strlen(exts_list[i]);
+                if (*(ptr_ext + elen) == '/') {
+                    req->path_info = ptr_ext + elen;
+                }
+                break;
+            }
+        }
+
+        // 3. Integrasi VHost & Routing
+        if (req->host) {
+            VHostEntry *vh = (VHostEntry *)http_vhost_get_context(req->host);
+            req->vhost_context = vh;
+
+            // Arahkan ke index default jika kosong
+            if (req->uri[0] == '\0' || strcmp(req->uri, "/") == 0) {
+                if (req->uri && req->uri != req->route_result) free(req->uri);
+                
+                snprintf(req->route_result, sizeof(req->route_result), "/index.html");
+                req->uri = req->route_result; 
+                req->path_info = NULL;
+            }
+
+            // Jalankan pencocokan Route (Regex/Alias) jika ada
+            RouteTable *match = http_route_match(vh, req->uri);
+            if (match) {
+                char t_query[256], t_path[256];
+                char *old_uri = req->uri; // Simpan alamat lama hasil HPACK parser
+                
+                // Simpan hasil transformasi URI langsung ke dalam route_result
+                http_route_apply_logic(match, old_uri, req->route_result, t_query, t_path);
+                
+                // Sekarang req->uri aman menunjuk ke buffer fisik
+                req->uri = req->route_result;
+                
+                // HANYA free jika old_uri adalah hasil strdup (bukan menunjuk ke route_result)
+                if (old_uri && old_uri != req->route_result) {
+                    free(old_uri);
+                }
+                
+                // SINKRONISASI QUERY STRING
+                if (t_query[0] != '\0') {
+                    char *new_qs = strchr(req->uri, '?');
+                    if (new_qs) {
+                        *new_qs = '\0';
+                        req->query_string = new_qs + 1;
+                    } else {
+                        // Gunakan query_string_buffer yang ada di struct
+                        strncpy(req->query_string_buffer, t_query, sizeof(req->query_string_buffer) - 1);
+                        req->query_string = req->query_string_buffer;
+                    }
+                }
+            }
+        }
+        
+        // Sinkronisasi pointer directory untuk module statis
+        req->directory = req->uri;
     }
 
-    // Re-check is_valid setelah VHost (Method dan URI harus ada)
+    // Validasi akhir: Request dianggap valid jika Method dan URI sudah terisi
     req->is_valid = (req->method[0] != '\0' && req->uri != NULL);
+    
     return req->is_valid;
 }
 
 void http2_parser_free_memory(HTTP2Stream *stream) {
     if (!stream) return;
     RequestHeader *req = &stream->http1_compat;
+
     #define IS_IN_ROUTE_RESULT(p) ((char*)(p) >= (char*)req->route_result && (char*)(p) < (char*)(req->route_result + sizeof(req->route_result)))
-    if (req->uri && !IS_IN_ROUTE_RESULT(req->uri)) free(req->uri);
-    if (req->host && !IS_IN_ROUTE_RESULT(req->host)) free(req->host);
-    if (req->content_type) free(req->content_type);
-    if (req->cookie_data) free(req->cookie_data);
-    if (req->parts) http_multipart_free_parts(req->parts, req->parts_count);
+
+    if (req->uri && !IS_IN_ROUTE_RESULT(req->uri)) {
+        free(req->uri);
+        req->uri = NULL;
+    }
+    if (req->host && !IS_IN_ROUTE_RESULT(req->host)) {
+        free(req->host);
+        req->host = NULL;
+    }
+    if (req->content_type) {
+        free(req->content_type);
+        req->content_type = NULL;
+    }
+    if (req->cookie_data) {
+        free(req->cookie_data);
+        req->cookie_data = NULL;
+    }
+
+    // Panggil fungsi FREE yang ada di HTTP/1 (halmos_http_multipart.c)
+    if (req->parts) {
+        http_multipart_free_parts(req->parts, req->parts_count);
+        req->parts = NULL; // Proteksi double-free
+        req->parts_count = 0;
+    }
+
+    if (req->body_data) {
+        free(req->body_data);
+        req->body_data = NULL;
+    }
+
     #undef IS_IN_ROUTE_RESULT
 }

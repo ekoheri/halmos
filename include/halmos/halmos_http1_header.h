@@ -39,6 +39,7 @@ typedef struct {
     char *host;
     char *directory;
     char *query_string;
+    char query_string_buffer[512];
     char *path_info;
     char *content_type;
     char *cookie_data;

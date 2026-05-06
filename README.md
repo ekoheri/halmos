@@ -1,4 +1,4 @@
-# Halmos Web Server Engine v0.2.4
+# Halmos Web Server Engine v0.2.8
 
 Halmos adalah engine web server berbasis C yang dirancang untuk performa tinggi dan integrasi sistem Linux yang erat.Batasan sistem ini hanya bisa berjalan di lingkungan Sistem Operasi Linux
 
@@ -61,10 +61,11 @@ make debug
 Catatan: make debug akan mengecek konflik port dengan service background secara otomatis.
 
 ## 5. Fitur Baru: Dynamic Routing, TLS/SSL dan Websocket
-Versi 0.2.2 memperkenalkan sistem manajemen yang lebih fleksibel:
+Versi 0.2.8 memperkenalkan sistem manajemen yang lebih fleksibel:
  - Dynamic Routing: Mendukung resolusi jalur fleksibel menggunakan konfigurasi eksternal /var/www/html/.htroute, memungkinkan pemetaan URL dinamis secara instan tanpa perlu kompilasi ulang atau restart server.
  - TLS/SSL Support: Mendukung enkripsi HTTPS menggunakan OpenSSL.
  - Websocket : Mendukung komunikasi full-duplex real-time berbasis RFC 6455 dengan manajemen registry FD yang efisien, fitur pub/sub terintegrasi, dan performa tinggi melalui arsitektur non-blocking epoll.
+ - HTTP/1.1 & HTTP/2 : Web server ini mendukung protokol HTTP/1.1 dan HTTP/2. Jika TLS/SSL diaktifkan, maka otomatis akan menjalankan protokol HTTP/2, sesuai dengan standard request dari browser. Jika TLS/SSL di-non aktifkan, maka akan menjalankan protokol HTTP/1.1   
 
 ## 6. Uji Web Server
 Setelah service berjalan, Anda dapat memverifikasi hasilnya dengan beberapa cara:

@@ -213,11 +213,13 @@ halmos_protocol_t bridge_detect(int fd, SSL *ssl) {
         SSL_get0_alpn_selected(ssl, &alpn_proto, &alpn_len);
 
         /*
+        NON AKTIFKAN INI JIKA HANYA MELAYANI HTTP1
+        */
         if (alpn_proto && alpn_len == 2 && memcmp(alpn_proto, "h2", 2) == 0) {
             // write_log_debug("[BRIDGE] ALPN Negotiated: HTTP/2");
             return PROTOCOL_HTTP2;
         }
-        */
+        /* ===== akhir dari ALPN==============*/
 
         // Jika ALPN gagal atau tidak ada, kita coba peek isinya (siapa tahu client maksa)
         n = SSL_peek(ssl, buf, 4);
@@ -244,9 +246,11 @@ halmos_protocol_t bridge_detect(int fd, SSL *ssl) {
     }
 
     // A. Deteksi HTTP/2 Preface (PRI * HTTP/2.0...)
-    /*if (memcmp(buf, "PRI ", 4) == 0) {
+    // NON AKTIFKAN INI JIKA MEMAKSA HANYA MELAYANI HTTP1
+    if (memcmp(buf, "PRI ", 4) == 0) {
         return PROTOCOL_HTTP2;
-    }*/
+    }
+    // AKHIR DARI DETEKSI HHTP2
     // Deteksi HTTP Methods
 
     // B. Deteksi HTTP/1 Methods (Existing)

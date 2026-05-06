@@ -103,6 +103,14 @@ int fcgi_io_splice_response(int fpm_fd, int sock_client, RequestHeader *req) {
                         if (fcgi_smart_send(sock_client, res_start, s_len, is_tls) < 0) break;
                         int h_only_len = (delim - header_buffer) + 4; 
                         if (fcgi_smart_send(sock_client, header_buffer, h_only_len, is_tls) < 0) break;
+                        
+                        // KHUSUS REDIRECT: Pastikan stream benar-benar tutup di sini
+                        if (is_redirect) {
+                            // Jika ternyata di header_buffer belum ada Content-Length, paksa kirim
+                            if (strcasestr(header_buffer, "Content-Length:") == NULL) {
+                                fcgi_smart_send(sock_client, "Content-Length: 0\r\n\r\n", 21, is_tls);
+                            }
+                        }
                         header_sent = true;
 
                         int body_in_buf = header_pos - h_only_len;
@@ -115,10 +123,26 @@ int fcgi_io_splice_response(int fpm_fd, int sock_client, RequestHeader *req) {
                         }
 
                         // Kuras sisa clen di record pertama
+                        /*
                         int remain = clen - to_read;
                         while (remain > 0) {
                             int pull = (remain > (int)sizeof(body_temp)) ? (int)sizeof(body_temp) : remain;
                             if (recv(fpm_fd, body_temp, pull, MSG_WAITALL) != pull) goto cleanup_error;
+                            remain -= pull;
+                        }*/
+                        int remain = clen - to_read;
+                        while (remain > 0) {
+                            int pull = (remain > (int)sizeof(body_temp)) ? (int)sizeof(body_temp) : remain;
+                            if (recv(fpm_fd, body_temp, pull, MSG_WAITALL) != pull) goto cleanup_error;
+                            
+                            // JANGAN CUMA DIKURAS, TAPI KIRIM!
+                            if (!is_redirect) {
+                                char sz[16];
+                                int sz_l = snprintf(sz, sizeof(sz), "%X\r\n", pull);
+                                fcgi_smart_send(sock_client, sz, sz_l, is_tls);
+                                fcgi_smart_send(sock_client, body_temp, pull, is_tls);
+                                fcgi_smart_send(sock_client, "\r\n", 2, is_tls);
+                            }
                             remain -= pull;
                         }
                     }

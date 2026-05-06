@@ -55,11 +55,6 @@ void *core_thread_pool_worker(void *arg) {
         clock_gettime(CLOCK_MONOTONIC, &end);
         global_telemetry.last_latency_ms = hitung_durasi(start, end);
         
-        if (global_telemetry.total_requests % 100 == 0) {
-            update_mem_usage();
-        }
-        write_log_telemetry();
-
         // 4. Tandai koki (thread) kembali IDLE
         mark_worker_idle(&global_queue);
     }

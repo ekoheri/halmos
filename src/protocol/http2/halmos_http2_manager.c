@@ -1,6 +1,7 @@
 #include "halmos_http2_manager.h"
 #include "halmos_http2_parser.h"
 #include "halmos_http2_response.h"
+#include "halmos_http_multipart.h"
 #include "halmos_sec_tls.h"
 #include "halmos_log.h"
 
@@ -18,7 +19,7 @@ void debug_hexdump(const char *label, const void *data, size_t len) {
 }
 
 static ssize_t h2_write(int fd, bool is_tls, const void *buf, size_t len) {
-    debug_hexdump("WRITE", buf, len);
+    //debug_hexdump("WRITE", buf, len);
     if (is_tls) return ssl_send(fd, buf, len);
     return write(fd, buf, len);
 }
@@ -37,8 +38,10 @@ static ssize_t h2_read(int fd, bool is_tls, void *buf, size_t len) {
 static void send_settings_ack(int fd, bool is_tls) {
     unsigned char ack[9] = {0,0,0, 4, 1, 0,0,0,0}; // Length 0, Type 4 (Settings), Flag 1 (ACK)
     h2_write(fd, is_tls, ack, 9);
-    fprintf(stdout, "[H2] Sent SETTINGS ACK to FD %d\n", fd);
+    //fprintf(stdout, "[H2] Sent SETTINGS ACK to FD %d\n", fd);
 }
+
+static void http2_send_window_update(int fd, bool is_tls, uint32_t stream_id, uint32_t increment);
 
 void http2_send_settings(int fd, bool is_tls) {
     // 9 byte Frame Header + 6 byte Payload (Total 15 byte)
@@ -53,7 +56,7 @@ void http2_send_settings(int fd, bool is_tls) {
         0x00, 0x00, 0x00, 0x00  // Value: 0
     };
     h2_write(fd, is_tls, settings, 15);
-    fprintf(stdout, "[H2] Initial SETTINGS (Table Size 0) sent to FD %d\n", fd);
+    //fprintf(stdout, "[H2] Initial SETTINGS (Table Size 0) sent to FD %d\n", fd);
 }
 
 /**
@@ -78,9 +81,9 @@ static ssize_t h2_read_exactly(int fd, bool is_tls, void *buf, size_t len) {
             continue; 
         }
     }
-    if (total_read > 0) {
+    /*if (total_read > 0) {
         debug_hexdump("READ ", buf, total_read); // Lihat apa yang dikirim client
-    }
+    }*/
     return (ssize_t)total_read;
 }
 
@@ -90,112 +93,189 @@ static ssize_t h2_read_exactly(int fd, bool is_tls, void *buf, size_t len) {
  */
 
 void h2_send_frame(int fd, bool is_tls, uint8_t type, uint8_t flags, uint32_t stream_id, const void *payload, uint32_t len) {
-    unsigned char frame[9];
+    (void)fd; 
+    (void)is_tls;
+    // Kita buat buffer gabungan (9 byte header + payload)
+    // Gunakan array statis besar atau malloc untuk payload besar
+    unsigned char total_buf[16384 + 9]; 
+    if (len > 16384) return; // Batasi sesuai max frame size default
 
-    // 1. Payload Length (24-bit)
-    frame[0] = (len >> 16) & 0xFF;
-    frame[1] = (len >> 8) & 0xFF;
-    frame[2] = len & 0xFF;
+    // 1. Isi Header di awal buffer
+    total_buf[0] = (len >> 16) & 0xFF;
+    total_buf[1] = (len >> 8) & 0xFF;
+    total_buf[2] = len & 0xFF;
+    total_buf[3] = type;
+    total_buf[4] = flags;
+    total_buf[5] = (stream_id >> 24) & 0x7F; 
+    total_buf[6] = (stream_id >> 16) & 0xFF;
+    total_buf[7] = (stream_id >> 8) & 0xFF;
+    total_buf[8] = stream_id & 0xFF;
 
-    // 2. Type & Flags
-    frame[3] = type;
-    frame[4] = flags;
+    // 2. Copy Payload setelah header
+    if (len > 0 && payload != NULL) {
+        memcpy(total_buf + 9, payload, len);
+    }
 
-    // 3. Stream ID (31-bit, bit ke-32 reserved/0)
-    frame[5] = (stream_id >> 24) & 0x7F; 
-    frame[6] = (stream_id >> 16) & 0xFF;
-    frame[7] = (stream_id >> 8) & 0xFF;
-    frame[8] = stream_id & 0xFF;
+    // --- TRACING HEX DUMP ---
+    /*fprintf(stderr, "[H2-SEND-TRACE] Type: 0x%02X, Flags: 0x%02X, Stream: %u, Total Len: %u\n", type, flags, stream_id, len + 9);
+    fprintf(stderr, "[H2-HEX-DUMP] ");
+    for (uint32_t i = 0; i < (len + 9 > 32 ? 32 : len + 9); i++) { // Dump 32 byte pertama saja biar nggak menuhi log
+        fprintf(stderr, "%02X ", total_buf[i]);
+    }
+    fprintf(stderr, "...\n");
+    */
 
-    // --- PERBAIKAN STRATEGI PENGIRIMAN ---
+    // 3. KIRIM SEKALIGUS (ATOMIC)
     
-    // Jika payload kecil (misal di bawah 1400 byte), 
-    // sebenarnya lebih bagus digabung pakai buffer lokal kecil agar jadi 1 paket TCP.
-    // Tapi untuk general use, kita pastikan header terkirim dulu.
-    
-    if (h2_write(fd, is_tls, frame, 9) < 9) {
-        // Log error jika kirim header saja gagal
-        // fprintf(stderr, "[H2 ERROR] Failed to send frame header to FD %d\n", fd);
+    ssize_t total_sent = h2_write(fd, is_tls, total_buf, len + 9);
+    if (total_sent < (ssize_t)(len + 9)) {
+        //fprintf(stderr, "[H2 ERROR] Partial write: %zd/%u\n", total_sent, len + 9);
+    }
+}
+
+void h2_send_data_chunked(int fd, bool is_tls, uint32_t stream_id, const void *payload, uint32_t total_len) {
+    const unsigned char *ptr = (const unsigned char *)payload;
+    uint32_t remaining = total_len;
+    uint32_t max_frame = 16384; // Batas standar HTTP/2 (16KB)
+
+    if (total_len == 0) {
+        // Kirim frame kosong dengan flag END_STREAM (0x01)
+        h2_send_frame(fd, is_tls, 0x00, 0x01, stream_id, NULL, 0);
         return;
     }
 
-    // 4. Kirim Payload jika ada
-    if (len > 0 && payload != NULL) {
-        // h2_write harus dipastikan bisa menangani partial write (looping send)
-        if (h2_write(fd, is_tls, payload, len) < (ssize_t)len) {
-            // Log error jika payload gagal terkirim utuh
-            // fprintf(stderr, "[H2 ERROR] Failed to send frame payload to FD %d\n", fd);
+    while (remaining > 0) {
+        uint32_t chunk = (remaining > max_frame) ? max_frame : remaining;
+        
+        // Flag 0x01 (END_STREAM) hanya disetel pada chunk TERAKHIR
+        uint8_t flags = (remaining == chunk) ? 0x01 : 0x00;
+
+        h2_send_frame(fd, is_tls, 0x00, flags, stream_id, ptr, chunk);
+
+        ptr += chunk;
+        remaining -= chunk;
+        
+        // Opsional: Log untuk memantau pemecahan data
+        // fprintf(stderr, "[H2-CHUNK] Sent %u bytes to Stream %u, Remaining: %u\n", chunk, stream_id, remaining);
+    }
+}
+
+static HTTP2Stream* find_stream(HTTP2Session *session, uint32_t id) {
+    for (int i = 0; i < 10; i++) {
+        if (session->streams[i].stream_id == id) {
+            return &session->streams[i];
         }
     }
+    return NULL;
 }
 
 void http2_handle_headers_frame(HTTP2Session *session, HTTP2FrameHeader *head, const unsigned char *payload) {
-    HTTP2Stream *stream = calloc(1, sizeof(HTTP2Stream));
-    if (!stream) return;
+    if (!session || head->stream_id == 0) return;
 
-    stream->stream_id = head->stream_id;
-    stream->http1_compat.is_tls = session->is_tls;
+    int idx = head->stream_id % 10;
+    HTTP2Stream *st = &session->streams[idx];
 
-    // 1. Jalankan Decode
-    if (http2_hpack_decode(session, stream, payload, head->length)) {
-        // 2. Cek apakah END_HEADERS flag aktif
-        if (head->flags & 0x04) {
-            
-            // 3. SAFETY CHECK: Jangan biarkan printf atau routing memproses string kosong '\0'
-            if (stream->http1_compat.method[0] == '\0' || stream->http1_compat.uri[0] == '\0') {
-                fprintf(stderr, "[H2 ERROR] Stream %u: Invalid Headers (NULL Method/URI)\n", stream->stream_id);
-            } else {
-                fprintf(stdout, "[H2] Stream %u: %s %s\n", 
-                        stream->stream_id, stream->http1_compat.method, stream->http1_compat.uri);
-
-                // 4. Hanya panggil bridge jika data VALID
-                http2_response_routing_bridge(session, stream);
-            }
-        }
-    } else {
-        fprintf(stderr, "[H2 ERROR] HPACK Decode failed for stream %u\n", head->stream_id);
+    // Jika slot ini sudah pernah dipakai Stream ID lain, bersihkan!
+    if (st->stream_id != 0 && st->stream_id != head->stream_id) {
+        http2_parser_free_memory(st);
+        memset(st, 0, sizeof(HTTP2Stream));
     }
 
-    // 5. Cleanup
-    http2_parser_free_memory(stream);
-    free(stream);
+    // Set identitas stream baru
+    st->stream_id = head->stream_id;
+    st->http1_compat.is_tls = session->is_tls;
+
+    // Lanjut decode HPACK
+    if (http2_hpack_decode(session, st, payload, head->length)) {
+        // Jika HEADERS frame punya flag END_STREAM (0x01), langsung proses (misal GET)
+        if (head->flags & 0x01) {
+            http2_response_routing_bridge(session, st);
+        }
+    }
+}
+
+void http2_handle_data_frame(HTTP2Session *session, HTTP2FrameHeader *head, const unsigned char *payload) {
+    HTTP2Stream *st = find_stream(session, head->stream_id);
+    if (!st || !payload) return;
+
+    RequestHeader *req = &st->http1_compat;
+
+    // 1. DYNAMIC REALLOC
+    size_t new_size = req->body_length + head->length;
+    unsigned char *temp_body = realloc(req->body_data, new_size + 1);
+    
+    if (!temp_body) {
+        write_log_error("[H2-ERROR] Realloc failed for Stream ID %d", head->stream_id);
+        return; 
+    }
+    req->body_data = temp_body;
+
+    // 2. COPY DATA
+    memcpy((char*)req->body_data + req->body_length, payload, head->length);
+    req->body_length = new_size;
+    ((char*)req->body_data)[req->body_length] = '\0';
+
+    // 3. LOGGING
+    //fprintf(stderr, "[H2-DATA] Stream %d received %u bytes. Total: %zu\n", 
+    //        head->stream_id, head->length, req->body_length);
+
+    // --- UPDATE DI SINI (KELUAR DARI IF) ---
+    // Kirim WINDOW_UPDATE SETIAP KALI data diterima (per frame)
+    // agar browser tahu Halmos masih punya ruang di buffer.
+    http2_send_window_update(session->fd, session->is_tls, head->stream_id, head->length);
+    http2_send_window_update(session->fd, session->is_tls, 0, head->length);
+    // ---------------------------------------
+
+    // 4. TRIGGER BRIDGE
+    if (head->flags & 0x01) { // END_STREAM diterima
+        req->content_length = (int)req->body_length; 
+
+        // Panggil bridge untuk kirim ke Backend (PHP, Py, Rust)
+        http2_response_routing_bridge(session, st);
+
+        // Setelah bridge selesai, kita harus membersihkan buffer agar tidak 
+        // dianggap request POST baru jika ada sisa fragment di buffer socket.
+        req->body_length = 0; 
+        if(req->body_data) {
+            free(req->body_data);
+            req->body_data = NULL;
+        }
+    }
 }
 
 int http2_manager_session(int sock_client, bool is_tls) {
-    fprintf(stdout, "[H2] --- New Session Started (FD: %d) ---\n", sock_client);
+    HTTP2Session *session = calloc(1, sizeof(HTTP2Session));
+    if (!session) return 0;
 
-    HTTP2Session session;
-    memset(&session, 0, sizeof(HTTP2Session));
-    session.fd = sock_client;
-    session.is_tls = is_tls;
+    session->fd = sock_client;
+    session->is_tls = is_tls;
 
-    // Alokasi tabel dinamis
-    session.dyn_table.entries = calloc(128, sizeof(HPACKEntry));
-    if (!session.dyn_table.entries) return 0;
+    // Init HPACK
+    session->dyn_table.entries = calloc(128, sizeof(HPACKEntry));
+    session->dyn_table.max_size = 0; 
 
-    // Paksa Table Size 0 di awal untuk stabilitas
-    session.dyn_table.max_size = 0; 
+    // Init Locks
+    pthread_mutex_init(&session->hpack_lock, NULL);
+    pthread_mutex_init(&session->streams_lock, NULL); // Jangan lupa ini
 
-    if (pthread_mutex_init(&session.hpack_lock, NULL) != 0) {
-        free(session.dyn_table.entries);
-        return 0;
-    }
-
+    // Kirim Settings & Baca Preface
     http2_send_settings(sock_client, is_tls);
-
     char preface[24];
     if (h2_read_exactly(sock_client, is_tls, preface, 24) < 24) goto cleanup;
 
     while (1) {
         unsigned char header_buf[9];
+        // Baca Frame Header (9 bytes)
         if (h2_read_exactly(sock_client, is_tls, header_buf, 9) < 9) break;
 
         HTTP2FrameHeader head;
         if (!http2_parse_frame_header(header_buf, &head)) break;
 
+        // Proteksi payload yang terlalu besar (misal > 1MB)
+        if (head.length > 1048576) break; 
+
         unsigned char *payload = NULL;
         if (head.length > 0) {
-            if (head.length > 1048576) break; // Limit 1MB payload safety
             payload = malloc(head.length);
             if (!payload) break;
             if (h2_read_exactly(sock_client, is_tls, payload, head.length) < (ssize_t)head.length) {
@@ -205,40 +285,36 @@ int http2_manager_session(int sock_client, bool is_tls) {
         }
 
         switch (head.type) {
-            case HTTP2_FRAME_SETTINGS:
-                if (!(head.flags & 0x01)) send_settings_ack(sock_client, is_tls);
-                break;
-            case HTTP2_FRAME_HEADERS:
-                // Tambahkan log untuk memastikan frame HEADERS masuk
-                fprintf(stdout, "[H2] Received HEADERS frame (Stream %u, Len %u)\n", head.stream_id, head.length);
-                
-                // Coba decode
-                http2_handle_headers_frame(&session, &head, payload);
-                
-                // TEST PANCINGAN: Jika setelah di-handle stream masih diam, 
-                // kita paksa kirim 404 sederhana agar Curl tidak menggantung.
-                // (Hanya untuk debug, nanti hapus lagi)
-                // http2_response_send_header(&session, stream, 404);
-                break;
-            case HTTP2_FRAME_GOAWAY:
-                if (payload) free(payload);
-                goto cleanup;
+            case 0x00: http2_handle_data_frame(session, &head, payload); break;
+            case 0x01: http2_handle_headers_frame(session, &head, payload); break;
+            case 0x04: if (!(head.flags & 0x01)) send_settings_ack(sock_client, is_tls); break;
+            case 0x07: if (payload) free(payload); goto cleanup;
+            default: /* Frame lain abaikan dulu */ break;
         }
         if (payload) free(payload);
     }
 
 cleanup:
-    pthread_mutex_destroy(&session.hpack_lock);
-    if (session.dyn_table.entries) {
-        // Bebaskan sisa-sisa strdup di tabel dinamis
-        for (uint32_t i = 0; i < session.dyn_table.count; i++) {
-            if (session.dyn_table.entries[i].name) free(session.dyn_table.entries[i].name);
-            if (session.dyn_table.entries[i].value) free(session.dyn_table.entries[i].value);
+    pthread_mutex_destroy(&session->hpack_lock);
+    pthread_mutex_destroy(&session->streams_lock);
+    for (int i = 0; i < 10; i++) {
+        if (session->streams[i].http1_compat.body_data) {
+            free(session->streams[i].http1_compat.body_data);
+            session->streams[i].http1_compat.body_data = NULL;
         }
-        free(session.dyn_table.entries);
     }
+    if (session->dyn_table.entries) free(session->dyn_table.entries);
+    free(session);
     return 0;
 }
 
+void http2_send_window_update(int fd, bool is_tls, uint32_t stream_id, uint32_t increment) {
+    unsigned char payload[4];
+    payload[0] = (increment >> 24) & 0x7F;
+    payload[1] = (increment >> 16) & 0xFF;
+    payload[2] = (increment >> 8) & 0xFF;
+    payload[3] = increment & 0xFF;
 
-
+    // Type 0x08 adalah WINDOW_UPDATE
+    h2_send_frame(fd, is_tls, 0x08, 0x00, stream_id, payload, 4);
+}
