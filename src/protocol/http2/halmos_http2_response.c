@@ -179,7 +179,7 @@ void http2_response_send_header(HTTP2Session *session, HTTP2Stream *stream, int 
     pos += mlen;
 
     // 4. KIRIM: Type 0x01 (HEADERS), Flag 0x04 (END_HEADERS)
-    h2_send_frame(session->fd, session->is_tls, 0x01, 0x04, stream->stream_id, hpack_buf, (uint32_t)pos);
+    http2_send_frame(session->fd, session->is_tls, 0x01, 0x04, stream->stream_id, hpack_buf, (uint32_t)pos);
     
     //fprintf(stderr, "[H2-DEBUG] Header sent for %s with mime %s\n", 
     //        stream->http1_compat.uri, mime_to_use);
@@ -192,7 +192,7 @@ void http2_response_send_data(HTTP2Session *session, HTTP2Stream *stream, const 
 
     // Kasus khusus: Data kosong tapi stream harus ditutup (END_STREAM)
     if (len == 0 && is_end) {
-        h2_send_frame(session->fd, session->is_tls, 0x00, 0x01, stream->stream_id, NULL, 0);
+        http2_send_frame(session->fd, session->is_tls, 0x00, 0x01, stream->stream_id, NULL, 0);
         return;
     }
 
@@ -204,7 +204,7 @@ void http2_response_send_data(HTTP2Session *session, HTTP2Stream *stream, const 
         // DAN parameter is_end bernilai true.
         uint8_t flags = (is_end && remaining == chunk) ? 0x01 : 0x00;
 
-        h2_send_frame(session->fd, session->is_tls, 0x00, flags, stream->stream_id, ptr, chunk);
+        http2_send_frame(session->fd, session->is_tls, 0x00, flags, stream->stream_id, ptr, chunk);
 
         ptr += chunk;
         remaining -= chunk;
@@ -303,7 +303,7 @@ void http2_response_send_complex_header(HTTP2Session *session, HTTP2Stream *stre
     
     //fprintf(stderr, "[H2-SEND-TRACE] Final Status: %d, Using Flags: 0x%02X\n", final_status, flags);
             
-    h2_send_frame(session->fd, session->is_tls, 0x01, flags, stream->stream_id, hpack_buf, (uint32_t)pos);
+    http2_send_frame(session->fd, session->is_tls, 0x01, flags, stream->stream_id, hpack_buf, (uint32_t)pos);
     
     //fprintf(stderr, "[TRACE-H2] complex_header DONE for Stream %u\n", stream->stream_id);
 }
