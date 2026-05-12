@@ -9,90 +9,40 @@
 #include <stdlib.h>
 #include <string.h>
 
-void debug_hexdump(const char *label, const void *data, size_t len) {
+/*void debug_hexdump(const char *label, const void *data, size_t len) {
     const unsigned char *p = (const unsigned char *)data;
     fprintf(stdout, "[DEBUG-HEX] %s (%zu bytes): ", label, len);
     for (size_t i = 0; i < len; i++) {
         fprintf(stdout, "%02X ", p[i]);
     }
     fprintf(stdout, "\n");
-}
+}*/
 
-static ssize_t h2_write(int fd, bool is_tls, const void *buf, size_t len) {
-    //debug_hexdump("WRITE", buf, len);
-    if (is_tls) return ssl_send(fd, buf, len);
-    return write(fd, buf, len);
-}
+static ssize_t h2_write(int fd, bool is_tls, const void *buf, size_t len);
 
-static ssize_t h2_read(int fd, bool is_tls, void *buf, size_t len) {
-    if (is_tls) {
-        // Ambil objek SSL yang sudah kamu simpan di mapping
-        SSL *ssl = ssl_get_for_fd(fd);
-        if (!ssl) return -1;
-        // Langsung panggil fungsi asli OpenSSL
-        return (ssize_t)SSL_read(ssl, buf, (int)len);
-    }
-    return read(fd, buf, len);
-}
+static ssize_t h2_read(int fd, bool is_tls, void *buf, size_t len);
 
-static void send_settings_ack(int fd, bool is_tls) {
-    unsigned char ack[9] = {0,0,0, 4, 1, 0,0,0,0}; // Length 0, Type 4 (Settings), Flag 1 (ACK)
-    h2_write(fd, is_tls, ack, 9);
-    //fprintf(stdout, "[H2] Sent SETTINGS ACK to FD %d\n", fd);
-}
+static void http2_send_settings(int fd, bool is_tls);
+
+static void send_settings_ack(int fd, bool is_tls);
 
 static void http2_send_window_update(int fd, bool is_tls, uint32_t stream_id, uint32_t increment);
-
-void http2_send_settings(int fd, bool is_tls) {
-    // 9 byte Frame Header + 6 byte Payload (Total 15 byte)
-    unsigned char settings[] = {
-        0x00, 0x00, 0x06,       // Length: 6 byte
-        0x04,                   // Type: SETTINGS (0x04)
-        0x00,                   // Flags: 0
-        0x00, 0x00, 0x00, 0x00, // Stream ID: 0
-        
-        // Payload: SETTINGS_HEADER_TABLE_SIZE (ID 1) = 0
-        0x00, 0x01,             // ID: 1
-        0x00, 0x00, 0x00, 0x00  // Value: 0
-    };
-    h2_write(fd, is_tls, settings, 15);
-    //fprintf(stdout, "[H2] Initial SETTINGS (Table Size 0) sent to FD %d\n", fd);
-}
 
 /**
  * Memastikan kita membaca tepat 'len' byte.
  * Jika kurang, dia akan mengulang sampai lengkap atau error.
  */
-static ssize_t h2_read_exactly(int fd, bool is_tls, void *buf, size_t len) {
-    size_t total_read = 0;
-    char *ptr = (char *)buf;
+static ssize_t h2_read_exactly(int fd, bool is_tls, void *buf, size_t len);
 
-    while (total_read < len) {
-        ssize_t n = h2_read(fd, is_tls, ptr + total_read, len - total_read);
-        
-        if (n > 0) {
-            total_read += n;
-        } else if (n == 0) {
-            return (ssize_t)total_read; // Koneksi putus
-        } else {
-            // Jika menggunakan OpenSSL, kamu harus cek SSL_ERROR_WANT_READ
-            // Tapi untuk sekarang, kita asumsikan ini block/retry
-            usleep(1000); // Kasih nafas 1ms buat nunggu buffer terisi
-            continue; 
-        }
-    }
-    /*if (total_read > 0) {
-        debug_hexdump("READ ", buf, total_read); // Lihat apa yang dikirim client
-    }*/
-    return (ssize_t)total_read;
-}
+static HTTP2Stream* find_stream(HTTP2Session *session, uint32_t id);
 
+/* Public function */
 /**
  * Fungsi tunggal untuk mengirim segala jenis HTTP/2 Frame.
  * Membungkus kerumitan bit-shifting Stream ID dan Length.
  */
 
-void h2_send_frame(int fd, bool is_tls, uint8_t type, uint8_t flags, uint32_t stream_id, const void *payload, uint32_t len) {
+void http2_send_frame(int fd, bool is_tls, uint8_t type, uint8_t flags, uint32_t stream_id, const void *payload, uint32_t len) {
     (void)fd; 
     (void)is_tls;
     // Kita buat buffer gabungan (9 byte header + payload)
@@ -133,46 +83,10 @@ void h2_send_frame(int fd, bool is_tls, uint8_t type, uint8_t flags, uint32_t st
     }
 }
 
-void h2_send_data_chunked(int fd, bool is_tls, uint32_t stream_id, const void *payload, uint32_t total_len) {
-    const unsigned char *ptr = (const unsigned char *)payload;
-    uint32_t remaining = total_len;
-    uint32_t max_frame = 16384; // Batas standar HTTP/2 (16KB)
-
-    if (total_len == 0) {
-        // Kirim frame kosong dengan flag END_STREAM (0x01)
-        h2_send_frame(fd, is_tls, 0x00, 0x01, stream_id, NULL, 0);
-        return;
-    }
-
-    while (remaining > 0) {
-        uint32_t chunk = (remaining > max_frame) ? max_frame : remaining;
-        
-        // Flag 0x01 (END_STREAM) hanya disetel pada chunk TERAKHIR
-        uint8_t flags = (remaining == chunk) ? 0x01 : 0x00;
-
-        h2_send_frame(fd, is_tls, 0x00, flags, stream_id, ptr, chunk);
-
-        ptr += chunk;
-        remaining -= chunk;
-        
-        // Opsional: Log untuk memantau pemecahan data
-        // fprintf(stderr, "[H2-CHUNK] Sent %u bytes to Stream %u, Remaining: %u\n", chunk, stream_id, remaining);
-    }
-}
-
-static HTTP2Stream* find_stream(HTTP2Session *session, uint32_t id) {
-    for (int i = 0; i < 10; i++) {
-        if (session->streams[i].stream_id == id) {
-            return &session->streams[i];
-        }
-    }
-    return NULL;
-}
-
 void http2_handle_headers_frame(HTTP2Session *session, HTTP2FrameHeader *head, const unsigned char *payload) {
     if (!session || head->stream_id == 0) return;
 
-    int idx = head->stream_id % 10;
+    int idx = head->stream_id % 100;
     HTTP2Stream *st = &session->streams[idx];
 
     // Jika slot ini sudah pernah dipakai Stream ID lain, bersihkan!
@@ -297,15 +211,72 @@ int http2_manager_session(int sock_client, bool is_tls) {
 cleanup:
     pthread_mutex_destroy(&session->hpack_lock);
     pthread_mutex_destroy(&session->streams_lock);
-    for (int i = 0; i < 10; i++) {
+
+    // 1. Bersihkan sisa data di setiap Stream (Body & HPACK strings)
+    for (int i = 0; i < 100; i++) { 
         if (session->streams[i].http1_compat.body_data) {
             free(session->streams[i].http1_compat.body_data);
             session->streams[i].http1_compat.body_data = NULL;
         }
+        http2_parser_free_memory(&session->streams[i]);
     }
-    if (session->dyn_table.entries) free(session->dyn_table.entries);
+
+    // 2. Bersihkan isi Dynamic Table (String hasil strdup)
+    if (session->dyn_table.entries) {
+        for (uint32_t i = 0; i < session->dyn_table.count; i++) {
+            if (session->dyn_table.entries[i].name) {
+                free(session->dyn_table.entries[i].name);
+            }
+            if (session->dyn_table.entries[i].value) {
+                free(session->dyn_table.entries[i].value);
+            }
+        }
+        // Baru kemudian free array-nya
+        free(session->dyn_table.entries);
+    }
+
     free(session);
     return 0;
+}
+
+/* Impementasi private fungtion - Helper */
+ssize_t h2_write(int fd, bool is_tls, const void *buf, size_t len){
+    //debug_hexdump("WRITE", buf, len);
+    if (is_tls) return ssl_send(fd, buf, len);
+    return write(fd, buf, len);
+}
+
+ssize_t h2_read(int fd, bool is_tls, void *buf, size_t len){
+    if (is_tls) {
+        // Ambil objek SSL yang sudah kamu simpan di mapping
+        SSL *ssl = ssl_get_for_fd(fd);
+        if (!ssl) return -1;
+        // Langsung panggil fungsi asli OpenSSL
+        return (ssize_t)SSL_read(ssl, buf, (int)len);
+    }
+    return read(fd, buf, len);
+}
+
+void http2_send_settings(int fd, bool is_tls) {
+    // 9 byte Frame Header + 6 byte Payload (Total 15 byte)
+    unsigned char settings[] = {
+        0x00, 0x00, 0x06,       // Length: 6 byte
+        0x04,                   // Type: SETTINGS (0x04)
+        0x00,                   // Flags: 0
+        0x00, 0x00, 0x00, 0x00, // Stream ID: 0
+        
+        // Payload: SETTINGS_HEADER_TABLE_SIZE (ID 1) = 0
+        0x00, 0x01,             // ID: 1
+        0x00, 0x00, 0x00, 0x00  // Value: 0
+    };
+    h2_write(fd, is_tls, settings, 15);
+    //fprintf(stdout, "[H2] Initial SETTINGS (Table Size 0) sent to FD %d\n", fd);
+}
+
+void send_settings_ack(int fd, bool is_tls){
+    unsigned char ack[9] = {0,0,0, 4, 1, 0,0,0,0}; // Length 0, Type 4 (Settings), Flag 1 (ACK)
+    h2_write(fd, is_tls, ack, 9);
+    //fprintf(stdout, "[H2] Sent SETTINGS ACK to FD %d\n", fd);
 }
 
 void http2_send_window_update(int fd, bool is_tls, uint32_t stream_id, uint32_t increment) {
@@ -316,5 +287,37 @@ void http2_send_window_update(int fd, bool is_tls, uint32_t stream_id, uint32_t 
     payload[3] = increment & 0xFF;
 
     // Type 0x08 adalah WINDOW_UPDATE
-    h2_send_frame(fd, is_tls, 0x08, 0x00, stream_id, payload, 4);
+    http2_send_frame(fd, is_tls, 0x08, 0x00, stream_id, payload, 4);
+}
+
+ssize_t h2_read_exactly(int fd, bool is_tls, void *buf, size_t len) {
+    size_t total_read = 0;
+    char *ptr = (char *)buf;
+
+    while (total_read < len) {
+        ssize_t n = h2_read(fd, is_tls, ptr + total_read, len - total_read);
+        
+        if (n > 0) {
+            total_read += n;
+        } else if (n == 0) {
+            return (ssize_t)total_read; // Koneksi putus
+        } else {
+            // Jika menggunakan OpenSSL, kamu harus cek SSL_ERROR_WANT_READ
+            // Tapi untuk sekarang, kita asumsikan ini block/retry
+            usleep(1000); // Kasih nafas 1ms buat nunggu buffer terisi
+            continue; 
+        }
+    }
+    /*if (total_read > 0) {
+        debug_hexdump("READ ", buf, total_read); // Lihat apa yang dikirim client
+    }*/
+    return (ssize_t)total_read;
+}
+
+HTTP2Stream* find_stream(HTTP2Session *session, uint32_t id) {
+    int idx = id % 100; // Langsung tuju slotnya, jangan loop!
+    if (session->streams[idx].stream_id == id) {
+        return &session->streams[idx];
+    }
+    return NULL;
 }

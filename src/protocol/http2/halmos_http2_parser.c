@@ -65,7 +65,7 @@ bool hpack_get_header(HTTP2Session *session, uint32_t index, const char **name, 
 /**
  * hpack_dynamic_table_add: Tambah entri & hitung entry_size sesuai struct-mu
  */
-void hpack_dynamic_table_add(HTTP2Session *session, const char *name, const char *value) {
+/*void hpack_dynamic_table_add(HTTP2Session *session, const char *name, const char *value) {
     if (!session || !name || !value) return;
 
     if (session->dyn_table.entries == NULL) {
@@ -92,6 +92,35 @@ void hpack_dynamic_table_add(HTTP2Session *session, const char *name, const char
         session->dyn_table.count++;
         // Kamu juga bisa mengupdate session->dyn_table.current_size di sini jika ada fieldnya
     }
+}*/
+
+void hpack_dynamic_table_add(HTTP2Session *session, const char *name, const char *value) {
+    if (!session || !name || !value) return;
+
+    if (session->dyn_table.entries == NULL) return;
+
+    // 1. Jika sudah penuh, buang entri terakhir (paling tua)
+    if (session->dyn_table.count >= 128) {
+        // Bebaskan memori entri ke-127 (index terakhir)
+        if (session->dyn_table.entries[127].name) free(session->dyn_table.entries[127].name);
+        if (session->dyn_table.entries[127].value) free(session->dyn_table.entries[127].value);
+        
+        session->dyn_table.count = 127; // Turunkan count agar bisa geser
+    }
+
+    // 2. Geser entri lama ke belakang (indeks n ke n+1)
+    for (int i = session->dyn_table.count; i > 0; i--) {
+        session->dyn_table.entries[i] = session->dyn_table.entries[i-1];
+    }
+
+    // 3. Masukkan entri baru di posisi paling depan (indeks 0)
+    session->dyn_table.entries[0].name = strdup(name);
+    session->dyn_table.entries[0].value = strdup(value);
+    
+    // 4. Update count jika belum mencapai limit
+    if (session->dyn_table.count < 128) {
+        session->dyn_table.count++;
+    }
 }
 
 /**
@@ -109,7 +138,7 @@ bool http2_parse_frame_header(const unsigned char *buf, HTTP2FrameHeader *out) {
 /**
  * Membaca integer dari payload HPACK
  */
-static uint32_t hpack_decode_int(const unsigned char **pos, const unsigned char *end, uint8_t prefix_mask) {
+/*static uint32_t hpack_decode_int(const unsigned char **pos, const unsigned char *end, uint8_t prefix_mask) {
     if (*pos >= end) return 0;
     const unsigned char *p = *pos;
     uint32_t res = (*p++) & prefix_mask;
@@ -130,6 +159,32 @@ static uint32_t hpack_decode_int(const unsigned char **pos, const unsigned char 
             break; 
         }
     }
+    *pos = p;
+    return res;
+}*/
+
+static uint32_t hpack_decode_int(const unsigned char **pos, const unsigned char *end, uint8_t prefix_mask) {
+    if (*pos >= end) return 0;
+    const unsigned char *p = *pos;
+    uint32_t res = (*p++) & prefix_mask;
+
+    if (res < prefix_mask) {
+        *pos = p;
+        return res;
+    }
+
+    uint32_t shift = 0;
+    while (p < end) { // Pengecekan batas buffer
+        unsigned char b = *p++;
+        res += (uint32_t)(b & 127) << shift;
+        if (!(b & 128)) {
+            *pos = p; // Update posisi hanya jika berhasil
+            return res;
+        }
+        shift += 7;
+        if (shift > 28) break; // Proteksi overflow
+    }
+    
     *pos = p;
     return res;
 }
@@ -235,46 +290,6 @@ static void process_indexed_header(HTTP2Session *session, uint32_t index, Reques
     } /*else {
         fprintf(stderr, "[H2-HPACK-ERR] Gagal ambil header untuk Index: %u\n", index);
     }*/
-}
-
-/**
- * Huffman Decoder (Trace enabled)
- */
-char* http2_huffman_decode(const unsigned char *src, size_t len) {
-    if (!src || len == 0) return NULL;
-    
-    // Alokasi memori (Huffman HTTP/2 maksimal mengembang ~1.6x)
-    // len * 2 + 1 sudah sangat aman.
-    char *dest = malloc(len * 2 + 1); 
-    if (!dest) return NULL;
-
-    size_t out_pos = 0;
-    uint16_t state = 0;
-    
-    for (size_t i = 0; i < len; i++) {
-        uint8_t b = src[i];
-        
-        // High nibble (4-bit pertama)
-        const nghttp2_huff_decode *t1 = &huff_decode_table[state][b >> 4];
-        if (t1->flags & NGHTTP2_HUFF_SYM) {
-            dest[out_pos++] = t1->sym;
-        }
-        state = t1->fstate;
-
-        // Low nibble (4-bit terakhir)
-        const nghttp2_huff_decode *t2 = &huff_decode_table[state][b & 0x0f];
-        if (t2->flags & NGHTTP2_HUFF_SYM) {
-            dest[out_pos++] = t2->sym;
-        }
-        state = t2->fstate;
-    }
-    
-    dest[out_pos] = '\0';
-
-    // Jika terjadi anomali (state tidak kembali ke awal/final), 
-    // namun tetap menghasilkan string, kita tetap kembalikan stringnya 
-    // agar sistem tidak crash/null.
-    return dest;
 }
 
 /**

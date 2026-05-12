@@ -4,25 +4,18 @@
 #include "halmos_http2_core.h"
 
 /**
- * Main Loop untuk HTTP/2
- * Menggantikan http1_manager_session
- */
-int http2_manager_session(int sock_client, bool is_tls);
-
-/**
- * Mengirim Frame SETTINGS (Wajib dikirim setelah handshake)
- */
-void http2_send_settings(int fd, bool is_tls);
-
-/**
  * Handler untuk tipe frame yang masuk
  */
-void h2_send_frame(int fd, bool is_tls, uint8_t type, uint8_t flags, uint32_t stream_id, const void *payload, uint32_t len);
-
-void h2_send_data_chunked(int fd, bool is_tls, uint32_t stream_id, const void *payload, uint32_t total_len);
+void http2_send_frame(int fd, bool is_tls, uint8_t type, uint8_t flags, uint32_t stream_id, const void *payload, uint32_t len);
 
 void http2_handle_headers_frame(HTTP2Session *session, HTTP2FrameHeader *head, const unsigned char *payload);
 
 void http2_handle_data_frame(HTTP2Session *session, HTTP2FrameHeader *head, const unsigned char *payload);
+
+/**
+ * Main Loop untuk HTTP/2
+ * Menggantikan http1_manager_session
+ */
+int http2_manager_session(int sock_client, bool is_tls);
 
 #endif
