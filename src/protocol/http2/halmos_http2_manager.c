@@ -26,6 +26,14 @@ static void http2_send_settings(int fd, bool is_tls);
 
 static void send_settings_ack(int fd, bool is_tls);
 
+/* --- INLINE HELPER FOR HASHING --- */
+/**
+ * Fungsi hitung index hash menggunakan Fibonacci Hashing (Golden Ratio).
+ * Sangat cepat karena di-compile inline tanpa overhead pemanggilan fungsi,
+ * serta mengeksploitasi kecepatan operasi integer multiplication dan bit-shifting di CPU.
+ */
+static uint32_t get_bucket_fibonacci(uint32_t stream_id);
+
 static void http2_send_window_update(int fd, bool is_tls, uint32_t stream_id, uint32_t increment);
 
 /**
@@ -86,23 +94,49 @@ void http2_send_frame(int fd, bool is_tls, uint8_t type, uint8_t flags, uint32_t
 void http2_handle_headers_frame(HTTP2Session *session, HTTP2FrameHeader *head, const unsigned char *payload) {
     if (!session || head->stream_id == 0) return;
 
-    int idx = head->stream_id % 100;
-    HTTP2Stream *st = &session->streams[idx];
+    // 1. Amankan pengecekan pertama menggunakan find_stream
+    HTTP2Stream *st = find_stream(session, head->stream_id);
 
-    // Jika slot ini sudah pernah dipakai Stream ID lain, bersihkan!
-    if (st->stream_id != 0 && st->stream_id != head->stream_id) {
-        http2_parser_free_memory(st);
-        memset(st, 0, sizeof(HTTP2Stream));
+    // 2. Jika belum terdaftar, lakukan penguncian penuh sebelum alokasi murni
+    if (!st) {
+        HTTP2Stream *new_st = calloc(1, sizeof(HTTP2Stream));
+        if (!new_st) {
+            write_log_error("[H2-ERROR] Malloc failed for new stream ID %u", head->stream_id);
+            return;
+        }
+        new_st->stream_id = head->stream_id;
+        new_st->http1_compat.is_tls = session->is_tls;
+
+        uint32_t bucket = get_bucket_fibonacci(head->stream_id);
+        
+        pthread_mutex_lock(&session->streams_lock);
+        
+        // DOUBLE CHECK: Pastikan tidak ada thread lain yang mendahului mendaftarkan ID ini
+        HTTP2Stream *check = session->streams_hash[bucket];
+        bool already_exists = false;
+        while (check != NULL) {
+            if (check->stream_id == head->stream_id) {
+                already_exists = true;
+                st = check; // Gunakan stream yang sudah ada
+                break;
+            }
+            check = check->node_next;
+        }
+
+        if (!already_exists) {
+            new_st->node_next = session->streams_hash[bucket];
+            session->streams_hash[bucket] = new_st;
+            session->active_stream_count++;
+            st = new_st;
+        } else {
+            free(new_st); // Buang alokasi baru karena keduluan thread lain
+        }
+        pthread_mutex_unlock(&session->streams_lock);
     }
 
-    // Set identitas stream baru
-    st->stream_id = head->stream_id;
-    st->http1_compat.is_tls = session->is_tls;
-
-    // Lanjut decode HPACK
+    // 3. Jalankan pipeline HPACK decode seperti biasa
     if (http2_hpack_decode(session, st, payload, head->length)) {
-        // Jika HEADERS frame punya flag END_STREAM (0x01), langsung proses (misal GET)
-        if (head->flags & 0x01) {
+        if (head->flags & 0x01) { 
             http2_response_routing_bridge(session, st);
         }
     }
@@ -129,26 +163,17 @@ void http2_handle_data_frame(HTTP2Session *session, HTTP2FrameHeader *head, cons
     req->body_length = new_size;
     ((char*)req->body_data)[req->body_length] = '\0';
 
-    // 3. LOGGING
-    //fprintf(stderr, "[H2-DATA] Stream %d received %u bytes. Total: %zu\n", 
-    //        head->stream_id, head->length, req->body_length);
-
-    // --- UPDATE DI SINI (KELUAR DARI IF) ---
     // Kirim WINDOW_UPDATE SETIAP KALI data diterima (per frame)
-    // agar browser tahu Halmos masih punya ruang di buffer.
     http2_send_window_update(session->fd, session->is_tls, head->stream_id, head->length);
     http2_send_window_update(session->fd, session->is_tls, 0, head->length);
-    // ---------------------------------------
 
-    // 4. TRIGGER BRIDGE
+    // 3. TRIGGER BRIDGE
     if (head->flags & 0x01) { // END_STREAM diterima
         req->content_length = (int)req->body_length; 
 
         // Panggil bridge untuk kirim ke Backend (PHP, Py, Rust)
         http2_response_routing_bridge(session, st);
 
-        // Setelah bridge selesai, kita harus membersihkan buffer agar tidak 
-        // dianggap request POST baru jika ada sisa fragment di buffer socket.
         req->body_length = 0; 
         if(req->body_data) {
             free(req->body_data);
@@ -170,7 +195,7 @@ int http2_manager_session(int sock_client, bool is_tls) {
 
     // Init Locks
     pthread_mutex_init(&session->hpack_lock, NULL);
-    pthread_mutex_init(&session->streams_lock, NULL); // Jangan lupa ini
+    pthread_mutex_init(&session->streams_lock, NULL); 
 
     // Kirim Settings & Baca Preface
     http2_send_settings(sock_client, is_tls);
@@ -209,16 +234,27 @@ int http2_manager_session(int sock_client, bool is_tls) {
     }
 
 cleanup:
-    pthread_mutex_destroy(&session->hpack_lock);
-    pthread_mutex_destroy(&session->streams_lock);
-
-    // 1. Bersihkan sisa data di setiap Stream (Body & HPACK strings)
-    for (int i = 0; i < 100; i++) { 
-        if (session->streams[i].http1_compat.body_data) {
-            free(session->streams[i].http1_compat.body_data);
-            session->streams[i].http1_compat.body_data = NULL;
+    // 1. ITERASI & BERSIHKAN HASH TABLE DYNAMIC BUCKETS (DILAKUKAN PERTAMA)
+    for (int i = 0; i < HTTP2_STREAM_BUCKETS; i++) { 
+        HTTP2Stream *curr = session->streams_hash[i];
+        while (curr != NULL) {
+            HTTP2Stream *next_node = curr->node_next; 
+            
+            // Bebaskan buffer body jika ada
+            if (curr->http1_compat.body_data) {
+                free(curr->http1_compat.body_data);
+                curr->http1_compat.body_data = NULL;
+            }
+            
+            // Bebaskan resource internal HPACK parser
+            http2_parser_free_memory(curr);
+            
+            // Bebaskan objek stream dinamis itu sendiri
+            free(curr);
+            
+            curr = next_node;
         }
-        http2_parser_free_memory(&session->streams[i]);
+        session->streams_hash[i] = NULL;
     }
 
     // 2. Bersihkan isi Dynamic Table (String hasil strdup)
@@ -231,9 +267,12 @@ cleanup:
                 free(session->dyn_table.entries[i].value);
             }
         }
-        // Baru kemudian free array-nya
         free(session->dyn_table.entries);
     }
+
+    // 3. HANCURKAN MUTEX LOCKS (SETELAH DATA BERSIH)
+    pthread_mutex_destroy(&session->hpack_lock);
+    pthread_mutex_destroy(&session->streams_lock);
 
     free(session);
     return 0;
@@ -290,6 +329,11 @@ void http2_send_window_update(int fd, bool is_tls, uint32_t stream_id, uint32_t 
     http2_send_frame(fd, is_tls, 0x08, 0x00, stream_id, payload, 4);
 }
 
+uint32_t get_bucket_fibonacci(uint32_t stream_id) {
+    uint32_t hash = stream_id * HTTP2_GOLDEN_RATIO_32;
+    return hash >> (32 - HTTP2_HASH_POWER);
+}
+
 ssize_t h2_read_exactly(int fd, bool is_tls, void *buf, size_t len) {
     size_t total_read = 0;
     char *ptr = (char *)buf;
@@ -314,10 +358,29 @@ ssize_t h2_read_exactly(int fd, bool is_tls, void *buf, size_t len) {
     return (ssize_t)total_read;
 }
 
-HTTP2Stream* find_stream(HTTP2Session *session, uint32_t id) {
+/*HTTP2Stream* find_stream(HTTP2Session *session, uint32_t id) {
     int idx = id % 100; // Langsung tuju slotnya, jangan loop!
     if (session->streams[idx].stream_id == id) {
         return &session->streams[idx];
     }
+    return NULL;
+}*/
+
+HTTP2Stream* find_stream(HTTP2Session *session, uint32_t id) {
+    if (!session || id == 0) return NULL;
+
+    // Hitung bucket memakai Golden Ratio Hashing
+    uint32_t bucket = get_bucket_fibonacci(id);
+    
+    pthread_mutex_lock(&session->streams_lock);
+    HTTP2Stream *curr = session->streams_hash[bucket];
+    while (curr != NULL) {
+        if (curr->stream_id == id) {
+            pthread_mutex_unlock(&session->streams_lock);
+            return curr;
+        }
+        curr = curr->node_next;
+    }
+    pthread_mutex_unlock(&session->streams_lock);
     return NULL;
 }
