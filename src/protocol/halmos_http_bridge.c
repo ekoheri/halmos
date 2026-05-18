@@ -5,6 +5,7 @@
 #include "halmos_global.h"
 #include "halmos_core_config.h" 
 #include "halmos_http1_manager.h"
+#include "halmos_http2_manager.h"
 #include "halmos_http_bridge.h"
 #include "halmos_core_event_loop.h"
 #include "halmos_log.h"
@@ -189,6 +190,10 @@ int http_bridge_dispatch(int sock_client) {
         return http1_manager_session(sock_client, is_actually_tls);
     }
 
+    if (proto == PROTOCOL_HTTP2) {
+        return http2_manager_session(sock_client, is_actually_tls);
+    }
+
     return 0;
 }
 
@@ -203,12 +208,29 @@ halmos_protocol_t bridge_detect(int fd, SSL *ssl) {
     //fprintf(stderr, "[DEBUG-DETECT] Mencoba deteksi protokol pada FD %d...\n", fd);
     // Jika pakai TLS, kita peek lewat OpenSSL
     if (ssl) {
+        const unsigned char *alpn_proto = NULL;
+        unsigned int alpn_len = 0;
+        SSL_get0_alpn_selected(ssl, &alpn_proto, &alpn_len);
+
+        /*
+        NON AKTIFKAN INI JIKA HANYA MELAYANI HTTP1
+        */
+        if (alpn_proto && alpn_len == 2 && memcmp(alpn_proto, "h2", 2) == 0) {
+            // write_log_debug("[BRIDGE] ALPN Negotiated: HTTP/2");
+            return PROTOCOL_HTTP2;
+        }
+        /* ===== akhir dari ALPN==============*/
+
+        // Jika ALPN gagal atau tidak ada, kita coba peek isinya (siapa tahu client maksa)
         n = SSL_peek(ssl, buf, 4);
         if (n <= 0) {
             int err = SSL_get_error(ssl, n);
             if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) return PROTOCOL_RETRY;
             return PROTOCOL_UNKNOWN;
         }
+
+        // Paksa return HTTP1 kalau SSL berhasil
+        return PROTOCOL_HTTP1;
     } else {
         // Plaintext peek
         n = recv(fd, buf, 4, MSG_PEEK | MSG_DONTWAIT);
@@ -222,8 +244,16 @@ halmos_protocol_t bridge_detect(int fd, SSL *ssl) {
         //fprintf(stderr, "[DEBUG-DETECT] FD %d: Data kurang dari 4 byte (n=%zd). Retry.\n", fd, n);
         return PROTOCOL_RETRY;
     }
+
+    // A. Deteksi HTTP/2 Preface (PRI * HTTP/2.0...)
+    // NON AKTIFKAN INI JIKA MEMAKSA HANYA MELAYANI HTTP1
+    if (memcmp(buf, "PRI ", 4) == 0) {
+        return PROTOCOL_HTTP2;
+    }
+    // AKHIR DARI DETEKSI HHTP2
     // Deteksi HTTP Methods
 
+    // B. Deteksi HTTP/1 Methods (Existing)
     //fprintf(stderr, "[DEBUG-DETECT] FD %d: 4 byte pertama: [%.4s]\n", fd, buf);
     if (memcmp(buf, "GET ", 4) == 0 || memcmp(buf, "POST", 4) == 0 || 
         memcmp(buf, "HTTP", 4) == 0 || memcmp(buf, "PUT ", 4) == 0 ||

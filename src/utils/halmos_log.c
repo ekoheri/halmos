@@ -8,8 +8,11 @@
 #include <pthread.h>
 #include <stdbool.h>
 #include <sys/resource.h>
+#include <unistd.h>  // <--- TAMBAHKAN INI UNTUK FUNGSI sleep()
 
 // Header fungsi helper
+
+static pthread_t monitor_tid;
 static void* log_thread_routine(void* arg);
 static void enqueue_log(LogType type, const char *format, va_list args);
 
@@ -80,19 +83,41 @@ void write_log_telemetry() {
     enqueue_log(LOG_TYPE_METRICS, meta_buffer, (va_list){0});
 }
 
-void start_thread_logger() {
-    /*pthread_t log_tid;
+void* telemetry_monitor_thread(void* arg) {
+    (void)arg;
+    write_log("[CORE] Telemetry monitor thread started.");
     
+    struct timespec ts;
+    
+    while (log_keep_running) {
+        write_log_telemetry();
+
+        // Ambil waktu sekarang untuk dasar timeout
+        clock_gettime(CLOCK_REALTIME, &ts);
+        ts.tv_sec += 15; // Set timeout 15 detik dari sekarang
+
+        pthread_mutex_lock(&global_log_queue.mutex);
+        
+        // Tunggu selama 15 detik, TAPI bangun jika ada broadcast (stop_thread_logger)
+        // pthread_cond_timedwait akan return ETIMEDOUT jika waktu habis (ini yang kita mau)
+        pthread_cond_timedwait(&global_log_queue.cond, &global_log_queue.mutex, &ts);
+        
+        pthread_mutex_unlock(&global_log_queue.mutex);
+        
+        // Begitu bangun, loop akan cek log_keep_running. 
+        // Jika false (karena shutdown), dia langsung exit tanpa nunggu 15 detik.
+    }
+    return NULL;
+}
+
+void start_thread_logger() {
     if (pthread_create(&log_tid, NULL, log_thread_routine, NULL) != 0) {
-        // Pakai fprintf atau tulis ke stderr karena logger sendiri belum siap
         fprintf(stderr, "FATAL: Gagal menjalankan thread logger!\n");
     }
 
-    // Detach supaya resource thread otomatis bebas saat thread selesai
-    pthread_detach(log_tid);
-    */
-    if (pthread_create(&log_tid, NULL, log_thread_routine, NULL) != 0) {
-        fprintf(stderr, "FATAL: Gagal menjalankan thread logger!\n");
+    // Thread tambahan untuk monitor telemetry setiap 5 detik
+    if (pthread_create(&monitor_tid, NULL, telemetry_monitor_thread, NULL) != 0) {
+        fprintf(stderr, "ERROR: Gagal menjalankan thread monitor telemetry!\n");
     }
 }
 
@@ -210,13 +235,12 @@ void enqueue_log(LogType type, const char *format, va_list args) {
 void stop_thread_logger() {
     pthread_mutex_lock(&global_log_queue.mutex);
     log_keep_running = false; 
-    pthread_cond_signal(&global_log_queue.cond); 
+    // Pakai broadcast agar semua thread bangun dan melihat log_keep_running sudah false
+    pthread_cond_broadcast(&global_log_queue.cond); 
     pthread_mutex_unlock(&global_log_queue.mutex);
 
-    // Sekarang compiler nggak akan marah lagi karena log_tid sudah dikenal
     pthread_join(log_tid, NULL);
-    
-    //fprintf(stderr, "[HALMOS] Logger thread joined. Goodbye.\n");
+    pthread_join(monitor_tid, NULL);
 }
 
 //helper

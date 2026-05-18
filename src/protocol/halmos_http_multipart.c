@@ -2,12 +2,14 @@
 #define _GNU_SOURCE
 #endif
 
+#include "halmos_http_multipart.h"
+#include "halmos_http_utils.h"
+#include "halmos_http2_core.h"
+#include "halmos_log.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "halmos_http_multipart.h"
-#include "halmos_http_utils.h"
-#include "halmos_log.h"
 
 void http_multipart_parse_body(RequestHeader *req) {
     if (!req->content_type || !req->body_data || req->body_length == 0) return;
@@ -126,4 +128,98 @@ void http_multipart_free_parts(MultipartPart *parts, int count) {
         // parts[i].data JANGAN di-free karena itu Zero-Copy (Nempel buffer utama)
     }
     free(parts); // Bebaskan array-nya
+}
+
+/**
+ * http2_multipart_parse
+ * Parser khusus untuk HTTP/2 yang lebih toleran terhadap struktur frame-based.
+ */
+void http2_multipart_parse(RequestHeader *req) {
+    if (!req->content_type || !req->body_data || req->body_length == 0) return;
+
+    // 1. Ekstraksi Boundary dari Header Content-Type
+    char *boundary_ptr = strstr(req->content_type, "boundary=");
+    if (!boundary_ptr) return;
+
+    char boundary[256];
+    memset(boundary, 0, sizeof(boundary));
+    char *src = boundary_ptr + 9;
+    int b_idx = 0;
+    boundary[b_idx++] = '-';
+    boundary[b_idx++] = '-';
+    while (src[b_idx-2] && src[b_idx-2] != ' ' && src[b_idx-2] != ';' && src[b_idx-2] != '\r' && b_idx < 250) {
+        boundary[b_idx] = src[b_idx-2];
+        b_idx++;
+    }
+    int b_len = b_idx;
+
+    char *current_pos = (char *)req->body_data;
+    size_t remaining_len = req->body_length;
+
+    // Alokasi awal untuk part (Sesuai gaya Halmos: 10 part awal)
+    req->parts = calloc(10, sizeof(MultipartPart));
+    req->parts_count = 0;
+
+    while (remaining_len > (size_t)b_len) {
+        char *part_start = memmem(current_pos, remaining_len, boundary, b_len);
+        if (!part_start) break;
+
+        if (req->parts_count > 0 && req->parts_count % 10 == 0) {
+            MultipartPart *tmp = realloc(req->parts, sizeof(MultipartPart) * (req->parts_count + 10));
+            if (!tmp) return; 
+            req->parts = tmp;
+            // SARAN: Bersihkan memori baru hasil realloc
+            memset(&req->parts[req->parts_count], 0, sizeof(MultipartPart) * 10);
+        }
+
+        char *header_start = part_start + b_len;
+        while (header_start < (char*)req->body_data + req->body_length && (*header_start == '\r' || *header_start == '\n')) {
+            header_start++;
+        }
+
+        char *header_end = memmem(header_start, req->body_length - (header_start - (char*)req->body_data), "\r\n\r\n", 4);
+        if (!header_end) break;
+
+        MultipartPart *p = &req->parts[req->parts_count];
+
+        // Parsing name=" dan filename=" (Logika internal strstr tetap sama)
+        char *n_ptr = strstr(header_start, "name=\"");
+        if (n_ptr && n_ptr < header_end) {
+            char *n_end = strchr(n_ptr + 6, '\"');
+            if (n_end) {
+                size_t n_len = n_end - (n_ptr + 6);
+                p->name = malloc(n_len + 1);
+                memcpy(p->name, n_ptr + 6, n_len);
+                p->name[n_len] = '\0';
+            }
+        }
+
+        char *f_ptr = strstr(header_start, "filename=\"");
+        if (f_ptr && f_ptr < header_end) {
+            char *f_end = strchr(f_ptr + 10, '\"');
+            if (f_end) {
+                size_t f_len = f_end - (f_ptr + 10);
+                p->filename = malloc(f_len + 1);
+                memcpy(p->filename, f_ptr + 10, f_len);
+                p->filename[f_len] = '\0';
+            }
+        }
+
+        p->data = header_end + 4;
+        size_t search_len = req->body_length - ((char*)p->data - (char*)req->body_data);
+        char *next_boundary = memmem(p->data, search_len, boundary, b_len);
+        
+        if (next_boundary) {
+            if (next_boundary >= (char*)p->data + 2 && *(next_boundary - 2) == '\r') {
+                p->data_len = (size_t)((next_boundary - 2) - (char*)p->data);
+            } else {
+                p->data_len = (size_t)(next_boundary - (char*)p->data);
+            }
+            remaining_len = req->body_length - (next_boundary - (char*)req->body_data);
+            current_pos = next_boundary;
+            req->parts_count++;
+        } else {
+            break;
+        }
+    }
 }
