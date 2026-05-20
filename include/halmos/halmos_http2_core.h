@@ -25,6 +25,16 @@
 #define HTTP2_FLAG_PADDED         0x08
 #define HTTP2_FLAG_PRIORITY       0x20
 
+/* --- CONFIGURATION FOR GOLDEN RATIO HASH TABLE --- */
+/**
+ * Ukuran bucket ditentukan berdasarkan pangkat 2 agar optimasi bitwise shift bekerja.
+ * 2^5 = 32 Buckets. Mengingat concurrent stream per session rata-rata dibatasi 100 
+ * oleh browser, 32 bucket dikombinasikan dengan Golden Ratio sudah sangat optimal.
+ */
+#define HTTP2_HASH_POWER          5             
+#define HTTP2_STREAM_BUCKETS      (1 << HTTP2_HASH_POWER)
+#define HTTP2_GOLDEN_RATIO_32     2654435769U   // (2^32) * (\phi - 1)
+
 /**
  * Representasi Header Frame HTTP/2 (9 Bytes)
  */
@@ -79,7 +89,7 @@ typedef struct HTTP2Stream {
     RequestHeader http1_compat; 
     
     int32_t window_size;
-    struct HTTP2Stream *next; // Point ke stream aktif lainnya
+    struct HTTP2Stream *node_next; // Point ke stream aktif lainnya
 } HTTP2Stream;
 
 /**
@@ -96,8 +106,9 @@ typedef struct {
     pthread_mutex_t hpack_lock;
 
     /* --- STREAM MANAGEMENT (Multiplexing) --- */
-    HTTP2Stream streams[100];
+    HTTP2Stream *streams_hash[HTTP2_STREAM_BUCKETS];
     pthread_mutex_t streams_lock; 
+    uint32_t active_stream_count;   // Counter dinamis stream yang sedang berjalan saat ini
     
     uint32_t last_stream_id;
     int32_t  remote_window_size;

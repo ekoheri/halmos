@@ -5,7 +5,9 @@ const msgInput = document.getElementById('msgInput');
 
 // 1. Inisialisasi Koneksi
 // Pakai ws:// jika testing lokal, wss:// jika sudah pakai TLS
-ws = new WebSocket("ws://localhost:8080"); 
+// Biarkan browser mendeteksi otomatis apakah harus pakai ws:// atau wss://
+const wsProtocol = window.location.protocol === "https:" ? "wss://" : "ws://";
+ws = new WebSocket(wsProtocol + window.location.host + "/ws");
 
 ws.onopen = () => {
     addLog("Connected to Halmos Server!", "info");
