@@ -18,4 +18,5 @@ void http2_handle_data_frame(HTTP2Session *session, HTTP2FrameHeader *head, cons
  */
 int http2_manager_session(int sock_client, bool is_tls);
 
+uint32_t get_bucket_fibonacci(uint32_t stream_id);
 #endif

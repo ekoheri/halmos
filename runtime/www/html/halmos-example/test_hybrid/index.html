@@ -34,9 +34,12 @@
             const user = document.getElementById('username').value;
             if (!user) return alert("Isi username dulu!");
 
-            // 1. Buka Koneksi ke Server Halmos (Sesuaikan IP/Port)
-            ws = new WebSocket("ws://localhost:8080");
-
+            // 1. DETEKSI PROTOKOL OTOMATIS (Mencegah GOAWAY akibat Mixed Content)
+            const wsProtocol = window.location.protocol === "https:" ? "wss://" : "ws://";
+            const wsUrl = wsProtocol + window.location.host + "/ws";
+            
+            addLog("Mencoba tersambung ke " + wsUrl + "...");
+            ws = new WebSocket(wsUrl);
             ws.onopen = () => {
                 addLog("Connected to Halmos!");
                 
