@@ -66,6 +66,22 @@ static inline ws_action_ipc_t get_action_code(const char *s) {
     return ACT_UNKNOWN;
 }
 
+/**
+ * Wrapper send yang mendukung HTTP/1.1 (Plain/TLS) secara transparan.
+ * Fungsi ini bertindak sebagai I/O writer internal sistem WebSocket.
+ */
+static ssize_t ws_low_level_send(int fd, const void *buf, size_t len) {
+    SSL *ssl = ssl_get_for_fd(fd);
+
+    if (ssl != NULL) {
+        // Jalur HTTPS / WSS (HTTP/1.1)
+        return (ssize_t)SSL_write(ssl, buf, (int)len);
+    }
+
+    // Jalur HTTP / WS (HTTP/1.1 Plaintext)
+    return send(fd, buf, len, MSG_NOSIGNAL);
+}
+
 /* ===================================================================
  * 1. Level 1: System Entry & Lifecycle (The Master Switches)
  * Ini adalah fungsi yang dipanggil dari luar
@@ -646,6 +662,13 @@ int ws_system_send_text(int sock_client, SSL *ssl, const char *text) {
         if (send(sock_client, frame_header, header_idx, MSG_NOSIGNAL) <= 0) return -1;
         if (send(sock_client, text, len, MSG_NOSIGNAL) <= 0) return -1;
     }
+
+    // 3. PENGIRIMAN DATA VIA LAYER ABSTRAKSI
+    // Kirim header WebSocket terlebih dahulu
+    if (ws_low_level_send(sock_client, frame_header, header_idx) <= 0) return -1;
+    
+    // Kirim payload teksnya
+    if (ws_low_level_send(sock_client, text, len) <= 0) return -1;
 
     return 0;
 }

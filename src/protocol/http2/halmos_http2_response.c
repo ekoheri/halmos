@@ -1,6 +1,7 @@
 #include "halmos_http1_response.h"
 #include "halmos_http2_response.h"
 #include "halmos_http2_manager.h"
+#include "halmos_http2_parser.h"
 #include "halmos_global.h"
 #include "halmos_http_utils.h"
 #include "halmos_http_multipart.h"
@@ -23,8 +24,38 @@
 
 static void http2_response_send_complex_header(HTTP2Session *session, HTTP2Stream *stream, char *raw_headers);
 
+static void http2_stream_detach_and_destroy(HTTP2Session *session, uint32_t stream_id);
+
+/*
+Public Function
+*/
 void http2_response_routing_bridge(HTTP2Session *session, HTTP2Stream *stream) {
     RequestHeader *req = &stream->http1_compat;
+
+    // =================================================================
+    // INTERSEPSI HANDSHAKE WEBSOCKET HTTP/2 (RFC 8441)
+    // =================================================================
+    if (req->is_upgrade == true) {
+        //fprintf(stderr, "[H2-WS] Menangani Handshake WebSocket pada Stream %u dengan URI: %s\n", 
+        //        stream->stream_id, req->uri ? req->uri : "NULL");
+
+        // Kirim :status: 200 OK ke browser untuk menyetujui pembukaan tunnel biner.
+        // PERINGATAN: Jangan gunakan http2_response_send_header(session, stream, 200) 
+        // jika fungsi tersebut otomatis mengirimkan flag END_STREAM (0x01). 
+        // Jalur WebSocket HTTP/2 HARUS tetap terbuka (END_STREAM = false).
+        
+        // Kita rakit manual HPACK minimalis untuk ":status: 200" (Index 8 di Static Table)
+        unsigned char ws_ok_payload[1] = { 0x88 }; // 0x88 adalah Indexed Header untuk Status 200
+        
+        // Kirim HEADERS Frame (Type 0x01) dengan Flag END_HEADERS (0x04) saja. NO END_STREAM!
+        http2_send_frame(session->fd, session->is_tls, 0x01, 0x04, stream->stream_id, ws_ok_payload, 1);
+        
+        //fprintf(stderr, "[H2-WS] Handshake 200 OK sukses dikirim ke Stream %u. Tunnel aktif!\n", stream->stream_id);
+        
+        // Jangan ubah stream->state menjadi 4 (HALF_CLOSED/CLOSED). Biarkan tetap terbuka (OPEN).
+        return; 
+    }
+    // =================================================================
     
     // 1. IDENTIFIKASI BACKEND
     int backend_type = -1; 
@@ -89,6 +120,10 @@ void http2_response_routing_bridge(HTTP2Session *session, HTTP2Stream *stream) {
             http2_response_send_header(session, stream, 502);
             http2_response_send_data(session, stream, "Bad Gateway", 11, true);
         }
+
+        // --- SEBELUM RETURN, ANCURKAN STREAM SECARA TERHORMAT ---
+        uint32_t dead_stream_id = stream->stream_id;
+        http2_stream_detach_and_destroy(session, dead_stream_id);
         return;
     }
 
@@ -113,6 +148,7 @@ void http2_response_routing_bridge(HTTP2Session *session, HTTP2Stream *stream) {
     // 6. KIRIM DATA FILE STATIS
     int fd = open(safe_path, O_RDONLY);
     if (fd == -1) {
+        //fprintf(stderr, "[H2-STATIC-DEBUG] Gagal buka file (403 Forbidden): %s\n", safe_path);
         http2_response_send_data(session, stream, "Forbidden", 9, true);
     } else {
         unsigned char buffer[16384];
@@ -121,19 +157,40 @@ void http2_response_routing_bridge(HTTP2Session *session, HTTP2Stream *stream) {
         size_t file_size = (size_t)st.st_size;
 
         if (file_size == 0) {
+            //fprintf(stderr, "[H2-STATIC-DEBUG] File size 0, mengirim data kosong dengan END_STREAM\n");
             http2_response_send_data(session, stream, NULL, 0, true);
         } else {
+            // Jalankan read loop dengan is_end = false agar aman dari interupsi chunking
+            int chunk_count = 0;
             while ((n = read(fd, buffer, sizeof(buffer))) > 0) {
+                chunk_count++;
                 total_sent += n;
-                bool is_end = (total_sent >= file_size);
-                //fprintf(stderr, "[H2-TRACE] Sending static data chunk, size: %zd, end: %d\n", n, is_end);
-                http2_response_send_data(session, stream, buffer, (size_t)n, is_end);
+                bool is_last_byte = (total_sent >= file_size);
+
+                //fprintf(stderr, "[H2-STATIC-DEBUG] Loop Read Loop-%d: n=%zd, total_sent=%zu/%zu, is_last_byte=%s\n", 
+                //    chunk_count, n, total_sent, file_size, is_last_byte ? "TRUE" : "FALSE");
+                
+                http2_response_send_data(session, stream, buffer, (size_t)n, is_last_byte);
+            }
+            //fprintf(stderr, "[H2-STATIC-DEBUG] Keluar dari loop read(). Total read selesai: %zu bytes\n", total_sent);
+
+            // SAFETY NET: Jika karena alasan tertentu loop read selesai tapi END_STREAM belum terkirim
+            // (misalnya ukuran file di disk berubah secara dinamis saat dibaca)
+            if (total_sent < file_size) {
+                //fprintf(stderr, "[H2-STATIC-WARN] File size mismatch, forcing empty END_STREAM\n");
+                http2_response_send_data(session, stream, NULL, 0, true);
             }
         }
         close(fd);
+        //fprintf(stderr, "[H2-STATIC-DEBUG] File descriptor closed. Menyerahkan sisa state ke Event Loop Halmos.\n");
+        //usleep(10000);
+        uint32_t dead_stream_id = stream->stream_id;
+        http2_stream_detach_and_destroy(session, dead_stream_id);
     }
     
     if(safe_path) free(safe_path);
+    //fprintf(stderr, "[H2-STATIC-DEBUG] Fungsi http2_response_routing_bridge SELESAI (Return).\n");
+    return;
 }
 
 void http2_response_send_header(HTTP2Session *session, HTTP2Stream *stream, int status_code) {
@@ -188,31 +245,46 @@ void http2_response_send_header(HTTP2Session *session, HTTP2Stream *stream, int 
 void http2_response_send_data(HTTP2Session *session, HTTP2Stream *stream, const void *data, size_t len, bool is_end) {
     const unsigned char *ptr = (const unsigned char *)data;
     size_t remaining = len;
-    uint32_t max_frame = 16384; // Batas standar HTTP/2 (16KB)
+    uint32_t max_frame = 16384; 
+    bool end_stream_sent = false;
 
-    // Kasus khusus: Data kosong tapi stream harus ditutup (END_STREAM)
-    if (len == 0 && is_end) {
-        http2_send_frame(session->fd, session->is_tls, 0x00, 0x01, stream->stream_id, NULL, 0);
+    if (len == 0) {
+        if (is_end) {
+            pthread_mutex_lock(&session->streams_lock); // <-- KUNCI DI SINI
+            http2_send_frame(session->fd, session->is_tls, 0x00, 0x01, stream->stream_id, NULL, 0);
+            pthread_mutex_unlock(&session->streams_lock);
+        }
         return;
     }
 
-    // Loop untuk memecah data besar menjadi potongan-potongan 16KB
+    // Kunci mutex sebelum melepas frame ke socket
+    pthread_mutex_lock(&session->streams_lock); 
     while (remaining > 0) {
         uint32_t chunk = (remaining > (size_t)max_frame) ? max_frame : (uint32_t)remaining;
-        
-        // Flag END_STREAM (0x01) hanya dikirim jika ini adalah potongan terakhir 
-        // DAN parameter is_end bernilai true.
-        uint8_t flags = (is_end && remaining == chunk) ? 0x01 : 0x00;
+        uint8_t flags = 0x00;
 
+        if (is_end && remaining == chunk) {
+            flags = 0x01;
+            end_stream_sent = true;
+        }
+
+        
         http2_send_frame(session->fd, session->is_tls, 0x00, flags, stream->stream_id, ptr, chunk);
 
         ptr += chunk;
         remaining -= chunk;
     }
+    pthread_mutex_unlock(&session->streams_lock);
+
+    if (is_end && !end_stream_sent) {
+        pthread_mutex_lock(&session->streams_lock);
+        http2_send_frame(session->fd, session->is_tls, 0x00, 0x01, stream->stream_id, NULL, 0);
+        pthread_mutex_unlock(&session->streams_lock);
+    }
 }
 
 /*
-Internal Helper
+Private Function Internal Helper
 */
 
 void http2_response_send_complex_header(HTTP2Session *session, HTTP2Stream *stream, char *raw_headers) {
@@ -306,4 +378,37 @@ void http2_response_send_complex_header(HTTP2Session *session, HTTP2Stream *stre
     http2_send_frame(session->fd, session->is_tls, 0x01, flags, stream->stream_id, hpack_buf, (uint32_t)pos);
     
     //fprintf(stderr, "[TRACE-H2] complex_header DONE for Stream %u\n", stream->stream_id);
+}
+
+void http2_stream_detach_and_destroy(HTTP2Session *session, uint32_t stream_id) {
+    uint32_t bucket = get_bucket_fibonacci(stream_id);
+    
+    pthread_mutex_lock(&session->streams_lock);
+    
+    HTTP2Stream *prev = NULL;
+    HTTP2Stream *curr = session->streams_hash[bucket];
+    
+    while (curr != NULL) {
+        if (curr->stream_id == stream_id) {
+            // Cabut node dari Linked List di dalam Bucket Hash
+            if (prev == NULL) {
+                session->streams_hash[bucket] = curr->node_next;
+            } else {
+                prev->node_next = curr->node_next;
+            }
+            session->active_stream_count--;
+            break;
+        }
+        prev = curr;
+        curr = curr->node_next;
+    }
+    
+    pthread_mutex_unlock(&session->streams_lock);
+    
+    // Setelah dicabut dengan aman dari jangkauan event loop utama,
+    // barulah kita bebaskan memorinya agar tidak tersentuh oleh cleanup GOAWAY!
+    if (curr) {
+        http2_parser_free_memory(curr);
+        free(curr);
+    }
 }

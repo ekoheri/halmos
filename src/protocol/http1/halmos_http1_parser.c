@@ -214,7 +214,10 @@ bool http1_parser_parse_header(char *raw_data, size_t total_received, RequestHea
     }
 
     if (req->is_valid) {
-        write_log("[HTTP1.1] %s %s (Host: %s)", req->method, req->uri, req->host ? req->host : "unknown");
+        //write_log("[HTTP1.1] %s %s (Host: %s)", req->method, req->uri, req->host ? req->host : "unknown");
+        // Pastikan req->client_ip memiliki fallback jika string-nya kosong
+        const char *ip_to_log = (strlen(req->client_ip) > 0) ? req->client_ip : "unknown_ip";
+        write_log("[HTTP1.1] %s %s (Client IP: %s)", req->method, req->uri, ip_to_log);
     }
 
     // 5. LOGIKA MULTIPART
