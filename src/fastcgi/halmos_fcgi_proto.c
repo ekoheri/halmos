@@ -61,18 +61,27 @@ void fcgi_proto_build_params(RequestHeader *req, int sock_client, size_t content
     char script_name_only[512] = {0};
 
     // Script & Path Logic
-    size_t full_dir_len = req->directory ? strlen(req->directory) : 0;
-    size_t script_len = full_dir_len;
+    const char *raw_uri = req->uri ? req->uri : "/";
 
-    if (req->path_info && req->path_info >= req->directory && req->path_info < (req->directory + full_dir_len)) {
-        script_len = (size_t)(req->path_info - req->directory);
+    // Salin ke buffer script_name_only
+    snprintf(script_name_only, sizeof(script_name_only), "%s", raw_uri);
+
+    // 1. Buang Query String ('?') jika ada
+    char *qmark = strchr(script_name_only, '?');
+    if (qmark) {
+        *qmark = '\0';
     }
 
-    if (script_len < sizeof(script_name_only)) {
-        memcpy(script_name_only, req->directory, script_len);
-        script_name_only[script_len] = '\0';
+    // 2. Buang PATH_INFO jika ada (misal /test.php/extra/path -> /test.php)
+    // Jika req->path_info ada, kita potong string script_name_only di awal munculnya path_info
+    if (req->path_info && strlen(req->path_info) > 0) {
+        char *pinfo_pos = strstr(script_name_only, req->path_info);
+        if (pinfo_pos && pinfo_pos > script_name_only) {
+            *pinfo_pos = '\0';
+        }
     }
 
+    // Rakit FULL SCRIPT FILENAME untuk PHP-FPM
     snprintf(full_script_path, sizeof(full_script_path), "%s%s", active_root, 
             (active_root[strlen(active_root)-1] == '/' && script_name_only[0] == '/') ? script_name_only + 1 : script_name_only);
 
@@ -88,6 +97,7 @@ void fcgi_proto_build_params(RequestHeader *req, int sock_client, size_t content
     FCGI_ADD_PARAM_SAFE("DOCUMENT_ROOT",   active_root);
     FCGI_ADD_PARAM_SAFE("SCRIPT_FILENAME", full_script_path);
     FCGI_ADD_PARAM_SAFE("SCRIPT_NAME",     script_name_only);
+    FCGI_ADD_PARAM_SAFE("PHP_SELF",        script_name_only);
     FCGI_ADD_PARAM_SAFE("REQUEST_URI",     req->uri);
     FCGI_ADD_PARAM_SAFE("REQUEST_METHOD",  req->method);
     FCGI_ADD_PARAM_SAFE("QUERY_STRING",    req->query_string ? req->query_string : "");

@@ -161,6 +161,7 @@ void event_loop_run() {
                 // 1. Masukkan ke antrean TANPA memanipulasi epoll di sini.
                 // Karena kita pakai EPOLLONESHOT, kernel otomatis menonaktifkan
                 // FD ini dari epoll_wait sampai ada yang panggil MOD lagi.
+                /*
                 int status = queue_push(&global_queue, client_fd); 
 
                 if (status < 0) {
@@ -178,6 +179,26 @@ void event_loop_run() {
                     epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, NULL);
                     shutdown(client_fd, SHUT_RDWR); // Pastikan browser tidak nunggu
                     close(client_fd);
+                }
+                */
+                if ((events[i].events & EPOLLIN) || (events[i].events & EPOLLOUT)) {
+                    int status = queue_push(&global_queue, client_fd); 
+
+                    if (status < 0) {
+                        if (status == -1) {
+                            write_log_error("[CORE] Worker queue full! Rejecting FD %d with 503", client_fd);
+                            char *res = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                            send(client_fd, res, strlen(res), 0);
+                        } else {
+                            write_log_error("[CORE] Enqueue failed for FD %d (Internal Error)", client_fd);
+                        }
+
+                        global_telemetry.active_connections--;
+
+                        epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, NULL);
+                        shutdown(client_fd, SHUT_RDWR);
+                        close(client_fd);
+                    }
                 }
             }
         }
@@ -200,18 +221,21 @@ void event_loop_stop(int sig) {
  * Analogi: Pelayan (Worker) melapor ke Resepsionis (Epoll) 
  * bahwa meja ini sudah selesai dibersihkan dan siap menerima pesanan lagi.
  */
-void event_loop_rearm_epoll(int fd) {
+
+void event_loop_rearm_epoll_ex(int fd, uint32_t events_mask) {
     struct epoll_event ev;
-    // Kembalikan status ke mode pantau: Read + Edge-Triggered + One-Shot
-    ev.events = EPOLLIN | EPOLLET | EPOLLONESHOT;
+    // Selalu sertakan EPOLLET (Edge Triggered) dan EPOLLONESHOT
+    ev.events = events_mask | EPOLLET | EPOLLONESHOT;
     ev.data.fd = fd;
 
     if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev) == -1) {
-        // Kita log error-nya, kecuali kalau socket-nya memang sudah keburu tutup (EBADF)
         if (errno != EBADF) {
             write_log_error("[NET] Failed to re-arm epoll for FD %d: %s", fd, strerror(errno));
         }
     }
+} 
+void event_loop_rearm_epoll(int fd) {
+    event_loop_rearm_epoll_ex(fd, EPOLLIN);
 }
 
 void event_loop_cleanup_connection(int sock_client) {

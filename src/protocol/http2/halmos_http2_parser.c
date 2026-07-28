@@ -1,3 +1,6 @@
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 #include "halmos_http2_parser.h"
 #include "halmos_global.h"
 #include "halmos_log.h"
@@ -35,7 +38,7 @@ static const HPACKStaticEntry static_table[] = {
     {":status", "500"}, 
     {"accept-charset", ""}, 
     {"accept-encoding", "gzip, deflate"},
-    {".accept-language", ""}, 
+    {"accept-language", ""}, 
     {"accept-ranges", ""}, 
     {"accept", ""}, 
     {"access-control-allow-origin", ""},
@@ -115,10 +118,8 @@ bool http2_parser_parse_header(HTTP2Session *session, HTTP2Stream *stream, const
     req->vhost_context = NULL;
     req->path_info = NULL;
     memset(req->method, 0, sizeof(req->method));
-    
-    if (len > 5 && (payload[0] & 0x7F) == 0 && payload[1] == 0 && payload[2] == 0) {
-        pos += 5;
-    }
+
+    // Skip 5-byte hack SUDAH DIHAPUS dari sini
 
     pthread_mutex_lock(&session->hpack_lock);
 
@@ -174,6 +175,7 @@ bool http2_parser_parse_header(HTTP2Session *session, HTTP2Stream *stream, const
 
     pthread_mutex_unlock(&session->hpack_lock);
     
+    /*
     if (req->uri) {
         char *qs = strchr(req->uri, '?');
         if (qs) {
@@ -211,31 +213,75 @@ bool http2_parser_parse_header(HTTP2Session *session, HTTP2Stream *stream, const
                 char *old_uri = req->uri; 
                 
                 http_route_apply_logic(match, old_uri, req->route_result, t_query, t_path);
-                
-                // --- FIX: Pastikan old_uri bukan pointer dari static_table sebelum di-free ---
-                
-                bool is_static_table_ptr = false;
-                
-                for(int i=0; i<=61; i++) {
-                    if(old_uri == static_table[i].value) { is_static_table_ptr = true; break; }
-                }
-
-                bool is_dynamic_table_ptr = false;
-                if (session) {
-                    for (uint32_t i = 0; i < session->dyn_table.count; i++) {
-                        if (old_uri == session->dyn_table.entries[i].name || 
-                            old_uri == session->dyn_table.entries[i].value) {
-                            is_dynamic_table_ptr = true;
-                            break;
-                        }
-                    }
-                }
 
                 req->uri = req->route_result;
-                // JANGAN free jika pointer milik static_table atau milik dynamic_table
-                if (old_uri && old_uri != req->route_result && !is_static_table_ptr && !is_dynamic_table_ptr) {
-                    free(old_uri);
+
+                //Pembersihan aman & ringkas
+                if (old_uri && old_uri != req->route_result) {
+                    free(old_uri); 
                 }
+
+                req->backend_type = match->fcgi_type;
+
+                if (t_query[0] != '\0') {
+                    char *new_qs = strchr(req->uri, '?');
+                    if (new_qs) {
+                        *new_qs = '\0';
+                        req->query_string = new_qs + 1;
+                    } else {
+                        strncpy(req->query_string_buffer, t_query, sizeof(req->query_string_buffer) - 1);
+                        req->query_string_buffer[sizeof(req->query_string_buffer) - 1] = '\0';
+                        req->query_string = req->query_string_buffer;
+                    }
+                }
+            }
+            else {
+                req->backend_type = FCGI_PHP; 
+            }
+        }
+        req->directory = req->uri;
+    }
+    */
+    if (req->uri) {
+        char *qs = strchr(req->uri, '?');
+        if (qs) {
+            *qs = '\0';            
+            req->query_string = qs + 1;
+        }
+
+        const char *exts_list[] = {".php", ".rs", ".py", ".sh"};
+        req->path_info = NULL; 
+        for (int i = 0; i < 4; i++) {
+            char *ptr_ext = strcasestr(req->uri, exts_list[i]);
+            if (ptr_ext) {
+                size_t elen = strlen(exts_list[i]);
+                if (*(ptr_ext + elen) == '/') {
+                    req->path_info = ptr_ext + elen;
+                }
+                break;
+            }
+        }
+
+        if (req->host) {
+            VHostEntry *vh = (VHostEntry *)http_vhost_get_context(req->host);
+            req->vhost_context = vh;
+
+            if (req->uri[0] == '\0' || strcmp(req->uri, "/") == 0) {
+                free(req->uri);
+                req->uri = strdup("/index.html");
+                req->path_info = NULL;
+            }
+
+            RouteTable *match = http_route_match(vh, req->uri);
+            if (match) {
+                char t_query[256], t_path[256];
+                char route_buf[1024] = {0};
+                
+                http_route_apply_logic(match, req->uri, route_buf, t_query, t_path);
+
+                // FIX: Bebaskan memory lama, alokasikan ulang string hasil routing
+                free(req->uri);
+                req->uri = strdup(route_buf);
 
                 req->backend_type = match->fcgi_type;
 
@@ -259,10 +305,59 @@ bool http2_parser_parse_header(HTTP2Session *session, HTTP2Stream *stream, const
     }
 
     req->is_valid = (req->method[0] != '\0' && req->uri != NULL);
+
+    // DEBUG TRACE
+    #ifdef DEBUG
+    fprintf(stderr, "[H2-PARSE][DEBUG] Stream %u Parsed: Method=%s, URI=%s, Host=%s, Valid=%d\n", 
+            stream->stream_id, req->method, req->uri ? req->uri : "NULL", 
+            req->host ? req->host : "NULL", req->is_valid);
+    #endif
+
     return req->is_valid;
 }
 
 void http2_parser_free_memory(HTTP2Stream *stream) {
+    if (!stream) return;
+    RequestHeader *req = &stream->http1_compat;
+
+    #ifdef DEBUG
+    fprintf(stderr, "[H2-PARSE][DEBUG] Cleaning memory for Stream %u (URI: %p, Host: %p)\n", 
+            stream->stream_id, (void*)req->uri, (void*)req->host);
+    #endif
+
+    if (req->uri) {
+        free(req->uri);
+        req->uri = NULL;
+    }
+
+    if (req->host) {
+        free(req->host);
+        req->host = NULL;
+    }
+
+    if (req->content_type) { 
+        free(req->content_type); 
+        req->content_type = NULL; 
+    }
+    
+    if (req->cookie_data) { 
+        free(req->cookie_data); 
+        req->cookie_data = NULL; 
+    }
+
+    if (req->parts) {
+        http_multipart_free_parts(req->parts, req->parts_count);
+        req->parts = NULL; 
+        req->parts_count = 0;
+    }
+
+    if (req->body_data) { 
+        free(req->body_data); 
+        req->body_data = NULL; 
+    }
+}
+
+void http2_parser_free_memory_lama(HTTP2Stream *stream) {
     if (!stream) return;
     RequestHeader *req = &stream->http1_compat;
 
@@ -368,6 +463,40 @@ uint32_t hpack_decode_int(const unsigned char **pos, const unsigned char *end, u
 }
 
 char* hpack_decode_string(const unsigned char **pos, const unsigned char *end) {
+    if (*pos >= end) return NULL;
+    
+    uint8_t first_byte = **pos;
+    bool is_huffman = (first_byte & 0x80) != 0;
+    uint32_t len = hpack_decode_int(pos, end, 0x7F);
+
+    // Boundary check & sanity check
+    if (len > 10240 || *pos + len > end) {
+        fprintf(stderr, "[H2-HPACK][ERR] String decode boundary limit exceeded! Len=%u, Remaining=%ld\n", 
+                len, (long)(end - *pos));
+        *pos = end; 
+        return NULL;
+    }
+
+    char *str = NULL;
+    if (is_huffman) {
+        str = http2_huffman_decode(*pos, len);
+        if (!str) {
+            fprintf(stderr, "[H2-HPACK][ERR] Huffman decode failed for len %u\n", len);
+        }
+    } else {
+        str = malloc(len + 1);
+        if (str) { 
+            memcpy(str, *pos, len); 
+            str[len] = '\0'; 
+        } else {
+            fprintf(stderr, "[H2-HPACK][ERR] Malloc failed for raw string len %u\n", len);
+        }
+    }
+    *pos += len;
+    return str;
+}
+
+char* hpack_decode_string_lama(const unsigned char **pos, const unsigned char *end) {
     if (*pos >= end) return NULL;
     
     uint8_t first_byte = **pos;

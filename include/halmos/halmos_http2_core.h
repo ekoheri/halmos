@@ -4,6 +4,8 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <pthread.h>             // Wajib ada karena kamu pakai pthread_mutex_t
+#include <sys/types.h>
+
 #include "halmos_http1_header.h" 
 
 /* --- HTTP/2 FRAME TYPES --- */
@@ -89,6 +91,13 @@ typedef struct HTTP2Stream {
     RequestHeader http1_compat; 
     
     int32_t window_size;
+
+    /* --- TAMBAHAN BARU: STATE PENGIRIMAN FILE NON-BLOCKING --- */
+    int file_fd;           // FD file static (-1 jika tidak ada file)
+    off_t file_offset;     // Posisi byte terakhir yang berhasil terkirim
+    off_t file_size;      // Total ukuran file dalam byte
+    bool is_sending_file;  // Status apakah stream sedang aktif memompa chunk file
+    
     struct HTTP2Stream *node_next; // Point ke stream aktif lainnya
 } HTTP2Stream;
 
@@ -113,6 +122,11 @@ typedef struct {
     uint32_t last_stream_id;
     int32_t  remote_window_size;
     int32_t  local_window_size;
+
+    /* --- TAMBAHAN BARU: PENDING WRITE BUFFER (Jika SSL_write EAGAIN) --- */
+    uint8_t *pending_write_buf;     // Buffer penyimpan sisa frame yang tertunda
+    size_t   pending_write_len;     // Total byte sisa yang harus dikirim
+    size_t   pending_write_offset;  // Byte offset yang sudah terkirim dari buffer
 } HTTP2Session;
 
 #endif

@@ -89,24 +89,47 @@ int fcgi_api_request_stream(RequestHeader *req, int sock_client, int backend_typ
     return fcgi_proto_send_and_receive(fpm_sock, sock_client, req, request_id, gather_buf, g_ptr, post_data, content_length);
 }
 
+// =========================================================================
+// HELPER: Membaca pas N byte dari socket TCP sampai tuntas.
+// Mencegah data terpotong (truncated) akibat perilaku paket TCP.
+// =========================================================================
+static ssize_t recv_exact(int fd, void *buf, size_t len) {
+    size_t total_read = 0;
+    char *ptr = (char *)buf;
+
+    while (total_read < len) {
+        ssize_t n = recv(fd, ptr + total_read, len - total_read, 0);
+        if (n < 0) {
+            return -1; // Socket error
+        }
+        if (n == 0) {
+            break; // Socket ditutup oleh backend
+        }
+        total_read += n;
+    }
+    return (ssize_t)total_read;
+}
+
 /**
  * fcgi_api_request_http2
  * Khusus untuk HTTP/2: Tidak menulis langsung ke socket client.
  * Mengembalikan seluruh output backend (Header + Body) ke dalam *out_buf.
  */
+
 ssize_t fcgi_api_request_http2(RequestHeader *req, int backend_type, void *post_data, size_t content_length, char **out_buf) {
-    // 1. Logika Load Balancing
-    VHostEntry *vh = req->vhost_context; 
+    if (!req || !out_buf) return -1;
+
+    VHostEntry *vh = (VHostEntry *)req->vhost_context; 
     UpstreamGroup *live_group;
     BackendGroup  *cfg_group;
 
-    if (backend_type == 0) {
+    if (backend_type == 0) { 
         live_group = &fcgi_pool.php_group;
         cfg_group  = (vh && vh->php.node_count > 0) ? &vh->php : &config.php;
-    } else if (backend_type == 1) {
+    } else if (backend_type == 1) { 
         live_group = &fcgi_pool.rust_group;
         cfg_group  = (vh && vh->rust.node_count > 0) ? &vh->rust : &config.rust;
-    } else {
+    } else { 
         live_group = &fcgi_pool.python_group;
         cfg_group  = (vh && vh->python.node_count > 0) ? &vh->python : &config.python;
     }
@@ -117,7 +140,6 @@ ssize_t fcgi_api_request_http2(RequestHeader *req, int backend_type, void *post_
     const char *selected_ip = cfg_group->ips[idx];
     int selected_port       = cfg_group->ports[idx];
 
-    // 2. Hubungkan ke Backend
     int request_id = 1;
     unsigned char gather_buf[GATHER_BUF_SIZE];
     int g_ptr = 0;
@@ -125,27 +147,15 @@ ssize_t fcgi_api_request_http2(RequestHeader *req, int backend_type, void *post_
     int fpm_sock = fcgi_proto_begin_request(selected_ip, selected_port, gather_buf, &g_ptr, request_id);
     if (fpm_sock == -1) return -1;
 
-    // 3. Build & Kirim Params
     fcgi_proto_build_params(req, -1, content_length, gather_buf, &g_ptr, request_id);
     
-    // Gunakan safe_send_all (pastikan fungsi ini ada di halmos_fcgi_proto.c atau header)
     if (safe_send_all(fpm_sock, gather_buf, g_ptr) < 0) {
-        //fprintf(stderr, "[ERROR-FCGI] Gagal mengirim PARAMS ke backend\n");
         close(fpm_sock);
         return -1;
     }
 
-    // 4. Kirim Body & EOF (Satu Paket)
-    // Fungsi ini sekarang menangani pengiriman data CHUNKED dan ditutup dengan EOF tunggal.
-    /*if (content_length > 0) {
-        fprintf(stderr, "[DEBUG-POST] Mengirim body sebesar %zu bytes\n", content_length);
-    }*/
-    
-    // Panggilan ini krusial: Jika content_length 0, dia tetap kirim EOF. 
-    // Jika > 0, dia kirim Data + EOF.
     fcgi_proto_send_stdin(fpm_sock, request_id, post_data, (int)content_length);
 
-    // --- 5. LOGIKA UNBOXING RESPON ---
     size_t capacity = 65536; 
     char *res = malloc(capacity);
     if (!res) {
@@ -153,54 +163,88 @@ ssize_t fcgi_api_request_http2(RequestHeader *req, int backend_type, void *post_
         return -1;
     }
     size_t total_payload = 0;
-
     unsigned char fcgi_header[8];
-    //fprintf(stderr, "[TRACE-FCGI] Memulai pembacaan record dari PHP-FPM...\n");
 
-    while (recv(fpm_sock, fcgi_header, 8, 0) == 8) {
-        unsigned char type = fcgi_header[1];
-        uint16_t content_len = (fcgi_header[4] << 8) | fcgi_header[5];
-        unsigned char padding_len = fcgi_header[6];
+    // =========================================================================
+    // 🔍 [INSTRUMENTASI DEBUG FASTCGI RESPONSE RECORDS FROM PHP-FPM]
+    // =========================================================================
+    fprintf(stderr, "\n==================== [DEBUG FCGI UNBOXING LOOP] ====================\n");
+    int record_count = 0;
+
+    while (1) {
+        ssize_t h_read = recv_exact(fpm_sock, fcgi_header, 8);
+        if (h_read < 8) {
+            fprintf(stderr, "[UNBOX-LOOP] Header read < 8 (%zd bytes). Socket closed/EOF!\n", h_read);
+            break; 
+        }
+
+        record_count++;
+        unsigned char type     = fcgi_header[1];
+        uint16_t content_len   = (fcgi_header[4] << 8) | fcgi_header[5];
+        unsigned char pad_len  = fcgi_header[6];
+
+        fprintf(stderr, "[RECORD #%d] Type: %d (0x%02X) | ContentLen: %u | PadLen: %u\n", 
+                record_count, type, type, content_len, pad_len);
 
         if (content_len > 0) {
-            if (type == FCGI_STDOUT) { // Type 6
-                while (total_payload + content_len > capacity) {
-                    capacity *= 2; // Progressive resize
-                    res = realloc(res, capacity);
+            if (type == 0x06) { // FCGI_STDOUT
+                while (total_payload + content_len >= capacity) {
+                    capacity *= 2; 
+                    char *new_res = realloc(res, capacity);
+                    if (!new_res) {
+                        free(res);
+                        close(fpm_sock);
+                        return -1;
+                    }
+                    res = new_res;
                 }
                 
-                ssize_t n = 0;
-                while (n < content_len) {
-                    ssize_t r = recv(fpm_sock, res + total_payload + n, content_len - n, 0);
-                    if (r <= 0) break;
-                    n += r;
+                ssize_t payload_read = recv_exact(fpm_sock, res + total_payload, content_len);
+                fprintf(stderr, "   --> STDOUT Chunk Read: %zd bytes\n", payload_read);
+                if (payload_read > 0) {
+                    // Print isi chunk-nya di stderr untuk inspeksi visual langsung!
+                    fprintf(stderr, "   --> Chunk Content:\n%.*s\n", (int)payload_read, res + total_payload);
+                    total_payload += (size_t)payload_read;
                 }
-                total_payload += content_len;
-            } else if (type == FCGI_STDERR) { // Type 7
-                // Opsional: Log error dari PHP ke terminal Halmos
-                char *err_msg = malloc(content_len + 1);
-                recv(fpm_sock, err_msg, content_len, 0);
-                err_msg[content_len] = '\0';
-                //fprintf(stderr, "[PHP-STDERR] %s\n", err_msg);
-                free(err_msg);
+            } else if (type == 0x07) { // FCGI_STDERR
+                char *err_buf = malloc(content_len + 1);
+                if (err_buf) {
+                    recv_exact(fpm_sock, err_buf, content_len);
+                    err_buf[content_len] = '\0';
+                    fprintf(stderr, "   [PHP-STDERR] %s\n", err_buf);
+                    free(err_buf);
+                }
             } else {
-                // Skip record tipe lain (misal Management Record)
-                unsigned char junk[65536];
-                recv(fpm_sock, junk, content_len, 0);
+                size_t skipped = 0;
+                char junk[1024];
+                while (skipped < content_len) {
+                    size_t chunk = (content_len - skipped > sizeof(junk)) ? sizeof(junk) : (content_len - skipped);
+                    ssize_t r = recv_exact(fpm_sock, junk, chunk);
+                    if (r <= 0) break;
+                    skipped += (size_t)r;
+                }
             }
         }
 
-        // Buang padding
-        if (padding_len > 0) {
-            unsigned char pad[255];
-            recv(fpm_sock, pad, padding_len, 0);
+        if (pad_len > 0) {
+            char pad_junk[256];
+            recv_exact(fpm_sock, pad_junk, pad_len);
         }
 
-        if (type == FCGI_END_REQUEST) break; // Type 3
+        if (type == 0x03) { // FCGI_END_REQUEST
+            fprintf(stderr, "[UNBOX-LOOP] Menerima FCGI_END_REQUEST (Type 3). Selesai.\n");
+            break; 
+        }
     }
 
-    //fprintf(stderr, "[TRACE-FCGI] Total Data Bersih (Payload): %zu bytes\n", total_payload);
-    
+    fprintf(stderr, "==================== [TOTAL PAYLOAD READ: %zu BYTES] ====================\n\n", total_payload);
+
+    if (total_payload >= capacity) {
+        char *new_res = realloc(res, total_payload + 1);
+        if (new_res) res = new_res;
+    }
+    res[total_payload] = '\0';
+
     close(fpm_sock);
     *out_buf = res;
     return (ssize_t)total_payload;

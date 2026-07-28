@@ -22,6 +22,10 @@ typedef struct {
     bool is_active;
     pthread_mutex_t client_lock; 
     
+    // --- TAMBAHAN KHUSUS INTEGRASI HTTP/2 ---
+    bool is_http2;           // Flag penanda koneksi HTTP/2
+    uint32_t stream_id;      // Stream ID spesifik untuk WebSocket over HTTP/2
+
     // Catatan internal agar saat disconnect bisa langsung hapus di Hash Table
     char user_id[64];
     uint64_t session_id;
@@ -81,6 +85,16 @@ void ws_registry_init();
  * Daftarkan client ke array utama setelah handshake HTTP sukses.
  */
 int ws_registry_add(int fd, SSL *ssl);
+
+/**
+ * FUNGSI BARU: Khusus mendaftarkan client WebSocket over HTTP/2
+ */
+int ws_registry_add_h2(int fd, SSL *ssl, uint32_t stream_id);
+
+/**
+ * FUNGSI BARU: Membaca status HTTP/2 dan Stream ID milik client berdasarkan FD
+ */
+void ws_registry_get_h2_status(int fd, bool *out_is_http2, uint32_t *out_stream_id);
 
 /**
  * Hapus client dari array DAN bersihkan namanya dari semua bucket Hash Table.
