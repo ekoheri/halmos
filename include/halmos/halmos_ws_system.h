@@ -54,10 +54,10 @@ typedef enum {
 // Konstanta untuk IPC
 #define K_HEADER  "header"
 #define K_PAYLOAD "payload"
-#define K_ACTION  "action"
+#define K_ACTION  "type"
 #define K_SRC     "src"
 #define K_DST     "dst"
-#define K_APP     "app" 
+#define K_APP     "app_id" 
 // --- Aturan Keamanan & IPC ---
 #define INTERNAL_PREFIX "HALMOS_"
 #define SOCKET_PATH     "/tmp/halmos_bridge.sock"
@@ -86,11 +86,18 @@ void ws_system_internal_dispatch(const char *json_raw);
 // Fungsi untuk mengirim pesan teks (Otomatis bungkus frame)
 int ws_system_send_text(int sock_client, SSL *ssl, const char *text);
 
+// Tambahan fungsi untuk integrasi dengan HTTP2
+int ws_system_send_text_h2(int sock_client, uint32_t stream_id, const char *text);
+
+void ws_system_send_pong_h2(int sock_client, uint32_t stream_id);
+
+void ws_system_handle_h2_payload(int sock_client, uint32_t stream_id, unsigned char *h2_data, size_t h2_len);
+
 /**
  * LOGIKA BISNIS (JSON-C)
  */
 // Di sinilah tempat lu naro logika JSON karangan lu
-void ws_system_on_message(int sock_client, unsigned char *data, size_t len);
+void ws_system_on_message(int sock_client, uint32_t stream_id, unsigned char *data, size_t len);
 
 void halmos_ws_system_init();
 

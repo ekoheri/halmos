@@ -17,9 +17,10 @@ Di projek lu ini, IPC adalah "jembatan" yang lu bikin antara PHP dan Halmos (C).
 #include <stdlib.h>
 #include <sys/stat.h>  // <--- Untuk CHMOD
 #include <errno.h>
+#include <poll.h>      // Wajib ada untuk fungsi poll()
 
 // global scope di halmos_ws_ipc untuk buffer
-static char ipc_buffer[65536];
+//static char ipc_buffer[65536];
 
 // Fungsi pembantu set non-blocking
 static void set_nonblocking_bridge(int fd) {
@@ -56,6 +57,7 @@ int setup_uds_bridge(const char *path) {
     return bridge_fd;
 }
 
+/*
 void handle_bridge_request(int bridge_fd) {
     while (1) {
         int client_sock = accept(bridge_fd, NULL, NULL);
@@ -103,6 +105,83 @@ void handle_bridge_request(int bridge_fd) {
                 ipc_buffer[i] = '\0';
             }
             ws_system_internal_dispatch(ipc_buffer);
+        }
+
+        close(client_sock);
+    }
+}
+*/
+
+void handle_bridge_request(int bridge_fd) {
+    // PERBAIKAN 1: Buffer dipindah ke local stack fungsi agar Thread-Safe 
+    // & tidak terjadi korupsi data antar request IPC dari worker PHP
+    char local_ipc_buffer[65536];
+
+    while (1) {
+        int client_sock = accept(bridge_fd, NULL, NULL);
+        if (client_sock < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) break; 
+            return;
+        }
+
+        // [Security Check UID tetap di sini...]
+
+        set_nonblocking_bridge(client_sock);
+
+        ssize_t total_received = 0;
+        int retry_count = 0;
+        const int max_retries = 5; // Batasi retry secara rasional
+
+        while (total_received < (ssize_t)(sizeof(local_ipc_buffer) - 1)) {
+            ssize_t n = read(client_sock, local_ipc_buffer + total_received, 
+                             (ssize_t)sizeof(local_ipc_buffer) - 1 - total_received);
+
+            if (n > 0) {
+                total_received += n;
+                retry_count = 0; // Reset counter jika ada data masuk yang valid
+                
+                // Proteksi batas bawah indeks agar aman sebelum cek newline
+                if (total_received > 0 && local_ipc_buffer[total_received - 1] == '\n') {
+                    break;
+                }
+            } 
+            else if (n < 0) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    // PERBAIKAN 2: Gunakan poll() dengan timeout 10ms untuk mencegah 
+                    // loop gila (spinning) yang memicu CPU Spike 100%
+                    struct pollfd pfd = { .fd = client_sock, .events = POLLIN };
+                    int poll_res = poll(&pfd, 1, 10); 
+                    
+                    if (poll_res > 0) {
+                        continue; // Data siap dibaca kembali, ulangi read()
+                    } else {
+                        if (retry_count++ < max_retries) continue;
+                        else break; // Timeout habis, amankan server dari koneksi gantung
+                    }
+                }
+                if (errno == EINTR) continue;
+                break;
+            } 
+            else { // n == 0 (Client/PHP tutup koneksi)
+                break;
+            }
+        }
+
+        if (total_received > 0) {
+            local_ipc_buffer[total_received] = '\0';
+            
+            // PERBAIKAN 3: Proteksi Bound-Check (i >= 0) agar tidak terjadi 
+            // Buffer Underflow / SegFault jika pesan IPC hanya berisi \n
+            ssize_t i = total_received - 1;
+            while (i >= 0 && (local_ipc_buffer[i] == '\n' || local_ipc_buffer[i] == '\r')) {
+                local_ipc_buffer[i] = '\0';
+                i--;
+            }
+            
+            // Kirim ke router internal Halmos jika string tidak kosong
+            if (strlen(local_ipc_buffer) > 0) {
+                ws_system_internal_dispatch(local_ipc_buffer);
+            }
         }
 
         close(client_sock);

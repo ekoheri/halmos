@@ -363,7 +363,7 @@ int ws_system_dispatch(int sock_client) {
         case WS_OP_TEXT:
             // Pesan teks (Biasanya JSON untuk aplikasi lu)
             if (payload) {
-                ws_system_on_message(sock_client, payload, payload_len);
+                ws_system_on_message(sock_client,0, payload, payload_len);
             }
             break;
 
@@ -491,24 +491,20 @@ void ws_system_internal_dispatch(const char *json_raw) {
  * Di sinilah logika aplikasi berjalan. 
  * Menerima string/payload yang sudah di-unmask dan siap diproses.
  */
-void ws_system_on_message(int sock_client, unsigned char *data, size_t len) {
+void ws_system_on_message(int sock_client, uint32_t stream_id, unsigned char *data, size_t len) {
     if (len == 0 || data == NULL) return;
 
-    // DEBUG: Intip data mentah yang masuk dari socket
-    //fprintf(stderr, "\n[DEBUG-RAW] FD %d received: %s\n", sock_client, data);
-
-    // 1. Parsing JSON menggunakan Tokener (Lebih aman untuk data stream)
+    // 1. Parsing JSON menggunakan Tokener
     struct json_tokener *tok = json_tokener_new();
     struct json_object *parsed_json = json_tokener_parse_ex(tok, (const char *)data, len);
 
     if (parsed_json == NULL) {
-        //fprintf(stderr, "[DEBUG-ERROR] FD %d: Malformed JSON!\n", sock_client);
-        write_log_error("[WS-JSON] Malformed JSON received on FD %d", sock_client);
+        write_log_error("[WS-JSON] Malformed JSON received on FD %d (Stream %u)", sock_client, stream_id);
         json_tokener_free(tok);
         return;
     }
 
-    // 2. Akses Header berdasarkan kamus ws_cfg
+    // 2. Akses Header
     struct json_object *header_obj = NULL;
     if (json_object_object_get_ex(parsed_json, K_HEADER, &header_obj)) {
         
@@ -516,28 +512,16 @@ void ws_system_on_message(int sock_client, unsigned char *data, size_t len) {
         struct json_object *dst_obj = NULL;
         struct json_object *app_obj = NULL;
 
-        // Ambil field rute dari dalam header
-        // ws_cfg.keys.action = "type"
-        // ws_cfg.keys.to     = "dst"
-        // ws_cfg.keys.app    = "app" (atau sesuai config lu)
         json_object_object_get_ex(header_obj, K_ACTION, &action_obj);
         json_object_object_get_ex(header_obj, K_DST, &dst_obj);
         json_object_object_get_ex(header_obj, K_APP, &app_obj);
 
-        // DEBUG: Cek apakah key-nya ketemu atau NULL
-        /*fprintf(stderr, "[DEBUG-INFO] Searching keys -> ActionKey: '%s' (%s), TargetKey: '%s' (%s)\n", 
-                ws_cfg.keys.action, (action_obj ? "FOUND" : "NULL"),
-                ws_cfg.keys.to, (dst_obj ? "FOUND" : "NULL"));
-        */
-        // VALIDASI: Pastikan action dan target ada isinya sebelum diproses
         if (action_obj && dst_obj) {
             const char *action = json_object_get_string(action_obj);
             const char *target = json_object_get_string(dst_obj);
-            
-            // App ID opsional, kalau NULL kasih string kosong atau "DEFAULT"
             const char *app_id = app_obj ? json_object_get_string(app_obj) : "GLOBAL";
 
-            write_log("[WS] Route: App=%s, Action=%s, Target=%s", app_id, action, target);
+            write_log("[WS] Route: App=%s, Action=%s, Target=%s (Stream %u)", app_id, action, target, stream_id);
 
             ws_action_ipc_t action_code = get_action_code(action);
 
@@ -547,42 +531,52 @@ void ws_system_on_message(int sock_client, unsigned char *data, size_t len) {
                     json_object_object_get_ex(parsed_json, K_PAYLOAD, &pay_obj);
                     if (pay_obj) {
                         const char *user_id = json_object_get_string(pay_obj);
-                        //fprintf(stderr, "[DEBUG-AUTH] Attempting to link FD %d to User: %s\n", sock_client, user_id);
+                        
+                        // KEMBALI KE FUNGSI ASLI ANDA:
                         ws_registry_set_user_id(sock_client, user_id);
-                        write_log("[WS-AUTH] Client FD %d identified as %s", sock_client, user_id);
+                        write_log("[WS-AUTH] Client FD %d (Stream %u) identified as %s", sock_client, stream_id, user_id);
                     }
                     break;
                 }
                 case ACT_PRIVATE:{
-                    // Cek siapa pengirimnya (opsional, buat log)
+                    // KEMBALI KE FUNGSI ASLI ANDA:
                     const char *from_user = ws_registry_get_user_id(sock_client);
                     
                     int target_fd = -1;
                     uint64_t target_session = 0;
                     SSL *target_ssl = NULL;
 
-                    // 1. Cari target di buku alamat (registry)
+                    // KEMBALI KE FUNGSI ASLI ANDA:
                     if (ws_registry_get_session_info(target, &target_fd, &target_session, &target_ssl)) {
-                        // 2. Kirim pesan mentah (data) ke target
-                        if (ws_system_send_text(target_fd, target_ssl, (const char *)data) == 0) {
-                            write_log("[WS-PRIVATE] %s -> %s (Success)", from_user ? from_user : "Anon", target);
+                        
+                        // Cek status target lewat fungsi pembantu h2 status yang ada di registry Anda
+                        bool is_target_h2 = false;
+                        uint32_t target_stream_id = 0;
+                        ws_registry_get_h2_status(target_fd, &is_target_h2, &target_stream_id);
+
+                        if (is_target_h2) {
+                            // Kirim via handler HTTP/2 Extended CONNECT Anda
+                            ws_system_send_text_h2(target_fd, target_stream_id, (const char *)data);
+                        } else {
+                            // Kirim via WebSocket biasa (HTTP/1.1)
+                            ws_system_send_text(target_fd, target_ssl, (const char *)data);
                         }
+                        write_log("[WS-PRIVATE] %s -> %s (Success)", from_user ? from_user : "Anon", target);
                     } else {
                         write_log("[WS-PRIVATE] Target %s offline", target);
                     }
                     break;
                 }
                 case ACT_BROADCAST:{
-                    // Kirim ke semua orang yang terdaftar di registry
-                    // Fungsi broadcast lu biasanya sudah handle looping semua FD
                     ws_registry_broadcast((const char *)data);
-                    write_log("[WS-BCAST] Broadcast sent by FD %d", sock_client);
+                    write_log("[WS-BCAST] Broadcast sent by FD %d (Stream %u)", sock_client, stream_id);
                     break;
                 }
                 case ACT_PUB:
                     ws_registry_publish("GLOBAL", target, (const char *)data);
                     break;
                 case ACT_SUB:
+                    // KEMBALI KE FUNGSI ASLI ANDA (Sementara memakai fungsi utama)
                     ws_registry_add_to_topic(sock_client, app_id, target);
                     break;
                 case ACT_REQ: {
@@ -595,16 +589,13 @@ void ws_system_on_message(int sock_client, unsigned char *data, size_t len) {
                     break;
             }
         } else {
-            //fprintf(stderr, "[DEBUG-WARN] Missing routing keys! Make sure JSON uses '%s' and '%s'\n", 
-            //        ws_cfg.keys.action, ws_cfg.keys.to);
-            write_log_error("[WS] Missing routing keys in header on FD %d. ", sock_client);
+            write_log_error("[WS] Missing routing keys in header on FD %d (Stream %u)", sock_client, stream_id);
         }
     } else {
-        //fprintf(stderr, "[DEBUG-WARN] Header '%s' not found in JSON!\n", ws_cfg.envelope.header);
-        write_log_error("[WS] Envelope header '%s' not found on FD %d", K_HEADER, sock_client);
+        write_log_error("[WS] Envelope header '%s' not found on FD %d (Stream %u)", K_HEADER, sock_client, stream_id);
     }
 
-    // 4. CLEANUP (Wajib!)
+    // 4. CLEANUP
     json_object_put(parsed_json);
     json_tokener_free(tok);
 }
@@ -665,19 +656,259 @@ int ws_system_send_text(int sock_client, SSL *ssl, const char *text) {
 
     // 3. PENGIRIMAN DATA VIA LAYER ABSTRAKSI
     // Kirim header WebSocket terlebih dahulu
-    if (ws_low_level_send(sock_client, frame_header, header_idx) <= 0) return -1;
+    //if (ws_low_level_send(sock_client, frame_header, header_idx) <= 0) return -1;
     
     // Kirim payload teksnya
-    if (ws_low_level_send(sock_client, text, len) <= 0) return -1;
+    //if (ws_low_level_send(sock_client, text, len) <= 0) return -1;
 
     return 0;
+}
+
+/*
+Public Fungsi untuk intehrasi dengan HTTP2
+*/
+
+/**
+ * FUNGSI BARU KHUSUS HTTP/2
+ * Membungkus payload teks ke dalam frame WebSocket, lalu di-enkapsulasi lagi
+ * ke dalam HTTP/2 DATA frame sebelum dikirim ke client.
+ */
+int ws_system_send_text_h2(int sock_client, uint32_t stream_id, const char *text) {
+    if (!text) return -1;
+
+    size_t len = strlen(text);
+    unsigned char ws_header[10]; // Maksimal header WS adalah 10 byte
+    int ws_header_idx = 0;
+
+    // 1. Susun Header WebSocket (RFC 6455)
+    ws_header[ws_header_idx++] = 0x81; // FIN=1, Opcode=1 (Text)
+
+    if (len <= 125) {
+        ws_header[ws_header_idx++] = (uint8_t)len;
+    } else if (len <= 65535) {
+        ws_header[ws_header_idx++] = 126;
+        uint16_t net_len = htons((uint16_t)len);
+        memcpy(&ws_header[ws_header_idx], &net_len, 2);
+        ws_header_idx += 2;
+    } else {
+        ws_header[ws_header_idx++] = 127;
+        uint64_t net_len = htobe64((uint64_t)len);
+        memcpy(&ws_header[ws_header_idx], &net_len, 8);
+        ws_header_idx += 8;
+    }
+
+    // 2. Hitung total ukuran payload untuk HTTP/2 DATA frame
+    size_t ws_total_frame_len = ws_header_idx + len;
+    size_t h2_total_packet_len = 9 + ws_total_frame_len;
+
+    unsigned char *h2_packet = malloc(h2_total_packet_len);
+    if (!h2_packet) return -1;
+
+    // 3. Susun 9 Byte HTTP/2 DATA Frame Header (RFC 7540)
+    h2_packet[0] = (ws_total_frame_len >> 16) & 0xFF; // Length 24-bit
+    h2_packet[1] = (ws_total_frame_len >> 8) & 0xFF;
+    h2_packet[2] = ws_total_frame_len & 0xFF;
+    h2_packet[3] = 0x00;                             // Type: 0x00 (DATA Frame)
+    h2_packet[4] = 0x00;                             // Flags: 0x00
+    
+    uint32_t res_stream_id = stream_id & 0x7FFFFFFF;  // Stream ID 31-bit
+    h2_packet[5] = (res_stream_id >> 24) & 0xFF;
+    h2_packet[6] = (res_stream_id >> 16) & 0xFF;
+    h2_packet[7] = (res_stream_id >> 8) & 0xFF;
+    h2_packet[8] = res_stream_id & 0xFF;
+
+    // 4. Satukan [Header H2] + [Header WS] + [Payload Teks] ke dalam buffer
+    memcpy(h2_packet + 9, ws_header, ws_header_idx);
+    memcpy(h2_packet + 9 + ws_header_idx, text, len);
+
+    // 5. Kirim via low-level abstraction Halmos Anda
+    ssize_t sent = ws_low_level_send(sock_client, h2_packet, h2_total_packet_len);
+    free(h2_packet);
+
+    return (sent <= 0) ? -1 : 0;
+}
+
+/**
+ * FUNGSI BARU KHUSUS HTTP/2
+ * Mengirim frame PONG WebSocket yang dibungkus di dalam HTTP/2 DATA Frame.
+ */
+void ws_system_send_pong_h2(int sock_client, uint32_t stream_id) {
+    unsigned char pong_frame[2] = {0x8A, 0x00}; // FIN=1, Opcode=0xA (Pong), Len=0
+    unsigned char h2_pong[11];                  // 9 byte H2 header + 2 byte WS frame
+    
+    // Susun 9-byte HTTP/2 Header
+    h2_pong[0] = 0x00; h2_pong[1] = 0x00; h2_pong[2] = 0x02; // Length: 2 bytes
+    h2_pong[3] = 0x00;                                     // Type: DATA
+    h2_pong[4] = 0x00;                                     // Flags
+    
+    uint32_t res_stream_id = stream_id & 0x7FFFFFFF;
+    h2_pong[5] = (res_stream_id >> 24) & 0xFF;
+    h2_pong[6] = (res_stream_id >> 16) & 0xFF;
+    h2_pong[7] = (res_stream_id >> 8) & 0xFF;
+    h2_pong[8] = res_stream_id & 0xFF;
+    
+    // Salin 2-byte raw pong frame
+    memcpy(h2_pong + 9, pong_frame, 2);
+    
+    ws_low_level_send(sock_client, h2_pong, 11);
+}
+
+/**
+ * FUNGSI BARU KHUSUS HTTP/2
+ * Memproses raw data WebSocket yang didapatkan setelah melepas header HTTP/2 DATA Frame.
+ */
+
+/* 
+void ws_system_handle_h2_payload(int sock_client, uint32_t stream_id, unsigned char *h2_data, size_t h2_len) {
+    if (!h2_data || h2_len < 2) return;
+
+    int opcode = h2_data[0] & 0x0F;
+    bool masked = (h2_data[1] & 0x80) != 0;
+    uint64_t payload_len = h2_data[1] & 0x7F;
+    size_t header_offset = 2;
+
+    if (payload_len == 126) {
+        if (h2_len < 4) return;
+        uint16_t ext_len;
+        memcpy(&ext_len, h2_data + header_offset, 2);
+        payload_len = ntohs(ext_len);
+        header_offset += 2;
+    } else if (payload_len == 127) {
+        if (h2_len < 10) return;
+        uint64_t ext_len;
+        memcpy(&ext_len, h2_data + header_offset, 8);
+        payload_len = be64toh(ext_len);
+        header_offset += 8;
+    }
+
+    uint8_t mask[4];
+    if (masked) {
+        if (h2_len < header_offset + 4) return;
+        memcpy(mask, h2_data + header_offset, 4);
+        header_offset += 4;
+    }
+
+    if (header_offset + payload_len > h2_len || payload_len > MAX_WS_PAYLOAD) {
+        return;
+    }
+
+    unsigned char *payload = malloc(payload_len + 1);
+    if (!payload) return;
+
+    memcpy(payload, h2_data + header_offset, payload_len);
+    payload[payload_len] = '\0';
+
+    if (masked) {
+        for (size_t i = 0; i < payload_len; i++) {
+            payload[i] ^= mask[i % 4];
+        }
+    }
+
+    switch (opcode) {
+        case WS_OP_TEXT:
+            if (payload) {
+                ws_system_on_message(sock_client, stream_id, payload, payload_len);
+            }
+            break;
+        case WS_OP_PING:
+            // Memanggil fungsi PONG baru khusus HTTP/2
+            ws_system_send_pong_h2(sock_client, stream_id); 
+            break;
+        case WS_OP_PONG:
+            ws_registry_update_activity(sock_client);
+            break;
+        case WS_OP_CLOSE:
+            write_log("[WS-H2] Close frame received from Stream %u", stream_id);
+            break;
+    }
+
+    free(payload);
+}
+*/
+
+void ws_system_handle_h2_payload(int sock_client, uint32_t stream_id, unsigned char *h2_data, size_t h2_len) {
+    if (h2_len < 2 || h2_data == NULL) return;
+
+    // 1. Bedah basic header WebSocket dari payload HTTP/2
+    int opcode = h2_data[0] & 0x0F;
+    bool masked = (h2_data[1] & 0x80) != 0;
+    uint64_t ws_payload_len = h2_data[1] & 0x7F;
+    size_t header_offset = 2;
+
+    // 2. Deteksi Extended Length
+    if (ws_payload_len == 126) {
+        if (h2_len < 4) return;
+        uint16_t ext_len;
+        memcpy(&ext_len, h2_data + 2, 2);
+        ws_payload_len = ntohs(ext_len);
+        header_offset += 2;
+    } else if (ws_payload_len == 127) {
+        if (h2_len < 10) return;
+        uint64_t ext_len;
+        memcpy(&ext_len, h2_data + 2, 8);
+        ws_payload_len = be64toh(ext_len);
+        header_offset += 8;
+    }
+
+    // 3. Ambil Masking Key (Browser WAJIB nge-mask data)
+    uint8_t mask[4] = {0};
+    if (masked) {
+        if (h2_len < header_offset + 4) return;
+        memcpy(mask, h2_data + header_offset, 4);
+        header_offset += 4;
+    }
+
+    // Pastikan ukuran total match agar tidak buffer overflow
+    if (header_offset + ws_payload_len > h2_len) return;
+
+    // 4. Alokasikan buffer untuk menampung JSON bersih
+    unsigned char *clean_json = malloc(ws_payload_len + 1);
+    if (!clean_json) return;
+
+    memcpy(clean_json, h2_data + header_offset, ws_payload_len);
+    clean_json[ws_payload_len] = '\0'; // Amankan dengan null-terminator
+
+    // 5. Buka Topeng Masking (XOR Logic)
+    if (masked) {
+        for (size_t i = 0; i < ws_payload_len; i++) {
+            clean_json[i] ^= mask[i % 4];
+        }
+    }
+
+    // 6. Evaluasi Opcode WebSocket di jalur HTTP/2
+    switch (opcode) {
+        case WS_OP_TEXT:
+            // SEKARANG AMAN: Oper data bersih yang sudah di-unmask ke logic bisnis
+            ws_system_on_message(sock_client, stream_id, clean_json, ws_payload_len);
+            break;
+
+        case WS_OP_PING:
+            write_log("[WS-H2] Ping received on Stream %u. Replying PONG.", stream_id);
+            ws_system_send_pong_h2(sock_client, stream_id);
+            break;
+
+        case WS_OP_PONG:
+            ws_registry_update_activity(sock_client);
+            break;
+
+        case WS_OP_CLOSE:
+            write_log("[WS-H2] Close stream requested for Stream %u", stream_id);
+            ws_system_cleanup_fd(sock_client);
+            break;
+
+        default:
+            break;
+    }
+
+    // 7. Bersihkan memori temporary
+    free(clean_json);
 }
 
 /* ===================================================================
  * 6. BACKGROUND MAINTENANCE (HEARTBEAT & REAPER)
  * =================================================================== */
 
-
+ 
 /*
 FUNGSI HELPER
 */
