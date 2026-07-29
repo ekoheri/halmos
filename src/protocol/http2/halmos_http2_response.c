@@ -35,7 +35,7 @@ void http2_response_routing_bridge(HTTP2Session *session, HTTP2Stream *stream) {
     // 1. INTERSEPSI HANDSHAKE WEBSOCKET HTTP/2 (RFC 8441)
     // =================================================================
     if (req->is_upgrade == true) {
-        fprintf(stderr, "[H2-BRIDGE][DEBUG] Stream %u: Intercepting WebSocket upgrade request.\n", stream->stream_id);
+        //fprintf(stderr, "[H2-BRIDGE][DEBUG] Stream %u: Intercepting WebSocket upgrade request.\n", stream->stream_id);
         unsigned char ws_ok_payload[1] = { 0x88 }; // Indexed Header for Status 200
         
         pthread_mutex_lock(&session->streams_lock);
@@ -68,8 +68,8 @@ void http2_response_routing_bridge(HTTP2Session *session, HTTP2Stream *stream) {
     // 3. JALUR FASTCGI BACKEND
     // =================================================================
     if (backend_type != -1) {
-        fprintf(stderr, "[H2-FCGI][DEBUG] Stream %u: Routing to FastCGI backend (type: %d, URI: %s)\n", 
-                stream->stream_id, backend_type, req->uri ? req->uri : "NULL");
+        //fprintf(stderr, "[H2-FCGI][DEBUG] Stream %u: Routing to FastCGI backend (type: %d, URI: %s)\n", 
+        //        stream->stream_id, backend_type, req->uri ? req->uri : "NULL");
         
         char *backend_data = NULL;
         ssize_t data_len = fcgi_api_request_http2(req, backend_type, req->body_data, req->content_length, &backend_data);
@@ -83,8 +83,8 @@ void http2_response_routing_bridge(HTTP2Session *session, HTTP2Stream *stream) {
                 char *body_data = divider + 4;
                 size_t body_len = data_len - (body_data - backend_data);
 
-                fprintf(stderr, "[H2-FCGI][DEBUG] Stream %u: FastCGI Header & Body Split (Body Len: %zu bytes)\n", 
-                        stream->stream_id, body_len);
+                //fprintf(stderr, "[H2-FCGI][DEBUG] Stream %u: FastCGI Header & Body Split (Body Len: %zu bytes)\n", 
+                //        stream->stream_id, body_len);
 
                 // 1. Kirim HEADERS Frame (END_HEADERS flag = 0x04)
                 http2_response_send_complex_header(session, stream, raw_headers, 0x04);
@@ -92,7 +92,7 @@ void http2_response_routing_bridge(HTTP2Session *session, HTTP2Stream *stream) {
                 // 2. Kirim DATA Frame (END_STREAM flag = true)
                 http2_response_send_data(session, stream, (unsigned char*)body_data, body_len, true);
             } else {
-                fprintf(stderr, "[H2-FCGI][DEBUG] Stream %u: FastCGI Headers-only response.\n", stream->stream_id);
+                //fprintf(stderr, "[H2-FCGI][DEBUG] Stream %u: FastCGI Headers-only response.\n", stream->stream_id);
                 http2_response_send_complex_header(session, stream, backend_data, 0x05); // END_STREAM | END_HEADERS
                 http2_response_send_data(session, stream, NULL, 0, true);
             }
@@ -100,10 +100,10 @@ void http2_response_routing_bridge(HTTP2Session *session, HTTP2Stream *stream) {
             free(backend_data);
 
             stream->state = 4; // State CLOSED
-            fprintf(stderr, "[H2-BRIDGE][DEBUG] Stream %u (FastCGI) finished successfully.\n", stream->stream_id);
+            //fprintf(stderr, "[H2-BRIDGE][DEBUG] Stream %u (FastCGI) finished successfully.\n", stream->stream_id);
             return; 
         } else {
-            fprintf(stderr, "[H2-FCGI][ERR] Stream %u: FastCGI returned empty response / 502.\n", stream->stream_id);
+            //fprintf(stderr, "[H2-FCGI][ERR] Stream %u: FastCGI returned empty response / 502.\n", stream->stream_id);
             http2_response_send_header(session, stream, 502);
             http2_response_send_data(session, stream, "Bad Gateway", 11, true);
             stream->state = 4; 
@@ -119,12 +119,12 @@ void http2_response_routing_bridge(HTTP2Session *session, HTTP2Stream *stream) {
     char *safe_path = sanitize_path(active_root, req->uri);
     struct stat st;
 
-    fprintf(stderr, "[H2-STATIC][DEBUG] Stream %u Request: URI=%s, Resolved Path=%s\n", 
-            stream->stream_id, req->uri ? req->uri : "(null)", safe_path ? safe_path : "(null)");
+    //fprintf(stderr, "[H2-STATIC][DEBUG] Stream %u Request: URI=%s, Resolved Path=%s\n", 
+    //        stream->stream_id, req->uri ? req->uri : "(null)", safe_path ? safe_path : "(null)");
 
     if (!safe_path || stat(safe_path, &st) != 0 || S_ISDIR(st.st_mode)) {
-        fprintf(stderr, "[H2-STATIC][WARN] Stream %u: File not found or path invalid (%s)\n", 
-                stream->stream_id, safe_path ? safe_path : "NULL");
+        //fprintf(stderr, "[H2-STATIC][WARN] Stream %u: File not found or path invalid (%s)\n", 
+        //        stream->stream_id, safe_path ? safe_path : "NULL");
         http2_response_send_header(session, stream, 404);
         http2_response_send_data(session, stream, "Not Found", 9, true);
         if (safe_path) free(safe_path);
@@ -134,42 +134,37 @@ void http2_response_routing_bridge(HTTP2Session *session, HTTP2Stream *stream) {
 
     int fd = open(safe_path, O_RDONLY);
     if (fd == -1) {
-        fprintf(stderr, "[H2-STATIC][ERR] Stream %u: Failed to open descriptor for %s\n", stream->stream_id, safe_path);
+        //fprintf(stderr, "[H2-STATIC][ERR] Stream %u: Failed to open descriptor for %s\n", stream->stream_id, safe_path);
         http2_response_send_header(session, stream, 403);
         http2_response_send_data(session, stream, "Forbidden", 9, true);
+        stream->state = 4;
     } else {
+        // 1. Kirim HANYA response HEADERS (200 OK)
         http2_response_send_header(session, stream, 200);
 
-        unsigned char buffer[16384];
-        ssize_t n;
-        size_t total_sent = 0;
         size_t file_size = (size_t)st.st_size;
-        int chunk_index = 0;
 
         if (file_size == 0) {
-            fprintf(stderr, "[H2-STATIC][DEBUG] Stream %u: 0-byte static file. Sending END_STREAM.\n", stream->stream_id);
+            //fprintf(stderr, "[H2-STATIC][DEBUG] Stream %u: 0-byte static file. Sending END_STREAM.\n", stream->stream_id);
             http2_response_send_data(session, stream, NULL, 0, true);
+            close(fd);
+            stream->state = 4; // CLOSED
         } else {
-            while ((n = read(fd, buffer, sizeof(buffer))) > 0) {
-                total_sent += (size_t)n;
-                bool is_last_chunk = (total_sent >= file_size);
+            // 2. Jika ada isi file, DAFTARKAN FD KE STREAM (JANGAN DIBACA DI SINI!)
+            pthread_mutex_lock(&session->streams_lock);
+            stream->file_fd = fd;
+            stream->file_size = file_size;
+            stream->file_offset = 0;
+            stream->is_sending_file = true;
+            pthread_mutex_unlock(&session->streams_lock);
 
-                fprintf(stderr, "[H2-STATIC][TRACE] Stream %u Chunk #%d | Read: %zd | Total: %zu/%zu | IsLast: %s\n", 
-                        stream->stream_id, chunk_index++, n, total_sent, file_size, is_last_chunk ? "TRUE" : "FALSE");
-
-                http2_response_send_data(session, stream, buffer, (size_t)n, is_last_chunk);
-            }
-
-            if (n < 0) {
-                fprintf(stderr, "[H2-STATIC][ERR] Stream %u: File read error on FD %d!\n", stream->stream_id, fd);
-            }
+            //fprintf(stderr, "[H2-STATIC][ASYNC] Stream %u: File FD %d registered for async flushing (%zu bytes).\n", 
+            //        stream->stream_id, fd, file_size);
         }
-        close(fd);
-        stream->state = 4; // State CLOSED
     }
     
     if (safe_path) free(safe_path);
-    fprintf(stderr, "[H2-BRIDGE][DEBUG] Stream %u finished serving static file.\n", stream->stream_id);
+    //fprintf(stderr, "[H2-BRIDGE][DEBUG] Stream %u static file setup complete.\n", stream->stream_id);
 }
 
 void http2_response_send_header(HTTP2Session *session, HTTP2Stream *stream, int status_code) {
@@ -220,8 +215,8 @@ void http2_response_send_header(HTTP2Session *session, HTTP2Stream *stream, int 
     memcpy(&hpack_buf[pos], mime_to_use, mlen);
     pos += mlen;
 
-    fprintf(stderr, "[H2-HEADER][DEBUG] Stream %u: Sending status %d header frame (%d bytes, MIME: %s)\n", 
-            stream->stream_id, status_code, pos, mime_to_use);
+    //fprintf(stderr, "[H2-HEADER][DEBUG] Stream %u: Sending status %d header frame (%d bytes, MIME: %s)\n", 
+    //        stream->stream_id, status_code, pos, mime_to_use);
 
     pthread_mutex_lock(&session->streams_lock);
     http2_send_frame(session->fd, session->is_tls, 0x01, 0x04, stream->stream_id, hpack_buf, (uint32_t)pos);
@@ -276,8 +271,8 @@ void http2_response_send_header_kompleks(HTTP2Session *session, HTTP2Stream *str
     memcpy(&hpack_buf[pos], mime_to_use, mlen);
     pos += mlen;
 
-    fprintf(stderr, "[H2-HEADER][DEBUG] Stream %u: Sending status %d header frame (%d bytes, MIME: %s)\n", 
-            stream->stream_id, status_code, pos, mime_to_use);
+    //fprintf(stderr, "[H2-HEADER][DEBUG] Stream %u: Sending status %d header frame (%d bytes, MIME: %s)\n", 
+    //        stream->stream_id, status_code, pos, mime_to_use);
 
     pthread_mutex_lock(&session->streams_lock);
     http2_send_frame(session->fd, session->is_tls, 0x01, 0x04, stream->stream_id, hpack_buf, (uint32_t)pos);
@@ -295,7 +290,7 @@ void http2_response_send_data(HTTP2Session *session, HTTP2Stream *stream, const 
     // Skenario A: Data Kosong (0 bytes) tapi is_end = true
     if (len == 0) {
         if (is_end) {
-            fprintf(stderr, "[H2-DATA][DEBUG] Stream %u: Sending empty DATA frame with END_STREAM (0x01)\n", stream->stream_id);
+            //fprintf(stderr, "[H2-DATA][DEBUG] Stream %u: Sending empty DATA frame with END_STREAM (0x01)\n", stream->stream_id);
             http2_send_frame(session->fd, session->is_tls, 0x00, 0x01, stream->stream_id, NULL, 0);
             stream->state = 4; // State Closed
         }
@@ -313,8 +308,8 @@ void http2_response_send_data(HTTP2Session *session, HTTP2Stream *stream, const 
             end_stream_sent = true;
         }
 
-        fprintf(stderr, "[H2-DATA][TRACE] Stream %u: Sending DATA frame | Chunk: %u bytes | Remaining: %zu | Flags: 0x%02X\n", 
-                stream->stream_id, chunk, remaining - chunk, flags);
+        //fprintf(stderr, "[H2-DATA][TRACE] Stream %u: Sending DATA frame | Chunk: %u bytes | Remaining: %zu | Flags: 0x%02X\n", 
+        //        stream->stream_id, chunk, remaining - chunk, flags);
 
         http2_send_frame(session->fd, session->is_tls, 0x00, flags, stream->stream_id, ptr, chunk);
 
@@ -324,13 +319,13 @@ void http2_response_send_data(HTTP2Session *session, HTTP2Stream *stream, const 
 
     // Backup safety check: Hanya kirim empty frame jika loop di atas BELUM mengirimkan flag END_STREAM
     if (is_end && !end_stream_sent) {
-        fprintf(stderr, "[H2-DATA][WARN] Stream %u: Sending fallback empty END_STREAM frame\n", stream->stream_id);
+        //fprintf(stderr, "[H2-DATA][WARN] Stream %u: Sending fallback empty END_STREAM frame\n", stream->stream_id);
         http2_send_frame(session->fd, session->is_tls, 0x00, 0x01, stream->stream_id, NULL, 0);
     }
 
     if (is_end) {
         stream->state = 4; // Set state stream ke CLOSED
-        fprintf(stderr, "[H2-DATA][DEBUG] Stream %u state set to CLOSED (4)\n", stream->stream_id);
+        //fprintf(stderr, "[H2-DATA][DEBUG] Stream %u state set to CLOSED (4)\n", stream->stream_id);
     }
 
     pthread_mutex_unlock(&session->streams_lock);
@@ -342,7 +337,7 @@ Private Function Internal Helper
 
 void http2_response_send_complex_header(HTTP2Session *session, HTTP2Stream *stream, char *raw_headers, unsigned char flags) {
     if (!raw_headers) {
-        fprintf(stderr, "[H2-COMPLEX-HEADER][ERR] Stream %u: raw_headers is NULL!\n", stream->stream_id);
+        //fprintf(stderr, "[H2-COMPLEX-HEADER][ERR] Stream %u: raw_headers is NULL!\n", stream->stream_id);
         return;
     }
 
@@ -350,7 +345,7 @@ void http2_response_send_complex_header(HTTP2Session *session, HTTP2Stream *stre
     size_t buf_capacity = 16384;
     unsigned char *hpack_buf = (unsigned char *)malloc(buf_capacity);
     if (!hpack_buf) {
-        fprintf(stderr, "[H2-COMPLEX-HEADER][ERR] Stream %u: Failed to allocate HPACK buffer!\n", stream->stream_id);
+        //fprintf(stderr, "[H2-COMPLEX-HEADER][ERR] Stream %u: Failed to allocate HPACK buffer!\n", stream->stream_id);
         return;
     }
 
@@ -367,20 +362,20 @@ void http2_response_send_complex_header(HTTP2Session *session, HTTP2Stream *stre
         if (parsed > 0) {
             final_status = parsed;
         }
-        fprintf(stderr, "[H2-COMPLEX-HEADER][DEBUG] Stream %u: Found 'Status:' header -> Parsed Status: %d\n", 
-                stream->stream_id, parsed);
+        //fprintf(stderr, "[H2-COMPLEX-HEADER][DEBUG] Stream %u: Found 'Status:' header -> Parsed Status: %d\n", 
+        //        stream->stream_id, parsed);
     }
 
     // 2. DETEKSI HEADER "Location:"
     if (strcasestr(raw_headers, "Location:") != NULL) {
         has_location = true;
-        fprintf(stderr, "[H2-COMPLEX-HEADER][DEBUG] Stream %u: Found 'Location:' header.\n", stream->stream_id);
+        //fprintf(stderr, "[H2-COMPLEX-HEADER][DEBUG] Stream %u: Found 'Location:' header.\n", stream->stream_id);
     }
 
     // 3. KOREKSI STATUS UNTUK REDIRECT
     if (has_location && (final_status == 200 || final_status == 304 || final_status == 0)) {
-        fprintf(stderr, "[H2-COMPLEX-HEADER][DEBUG] Stream %u: Override status %d -> 302 (Location header exists)\n", 
-                stream->stream_id, final_status);
+        //(stderr, "[H2-COMPLEX-HEADER][DEBUG] Stream %u: Override status %d -> 302 (Location header exists)\n", 
+        //        stream->stream_id, final_status);
         final_status = 302;
     }
 
@@ -450,7 +445,7 @@ void http2_response_send_complex_header(HTTP2Session *session, HTTP2Stream *stre
                 buf_capacity *= 2;
                 unsigned char *new_buf = (unsigned char *)realloc(hpack_buf, buf_capacity);
                 if (!new_buf) {
-                    fprintf(stderr, "[H2-COMPLEX-HEADER][ERR] Stream %u: Realloc failed! Truncating headers.\n", stream->stream_id);
+                    //fprintf(stderr, "[H2-COMPLEX-HEADER][ERR] Stream %u: Realloc failed! Truncating headers.\n", stream->stream_id);
                     break;
                 }
                 hpack_buf = new_buf;
@@ -486,15 +481,15 @@ void http2_response_send_complex_header(HTTP2Session *session, HTTP2Stream *stre
             memcpy(hpack_buf + pos, value, vlen);
             pos += (int)vlen;
 
-            fprintf(stderr, "[H2-COMPLEX-HEADER][TRACE] Stream %u Header: %s: %s (KLen: %zu, VLen: %zu)\n", 
-                    stream->stream_id, key, value, klen, vlen);
+            //fprintf(stderr, "[H2-COMPLEX-HEADER][TRACE] Stream %u Header: %s: %s (KLen: %zu, VLen: %zu)\n", 
+            //        stream->stream_id, key, value, klen, vlen);
         }
         line = strtok_r(NULL, "\r\n", &saveptr);
     }
     free(headers_copy);
 
-    fprintf(stderr, "[H2-COMPLEX-HEADER][DEBUG] Stream %u: Encoded HPACK Total Size: %d bytes | Flags: 0x%02X\n", 
-            stream->stream_id, pos, flags);
+    //fprintf(stderr, "[H2-COMPLEX-HEADER][DEBUG] Stream %u: Encoded HPACK Total Size: %d bytes | Flags: 0x%02X\n", 
+    //        stream->stream_id, pos, flags);
         
     pthread_mutex_lock(&session->streams_lock);
     http2_send_frame(session->fd, session->is_tls, 0x01, flags, stream->stream_id, hpack_buf, (uint32_t)pos);

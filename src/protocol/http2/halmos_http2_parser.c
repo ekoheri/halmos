@@ -307,11 +307,11 @@ bool http2_parser_parse_header(HTTP2Session *session, HTTP2Stream *stream, const
     req->is_valid = (req->method[0] != '\0' && req->uri != NULL);
 
     // DEBUG TRACE
-    #ifdef DEBUG
-    fprintf(stderr, "[H2-PARSE][DEBUG] Stream %u Parsed: Method=%s, URI=%s, Host=%s, Valid=%d\n", 
-            stream->stream_id, req->method, req->uri ? req->uri : "NULL", 
-            req->host ? req->host : "NULL", req->is_valid);
-    #endif
+    //#ifdef DEBUG
+    //fprintf(stderr, "[H2-PARSE][DEBUG] Stream %u Parsed: Method=%s, URI=%s, Host=%s, Valid=%d\n", 
+    //        stream->stream_id, req->method, req->uri ? req->uri : "NULL", 
+    //        req->host ? req->host : "NULL", req->is_valid);
+    //#endif
 
     return req->is_valid;
 }
@@ -320,10 +320,10 @@ void http2_parser_free_memory(HTTP2Stream *stream) {
     if (!stream) return;
     RequestHeader *req = &stream->http1_compat;
 
-    #ifdef DEBUG
-    fprintf(stderr, "[H2-PARSE][DEBUG] Cleaning memory for Stream %u (URI: %p, Host: %p)\n", 
-            stream->stream_id, (void*)req->uri, (void*)req->host);
-    #endif
+    //#ifdef DEBUG
+    //fprintf(stderr, "[H2-PARSE][DEBUG] Cleaning memory for Stream %u (URI: %p, Host: %p)\n", 
+    //        stream->stream_id, (void*)req->uri, (void*)req->host);
+    //#endif
 
     if (req->uri) {
         free(req->uri);
@@ -355,42 +355,6 @@ void http2_parser_free_memory(HTTP2Stream *stream) {
         free(req->body_data); 
         req->body_data = NULL; 
     }
-}
-
-void http2_parser_free_memory_lama(HTTP2Stream *stream) {
-    if (!stream) return;
-    RequestHeader *req = &stream->http1_compat;
-
-    #define IS_IN_ROUTE_RESULT(p) ((char*)(p) >= (char*)req->route_result && (char*)(p) < (char*)(req->route_result + sizeof(req->route_result)))
-
-    // Bebaskan URI jika dialokasikan di heap (bukan menunjuk ke buffer statis internal route_result)
-    if (req->uri && !IS_IN_ROUTE_RESULT(req->uri)) {
-        free(req->uri);
-    }
-    req->uri = NULL;
-
-    // Bebaskan Host jika dialokasikan di heap
-    if (req->host && !IS_IN_ROUTE_RESULT(req->host)) {
-        free(req->host);
-    }
-    req->host = NULL;
-
-    // Sisa cleanup field request lainnya tetap sama
-    if (req->content_type) { free(req->content_type); req->content_type = NULL; }
-    if (req->cookie_data) { free(req->cookie_data); req->cookie_data = NULL; }
-
-    if (req->parts) {
-        http_multipart_free_parts(req->parts, req->parts_count);
-        req->parts = NULL; 
-        req->parts_count = 0;
-    }
-
-    if (req->body_data) { 
-        free(req->body_data); 
-        req->body_data = NULL; 
-    }
-
-    #undef IS_IN_ROUTE_RESULT
 }
 
 /* Private Function - Internal Helper */
@@ -471,8 +435,8 @@ char* hpack_decode_string(const unsigned char **pos, const unsigned char *end) {
 
     // Boundary check & sanity check
     if (len > 10240 || *pos + len > end) {
-        fprintf(stderr, "[H2-HPACK][ERR] String decode boundary limit exceeded! Len=%u, Remaining=%ld\n", 
-                len, (long)(end - *pos));
+        //fprintf(stderr, "[H2-HPACK][ERR] String decode boundary limit exceeded! Len=%u, Remaining=%ld\n", 
+        //        len, (long)(end - *pos));
         *pos = end; 
         return NULL;
     }
@@ -481,7 +445,7 @@ char* hpack_decode_string(const unsigned char **pos, const unsigned char *end) {
     if (is_huffman) {
         str = http2_huffman_decode(*pos, len);
         if (!str) {
-            fprintf(stderr, "[H2-HPACK][ERR] Huffman decode failed for len %u\n", len);
+            //fprintf(stderr, "[H2-HPACK][ERR] Huffman decode failed for len %u\n", len);
         }
     } else {
         str = malloc(len + 1);
@@ -489,34 +453,7 @@ char* hpack_decode_string(const unsigned char **pos, const unsigned char *end) {
             memcpy(str, *pos, len); 
             str[len] = '\0'; 
         } else {
-            fprintf(stderr, "[H2-HPACK][ERR] Malloc failed for raw string len %u\n", len);
-        }
-    }
-    *pos += len;
-    return str;
-}
-
-char* hpack_decode_string_lama(const unsigned char **pos, const unsigned char *end) {
-    if (*pos >= end) return NULL;
-    
-    uint8_t first_byte = **pos;
-    bool is_huffman = (first_byte & 0x80) != 0;
-    uint32_t len = hpack_decode_int(pos, end, 0x7F);
-
-    // --- FIX: Majukan pointer ke 'end' jika terjadi error untuk mencegah Infinite Loop ---
-    if (len > 10240 || *pos + len > end) {
-        *pos = end; 
-        return NULL;
-    }
-
-    char *str = NULL;
-    if (is_huffman) {
-        str = http2_huffman_decode(*pos, len);
-    } else {
-        str = malloc(len + 1);
-        if (str) { 
-            memcpy(str, *pos, len); 
-            str[len] = '\0'; 
+            //fprintf(stderr, "[H2-HPACK][ERR] Malloc failed for raw string len %u\n", len);
         }
     }
     *pos += len;
