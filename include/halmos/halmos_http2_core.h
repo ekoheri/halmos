@@ -85,6 +85,7 @@ typedef struct {
  */
 typedef struct HTTP2Stream {
     uint32_t stream_id;
+    int32_t out_window_size; // Default RFC 7540: 65535
     HTTP2StreamState state;
     
     // Reuse arsitektur RequestHeader Halmos (Zero-copy)
@@ -107,6 +108,9 @@ typedef struct HTTP2Stream {
 typedef struct {
     int fd;
     bool is_tls;
+
+    int32_t out_window_size; // Default RFC 7540: 65535
+    uint32_t peer_initial_window_size;
 
     /* --- HPACK STATE --- */
     HPACKDynamicTable dyn_table;

@@ -142,46 +142,19 @@ void event_loop_run() {
             } else if(current_fd == bridge_fd) {
                 handle_bridge_request(bridge_fd);
             } else {
-                // --- BAGIAN YANG DIUBAH (RAMPING & AMAN) ---
                 int client_fd = events[i].data.fd;
+                uint32_t ev = events[i].events;
 
-                // CEK ERROR: Jika socket bermasalah, jangan masukkan ke antrean
-                if ((events[i].events & EPOLLERR) || (events[i].events & EPOLLHUP)) {
-                    write_log_error("[NET] Closing FD %d (EPOLLERR/HUP)", client_fd);
-
-                    global_telemetry.active_connections--; // <--- TAMBAHKAN INI! Tamu batal masuk.
-                    // PENTING: Bersihkan sisa-sisa SSL di mapping table sebelum FD ditutup!
-
+                // 1. CEK ERROR / DISCONNECT DULU
+                if (ev & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) {
+                    write_log_error("[NET] Closing FD %d (EPOLLERR/HUP/RDHUP)", client_fd);
+                    global_telemetry.active_connections--;
                     event_loop_cleanup_connection(client_fd);
-                    
-                    close(client_fd);
                     continue;
                 }
 
-                // 1. Masukkan ke antrean TANPA memanipulasi epoll di sini.
-                // Karena kita pakai EPOLLONESHOT, kernel otomatis menonaktifkan
-                // FD ini dari epoll_wait sampai ada yang panggil MOD lagi.
-                /*
-                int status = queue_push(&global_queue, client_fd); 
-
-                if (status < 0) {
-                    if (status == -1) {
-                        write_log_error("[CORE] Worker queue full! Rejecting FD %d with 503", client_fd);
-                        char *res = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-                        send(client_fd, res, strlen(res), 0);
-                    } else {
-                        write_log_error("[CORE] Enqueue failed for FD %d (Internal Error)", client_fd);
-                    }
-
-                    global_telemetry.active_connections--; // Kurangi karena gagal/tutup
-
-                    // Hapus dulu dari epoll sebelum close
-                    epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, NULL);
-                    shutdown(client_fd, SHUT_RDWR); // Pastikan browser tidak nunggu
-                    close(client_fd);
-                }
-                */
-                if ((events[i].events & EPOLLIN) || (events[i].events & EPOLLOUT)) {
+                // 2. CEK I/O EVENT (BACA ATAU TULIS)
+                if (ev & (EPOLLIN | EPOLLOUT)) {
                     int status = queue_push(&global_queue, client_fd); 
 
                     if (status < 0) {
@@ -194,7 +167,6 @@ void event_loop_run() {
                         }
 
                         global_telemetry.active_connections--;
-
                         epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, NULL);
                         shutdown(client_fd, SHUT_RDWR);
                         close(client_fd);
@@ -235,7 +207,7 @@ void event_loop_rearm_epoll_ex(int fd, uint32_t events_mask) {
     }
 } 
 void event_loop_rearm_epoll(int fd) {
-    event_loop_rearm_epoll_ex(fd, EPOLLIN);
+    event_loop_rearm_epoll_ex(fd, EPOLLIN | EPOLLOUT);
 }
 
 void event_loop_cleanup_connection(int sock_client) {
