@@ -1,9 +1,11 @@
 /*
-IPC : Inter-Process Communication
-Adalah mekanisme atau cara supaya satu program (proses) bisa ngobrol, 
-tukar data, atau kasih instruksi ke program lainnya yang lagi jalan di sistem operasi yang sama.
-Di projek lu ini, IPC adalah "jembatan" yang lu bikin antara PHP dan Halmos (C).
-*/
+ * IPC : Inter-Process Communication (Unix Domain Socket Bridge)
+ * Jembatan komunikasi berkecepatan tinggi antara PHP/Backend dengan Halmos Engine (C).
+ */
+
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE // Diperlukan untuk accept4() dan flag SOCK_CLOEXEC/SOCK_NONBLOCK
+#endif
 
 #include "halmos_ws_ipc.h"
 #include "halmos_ws_system.h" // Untuk akses registry & send_ws_frame
@@ -19,17 +21,17 @@ Di projek lu ini, IPC adalah "jembatan" yang lu bikin antara PHP dan Halmos (C).
 #include <errno.h>
 #include <poll.h>      // Wajib ada untuk fungsi poll()
 
-// global scope di halmos_ws_ipc untuk buffer
-//static char ipc_buffer[65536];
-
-// Fungsi pembantu set non-blocking
-static void set_nonblocking_bridge(int fd) {
+// Set non-blocking flags safely with complete error checking
+static int set_nonblocking_bridge(int fd) {
     int flags = fcntl(fd, F_GETFL, 0);
-    fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+    if (flags == -1) return -1;
+    if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) == -1) return -1;
+    return 0;
 }
 
 int setup_uds_bridge(const char *path) {
-    int bridge_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    // SOCK_CLOEXEC prevents fd leaks across fork/exec calls
+    int bridge_fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
     if (bridge_fd < 0) return -1;
 
     struct sockaddr_un addr;
@@ -37,100 +39,62 @@ int setup_uds_bridge(const char *path) {
     addr.sun_family = AF_UNIX;
     strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
 
-    unlink(path); // Bersihkan sisa socket lama
+    // Safeguard: Only unlink existing files if they are genuine UNIX domain sockets
+    struct stat st;
+    if (stat(path, &st) == 0) {
+        if (S_ISSOCK(st.st_mode)) {
+            unlink(path);
+        } else {
+            write_log_error("[IPC] File %s exists and is NOT a socket. Aborting.", path);
+            close(bridge_fd);
+            return -1;
+        }
+    }
+
     if (bind(bridge_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
         close(bridge_fd);
         return -1;
     }
 
-    // Ubah permission file socket agar bisa diakses oleh user www-data (PHP)
-    if (chmod(path, 0666) < 0) {
+    // 0660 grants RW permissions to owner and group (e.g., www-data) while blocking world access
+    if (chmod(path, 0660) < 0) {
         write_log_error("[IPC] Failed to change permissions on %s", path);
     }
     
-    //SOMAXCONN adalah konstanta sistem (biasanya 128 atau 4096 tergantung konfigurasi OS) 
-    //yang berarti "kasih limit maksimal yang diizinkan sistem".
-    listen(bridge_fd, SOMAXCONN);
-    set_nonblocking_bridge(bridge_fd);
+    // Explicit return checking prevents leaving partially bound sockets open on failure
+    if (listen(bridge_fd, SOMAXCONN) < 0) {
+        write_log_error("[IPC] Listen failed on %s: %s", path, strerror(errno));
+        close(bridge_fd);
+        unlink(path);
+        return -1;
+    }
+
+    if (set_nonblocking_bridge(bridge_fd) < 0) {
+        write_log_error("[IPC] Failed to set non-blocking on bridge_fd");
+        close(bridge_fd);
+        unlink(path);
+        return -1;
+    }
 
     write_log("[IPC] Bridge established at %s", path);
     return bridge_fd;
 }
 
-/*
 void handle_bridge_request(int bridge_fd) {
-    while (1) {
-        int client_sock = accept(bridge_fd, NULL, NULL);
-        if (client_sock < 0) {
-            // EAGAIN di sini berarti semua antrean 'accept' sudah habis ditarik
-            if (errno == EAGAIN || errno == EWOULDBLOCK) break; 
-            return;
-        }
-
-        // [Security Check UID tetap di sini...]
-
-        // SET NON-BLOCKING pada client_sock
-        set_nonblocking_bridge(client_sock);
-
-        ssize_t total_received = 0;
-        int retry_count = 0;
-
-        while (total_received < (ssize_t)(sizeof(ipc_buffer) - 1)) {
-            ssize_t n = read(client_sock, ipc_buffer + total_received, (ssize_t)sizeof(ipc_buffer) - 1 - total_received);
-
-            if (n > 0) {
-                total_received += n;
-                // Cek apakah pesan sudah berakhir dengan newline
-                if (ipc_buffer[total_received - 1] == '\n') break;
-            } 
-            else if (n < 0) {
-                if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                    // Data belum siap di kernel. Karena ini UDS (lokal), 
-                    // kita bisa kasih toleransi retry kecil atau balik ke loop utama.
-                    if (retry_count++ < 1000) continue; 
-                    else break;
-                }
-                if (errno == EINTR) continue;
-                break;
-            } 
-            else { // n == 0 (Client tutup koneksi)
-                break;
-            }
-        }
-
-        if (total_received > 0) {
-            ipc_buffer[total_received] = '\0';
-            // Bersihkan \n \r
-            for (ssize_t i = total_received - 1; i >= 0 && (ipc_buffer[i] == '\n' || ipc_buffer[i] == '\r'); i--) {
-                ipc_buffer[i] = '\0';
-            }
-            ws_system_internal_dispatch(ipc_buffer);
-        }
-
-        close(client_sock);
-    }
-}
-*/
-
-void handle_bridge_request(int bridge_fd) {
-    // PERBAIKAN 1: Buffer dipindah ke local stack fungsi agar Thread-Safe 
-    // & tidak terjadi korupsi data antar request IPC dari worker PHP
+    // Thread-safe local stack buffer to prevent race conditions during high IPC load
     char local_ipc_buffer[65536];
 
     while (1) {
-        int client_sock = accept(bridge_fd, NULL, NULL);
+        // accept4() avoids extra fcntl() calls and atomically sets NONBLOCK and CLOEXEC on accepted sockets
+        int client_sock = accept4(bridge_fd, NULL, NULL, SOCK_NONBLOCK | SOCK_CLOEXEC);
         if (client_sock < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) break; 
             return;
         }
 
-        // [Security Check UID tetap di sini...]
-
-        set_nonblocking_bridge(client_sock);
-
         ssize_t total_received = 0;
         int retry_count = 0;
-        const int max_retries = 5; // Batasi retry secara rasional
+        const int max_retries = 5;
 
         while (total_received < (ssize_t)(sizeof(local_ipc_buffer) - 1)) {
             ssize_t n = read(client_sock, local_ipc_buffer + total_received, 
@@ -138,31 +102,28 @@ void handle_bridge_request(int bridge_fd) {
 
             if (n > 0) {
                 total_received += n;
-                retry_count = 0; // Reset counter jika ada data masuk yang valid
+                retry_count = 0;
                 
-                // Proteksi batas bawah indeks agar aman sebelum cek newline
                 if (total_received > 0 && local_ipc_buffer[total_received - 1] == '\n') {
                     break;
                 }
             } 
             else if (n < 0) {
                 if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                    // PERBAIKAN 2: Gunakan poll() dengan timeout 10ms untuk mencegah 
-                    // loop gila (spinning) yang memicu CPU Spike 100%
                     struct pollfd pfd = { .fd = client_sock, .events = POLLIN };
                     int poll_res = poll(&pfd, 1, 10); 
                     
                     if (poll_res > 0) {
-                        continue; // Data siap dibaca kembali, ulangi read()
+                        continue;
                     } else {
                         if (retry_count++ < max_retries) continue;
-                        else break; // Timeout habis, amankan server dari koneksi gantung
+                        else break;
                     }
                 }
                 if (errno == EINTR) continue;
                 break;
             } 
-            else { // n == 0 (Client/PHP tutup koneksi)
+            else { 
                 break;
             }
         }
@@ -170,16 +131,14 @@ void handle_bridge_request(int bridge_fd) {
         if (total_received > 0) {
             local_ipc_buffer[total_received] = '\0';
             
-            // PERBAIKAN 3: Proteksi Bound-Check (i >= 0) agar tidak terjadi 
-            // Buffer Underflow / SegFault jika pesan IPC hanya berisi \n
             ssize_t i = total_received - 1;
             while (i >= 0 && (local_ipc_buffer[i] == '\n' || local_ipc_buffer[i] == '\r')) {
                 local_ipc_buffer[i] = '\0';
                 i--;
             }
             
-            // Kirim ke router internal Halmos jika string tidak kosong
-            if (strlen(local_ipc_buffer) > 0) {
+            // Direct O(1) null check avoids redundant memory scan via strlen()
+            if (local_ipc_buffer[0] != '\0') {
                 ws_system_internal_dispatch(local_ipc_buffer);
             }
         }
@@ -187,4 +146,3 @@ void handle_bridge_request(int bridge_fd) {
         close(client_sock);
     }
 }
-
