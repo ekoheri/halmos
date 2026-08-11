@@ -37,6 +37,10 @@
 #define HTTP2_STREAM_BUCKETS      (1 << HTTP2_HASH_POWER)
 #define HTTP2_GOLDEN_RATIO_32     2654435769U   // (2^32) * (\phi - 1)
 
+/* --- HPACK CONSTANTS --- */
+#define HPACK_NAME_MAX   128
+#define HPACK_VALUE_MAX  512
+
 /**
  * Representasi Header Frame HTTP/2 (9 Bytes)
  */
@@ -63,10 +67,16 @@ typedef enum {
 /**
  * HPACK Dynamic Table Entry
  */
-typedef struct {
+/*typedef struct {
     char *name;
     char *value;
     uint32_t entry_size; // Dihitung: name_len + value_len + 32 (RFC overhead)
+} HPACKEntry;*/
+
+typedef struct {
+    char name[HPACK_NAME_MAX];
+    char value[HPACK_VALUE_MAX];
+    uint32_t entry_size;
 } HPACKEntry;
 
 /**

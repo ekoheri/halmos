@@ -542,12 +542,18 @@ cleanup:
         session->streams_hash[i] = NULL;
     }
 
+    /*
     if (session->dyn_table.entries) {
         for (uint32_t i = 0; i < session->dyn_table.count; i++) {
             if (session->dyn_table.entries[i].name) free(session->dyn_table.entries[i].name);
             if (session->dyn_table.entries[i].value) free(session->dyn_table.entries[i].value);
         }
         free(session->dyn_table.entries);
+    }*/
+
+    if (session->dyn_table.entries) {
+        free(session->dyn_table.entries);
+        session->dyn_table.entries = NULL;
     }
 
     pthread_mutex_destroy(&session->hpack_lock);
