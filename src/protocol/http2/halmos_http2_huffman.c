@@ -1,5 +1,7 @@
 #include "halmos_http2_huffman.h"
 
+#include <stdbool.h>
+
 const nghttp2_huff_decode huff_decode_table[][16] = {
     /* 0 */
   {
@@ -4889,39 +4891,35 @@ const nghttp2_huff_decode huff_decode_table[][16] = {
 /**
  * Huffman Decoder (Trace enabled)
  */
-char* http2_huffman_decode(const unsigned char *src, size_t len) {
-    if (!src || len == 0) return NULL;
-    
-    // Alokasi memori (Huffman HTTP/2 maksimal mengembang ~1.6x)
-    // len * 2 + 1 sudah sangat aman.
-    char *dest = malloc(len * 2 + 1); 
-    if (!dest) return NULL;
+
+bool http2_huffman_decode(const unsigned char *src, size_t len, char *dest, size_t dest_size) {
+    if (!src || !dest || len == 0 || dest_size == 0) return false;
 
     size_t out_pos = 0;
     uint16_t state = 0;
-    
+
     for (size_t i = 0; i < len; i++) {
         uint8_t b = src[i];
-        
-        // High nibble (4-bit pertama)
+
+        // High nibble
         const nghttp2_huff_decode *t1 = &huff_decode_table[state][b >> 4];
         if (t1->flags & NGHTTP2_HUFF_SYM) {
+            if (out_pos + 1 >= dest_size) return false; // Overflow protection
             dest[out_pos++] = t1->sym;
         }
         state = t1->fstate;
 
-        // Low nibble (4-bit terakhir)
+        // Low nibble
         const nghttp2_huff_decode *t2 = &huff_decode_table[state][b & 0x0f];
         if (t2->flags & NGHTTP2_HUFF_SYM) {
+            if (out_pos + 1 >= dest_size) return false; // Overflow protection
             dest[out_pos++] = t2->sym;
         }
         state = t2->fstate;
     }
-    
-    dest[out_pos] = '\0';
 
-    // Jika terjadi anomali (state tidak kembali ke awal/final), 
-    // namun tetap menghasilkan string, kita tetap kembalikan stringnya 
-    // agar sistem tidak crash/null.
-    return dest;
+    dest[out_pos] = '\0';
+    return true;
 }
+
+

@@ -21,6 +21,7 @@ void ssl_init_mapping(int max_fds);
 void ssl_set_for_fd(int fd, SSL *ssl);
 SSL* ssl_get_for_fd(int fd);
 void ssl_nullify_ptr(int fd);
+void ssl_free_for_fd(int fd);
 
 // Fungsi Operasional
 ssize_t ssl_send(int fd, const void *buf, size_t len);

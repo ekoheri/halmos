@@ -14,24 +14,25 @@
 #include <errno.h>
 #include <string.h>
 #include <unistd.h>
+#include <pthread.h>
 
-#include <sys/socket.h>  // Biar kenal shutdown(), recv(), SHUT_WR, MSG_DONTWAIT
-#include <netinet/in.h>  // Tambahan buat struct networking
-#include <arpa/inet.h>   // Buat konversi alamat IP kalau butuh
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 
-// Variable Global untuk SSl
+// Variable Global untuk SSL
 SSL_CTX *halmos_tls_ctx = NULL;
 
-// Variabel ini "sembunyi" di dalam file ini saja
+// Variabel internal
 static SSL** fd_to_ssl_map = NULL;
 static int current_max_limit = 0;
 
-// Tambahkan fungsi callback ini di atas ssl_init
+// Mutex Guard untuk mengamankan konkurensi akses mapping antar Worker Threads
+static pthread_mutex_t g_ssl_map_lock = PTHREAD_MUTEX_INITIALIZER;
+
 static int alpn_select_cb(SSL *ssl, const unsigned char **out, unsigned char *outlen,
                           const unsigned char *in, unsigned int inlen, void *arg) {
     (void)ssl;
-    // Fungsi pembantu OpenSSL untuk memilih protokol terbaik
-    // arg berisi daftar protokol kita (protos)
     if (SSL_select_next_proto((unsigned char **)out, outlen, (const unsigned char *)arg, 12, in, inlen) 
         != OPENSSL_NPN_NEGOTIATED) {
         return SSL_TLSEXT_ERR_NOACK;
@@ -39,17 +40,13 @@ static int alpn_select_cb(SSL *ssl, const unsigned char **out, unsigned char *ou
     return SSL_TLSEXT_ERR_OK;
 }
 
-// Fungsi untuk mengaktifkan SSL
+void ssl_init(void) {
+    if (!config.tls_enabled) return;
 
-void ssl_init() {
-    if (!config.tls_enabled) return; // Jangan inisialisasi kalau di config OFF
-
-    // 1. Inisialisasi library
     SSL_library_init();
     OpenSSL_add_all_algorithms();
     SSL_load_error_strings();
 
-    // 2. Buat Context (Gunakan metode TLS_server_method agar support TLS 1.2 & 1.3)
     const SSL_METHOD *method = TLS_server_method();
     halmos_tls_ctx = SSL_CTX_new(method);
 
@@ -59,27 +56,15 @@ void ssl_init() {
         exit(EXIT_FAILURE);
     }
 
-    // SEKARANG BARU BOLEH PASANG ALPN
-    // INI UNTK HTTP2
     static unsigned char protos[] = {
         2, 'h', '2',
         8, 'h', 't', 't', 'p', '/', '1', '.', '1'
     };
 
-    // INI KITA PAKSA KE HTTP1 DULU YA!
-    /*static unsigned char protos[] = {
-        8, 'h', 't', 't', 'p', '/', '1', '.', '1'
-    };*/
-
-    // 1. Beritahu protokol apa yang kita tawarkan (untuk Client-side)
     SSL_CTX_set_alpn_protos(halmos_tls_ctx, protos, sizeof(protos));
-    
-    // 2. Pasang pemilih otomatis (untuk Server-side / Browser)
-    // Ini yang paling krusial buat Chrome/Firefox!
     SSL_CTX_set_alpn_select_cb(halmos_tls_ctx, alpn_select_cb, protos);
-    
-    // 3. Load Certificate & Private Key (Nama file bisa diambil dari config)
-    if (SSL_CTX_use_certificate_file(halmos_tls_ctx, config.ssl_certificate_file, SSL_FILETYPE_PEM) <= 0) {
+
+    if (SSL_CTX_use_certificate_chain_file(halmos_tls_ctx, config.ssl_certificate_file) <= 0) {
         write_log_error("[SEC] Failed to load certificate file: %s", 
                         ERR_error_string(ERR_get_error(), NULL));
         exit(EXIT_FAILURE);
@@ -94,96 +79,107 @@ void ssl_init() {
     write_log("[SEC] TLS Engine: OpenSSL initialized with certificate.");
 }
 
-void ssl_cleanup() {
-    // Jika context NULL, berarti TLS memang tidak aktif atau sudah di-cleanup
-    if (halmos_tls_ctx == NULL) {
-        return; 
-    }
+void ssl_cleanup(void) {
+    if (halmos_tls_ctx == NULL) return; 
 
-    // --- FD harus dibersihkan ---
+    pthread_mutex_lock(&g_ssl_map_lock);
     if (fd_to_ssl_map != NULL) {
-        // Bebaskan semua objek SSL yang mungkin masih tersisa di map
         for (int i = 0; i < current_max_limit; i++) {
             if (fd_to_ssl_map[i] != NULL) {
                 SSL_free(fd_to_ssl_map[i]);
+                fd_to_ssl_map[i] = NULL;
             }
         }
         free(fd_to_ssl_map);
         fd_to_ssl_map = NULL;
     }
-    // ---------------------
+    pthread_mutex_unlock(&g_ssl_map_lock);
+
     SSL_CTX_free(halmos_tls_ctx);
     halmos_tls_ctx = NULL;
 
-    // Bersihkan sisa-sisa library OpenSSL dari memori
     EVP_cleanup();
     ERR_free_strings();
     
     write_log("[SEC] TLS Engine: Resources cleaned up.");
 }
 
-/**
- * Mendapatkan atau membuat objek SSL untuk FD tertentu
- */
 void ssl_init_mapping(int max_fds) {
     current_max_limit = max_fds;
-    // Gunakan calloc agar semua otomatis jadi NULL
     fd_to_ssl_map = calloc(current_max_limit, sizeof(SSL*));
     if (!fd_to_ssl_map) {
         write_log_error("[SEC] FATAL: Failed to allocate SSL mapping table for %d FDs: %s", 
                         max_fds, strerror(errno));
-        exit(EXIT_FAILURE); // Jika ini gagal, server tidak bisa jalan
+        exit(EXIT_FAILURE);
     }
 }
 
 void ssl_set_for_fd(int fd, SSL *ssl) {
-    if (fd_to_ssl_map && fd >= 0 && fd < current_max_limit) {
-        fd_to_ssl_map[fd] = ssl;
-    } else {
+    if (fd < 0 || fd >= current_max_limit) {
         write_log_error("[SEC] Mapping failed: FD %d is out of range (Limit: %d)", 
                         fd, current_max_limit);
+        return;
     }
+
+    pthread_mutex_lock(&g_ssl_map_lock);
+    if (fd_to_ssl_map) {
+        fd_to_ssl_map[fd] = ssl;
+    }
+    pthread_mutex_unlock(&g_ssl_map_lock);
 }
 
 SSL* ssl_get_for_fd(int fd) {
-    if (fd_to_ssl_map && fd >= 0 && fd < current_max_limit) {
-        return fd_to_ssl_map[fd];
-    }
-    return NULL;
+    if (fd < 0 || fd >= current_max_limit) return NULL;
+
+    pthread_mutex_lock(&g_ssl_map_lock);
+    SSL *ssl = (fd_to_ssl_map) ? fd_to_ssl_map[fd] : NULL;
+    pthread_mutex_unlock(&g_ssl_map_lock);
+
+    return ssl;
 }
 
 void ssl_nullify_ptr(int fd) {
-    if (fd_to_ssl_map && fd >= 0 && fd < current_max_limit) {
+    if (fd < 0 || fd >= current_max_limit) return;
+
+    pthread_mutex_lock(&g_ssl_map_lock);
+    if (fd_to_ssl_map) {
         fd_to_ssl_map[fd] = NULL;
     }
+    pthread_mutex_unlock(&g_ssl_map_lock);
 }
 
 /**
- * ssl_send
- * Fungsi Jembatan: Response.c manggil ini buat kirim data HTTPS.
- * JANGAN dikasih 'static' supaya bisa dipanggil dari luar file Manager!
+ * Pembebasan SSL objek secara atomic untuk mencegah Double Free / Race Condition.
  */
+void ssl_free_for_fd(int fd) {
+    if (fd < 0 || fd >= current_max_limit) return;
+
+    SSL *ssl_to_free = NULL;
+
+    pthread_mutex_lock(&g_ssl_map_lock);
+    if (fd_to_ssl_map && fd_to_ssl_map[fd]) {
+        ssl_to_free = fd_to_ssl_map[fd];
+        fd_to_ssl_map[fd] = NULL; // Langsung NULL-kan agar thread lain mendeteksi NULL
+    }
+    pthread_mutex_unlock(&g_ssl_map_lock);
+
+    if (ssl_to_free) {
+        SSL_shutdown(ssl_to_free);
+        SSL_free(ssl_to_free);
+    }
+}
+
 ssize_t ssl_send(int fd, const void *buf, size_t len) {
     SSL *ssl = ssl_get_for_fd(fd);
-    if (!ssl) {
-        //fprintf(stderr, "[SSL ERROR] Tidak nemu objek SSL untuk FD: %d\n", fd);
-        return -1;
-    }
+    if (!ssl) return -1;
 
     int ret = SSL_write(ssl, buf, (int)len);
     
     if (ret <= 0) {
         int err = SSL_get_error(ssl, ret);
-        
-        // Cek apakah ini cuma error "tunggu sebentar" (Non-blocking I/O)
         if (err == SSL_ERROR_WANT_WRITE || err == SSL_ERROR_WANT_READ) {
-            // Return 0 artinya: Gak ada data terkirim sekarang, tapi koneksi masih SEHAT.
-            // Panggil lagi nanti ya!
             return 0; 
         }
-
-        // Kalau kodenya bukan WANT_WRITE/READ, baru ini error beneran (koneksi putus, dll)
-        //fprintf(stderr, "[SSL ERROR] SSL_write GAGAL FATAL, code: %d\n", err);
         return -1;
     }
 

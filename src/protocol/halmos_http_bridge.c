@@ -156,10 +156,13 @@ int http_bridge_dispatch(int sock_client) {
             if (r <= 0) {
                 int err = SSL_get_error(ssl, r);
                 if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
-                    event_loop_rearm_epoll(sock_client);
-                    return 1;
+                    // Rearm event loop jika menggunakan EPOLLET / EPOLLONESHOT
+                    return 1; 
                 }
-                return 0; // Handshake gagal
+                
+                // Handshake gagal: Bebaskan objek SSL secara atomic
+                ssl_free_for_fd(sock_client);
+                return 0;
             }
         }
     } 

@@ -168,13 +168,13 @@ ssize_t fcgi_api_request_http2(RequestHeader *req, int backend_type, void *post_
     // =========================================================================
     // 🔍 [INSTRUMENTASI DEBUG FASTCGI RESPONSE RECORDS FROM PHP-FPM]
     // =========================================================================
-    fprintf(stderr, "\n==================== [DEBUG FCGI UNBOXING LOOP] ====================\n");
+    //fprintf(stderr, "\n==================== [DEBUG FCGI UNBOXING LOOP] ====================\n");
     int record_count = 0;
 
     while (1) {
         ssize_t h_read = recv_exact(fpm_sock, fcgi_header, 8);
         if (h_read < 8) {
-            fprintf(stderr, "[UNBOX-LOOP] Header read < 8 (%zd bytes). Socket closed/EOF!\n", h_read);
+            //fprintf(stderr, "[UNBOX-LOOP] Header read < 8 (%zd bytes). Socket closed/EOF!\n", h_read);
             break; 
         }
 
@@ -183,8 +183,8 @@ ssize_t fcgi_api_request_http2(RequestHeader *req, int backend_type, void *post_
         uint16_t content_len   = (fcgi_header[4] << 8) | fcgi_header[5];
         unsigned char pad_len  = fcgi_header[6];
 
-        fprintf(stderr, "[RECORD #%d] Type: %d (0x%02X) | ContentLen: %u | PadLen: %u\n", 
-                record_count, type, type, content_len, pad_len);
+        //fprintf(stderr, "[RECORD #%d] Type: %d (0x%02X) | ContentLen: %u | PadLen: %u\n", 
+        //        record_count, type, type, content_len, pad_len);
 
         if (content_len > 0) {
             if (type == 0x06) { // FCGI_STDOUT
@@ -200,10 +200,10 @@ ssize_t fcgi_api_request_http2(RequestHeader *req, int backend_type, void *post_
                 }
                 
                 ssize_t payload_read = recv_exact(fpm_sock, res + total_payload, content_len);
-                fprintf(stderr, "   --> STDOUT Chunk Read: %zd bytes\n", payload_read);
+                //fprintf(stderr, "   --> STDOUT Chunk Read: %zd bytes\n", payload_read);
                 if (payload_read > 0) {
                     // Print isi chunk-nya di stderr untuk inspeksi visual langsung!
-                    fprintf(stderr, "   --> Chunk Content:\n%.*s\n", (int)payload_read, res + total_payload);
+                    //fprintf(stderr, "   --> Chunk Content:\n%.*s\n", (int)payload_read, res + total_payload);
                     total_payload += (size_t)payload_read;
                 }
             } else if (type == 0x07) { // FCGI_STDERR
@@ -211,7 +211,7 @@ ssize_t fcgi_api_request_http2(RequestHeader *req, int backend_type, void *post_
                 if (err_buf) {
                     recv_exact(fpm_sock, err_buf, content_len);
                     err_buf[content_len] = '\0';
-                    fprintf(stderr, "   [PHP-STDERR] %s\n", err_buf);
+                    //fprintf(stderr, "   [PHP-STDERR] %s\n", err_buf);
                     free(err_buf);
                 }
             } else {
@@ -232,12 +232,12 @@ ssize_t fcgi_api_request_http2(RequestHeader *req, int backend_type, void *post_
         }
 
         if (type == 0x03) { // FCGI_END_REQUEST
-            fprintf(stderr, "[UNBOX-LOOP] Menerima FCGI_END_REQUEST (Type 3). Selesai.\n");
+            //fprintf(stderr, "[UNBOX-LOOP] Menerima FCGI_END_REQUEST (Type 3). Selesai.\n");
             break; 
         }
     }
 
-    fprintf(stderr, "==================== [TOTAL PAYLOAD READ: %zu BYTES] ====================\n\n", total_payload);
+    //fprintf(stderr, "==================== [TOTAL PAYLOAD READ: %zu BYTES] ====================\n\n", total_payload);
 
     if (total_payload >= capacity) {
         char *new_res = realloc(res, total_payload + 1);

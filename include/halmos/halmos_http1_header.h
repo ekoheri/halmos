@@ -6,6 +6,13 @@
 
 #include "halmos_http_route.h"
 
+/* --- KONSTANTA UKURAN BUFFER STATIS --- */
+#define HTTP2_URI_MAX            1024
+#define HTTP2_HOST_MAX            256
+#define HTTP2_COOKIE_MAX         1024
+#define HTTP2_CONTENT_TYPE_MAX    128
+#define HTTP2_QUERY_BUF_MAX       512
+
 // Tipe respon (Memory vs File) tetap sama di semua versi HTTP
 typedef enum {
     RES_TYPE_MEMORY,
@@ -49,6 +56,15 @@ typedef struct {
     // BUFFER FISIK (Landing Strip)
     // Tempat penyimpanan hasil transformasi agar pointer di atas tetap valid
     char route_result[512];
+
+    // INLINE LANDING STRIP BUFFER (Khusus HTTP/2 Dekode HPACK agar Zero-Allocation)
+    char h2_uri_buf[HTTP2_URI_MAX];
+    char h2_host_buf[HTTP2_HOST_MAX];
+    char h2_content_type_buf[HTTP2_CONTENT_TYPE_MAX];
+    char h2_cookie_buf[HTTP2_COOKIE_MAX];
+
+    // Status Error (0 = Normal, 414 = URI Too Long, 431 = Header Too Large)
+    int error_code;
     
     //STATUS TLS/BUKAN
     bool is_tls;
