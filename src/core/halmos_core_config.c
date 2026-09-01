@@ -19,11 +19,11 @@ static unsigned long parse_size(const char *str);
 static void parse_csv_to_group(char *value, BackendGroup *group, bool is_port);
 
 // Fungsi untuk membaca file konfigurasi
-void core_config_load(const char *filename) {
+int core_config_load(const char *filename) {
     FILE *file = fopen(filename, "r");
     if (file == NULL) {
-        write_log("[ERROR : config.c] Error opening config file");
-        return;
+        fprintf(stderr, "[FATAL] Cannot open configuration file: %s\n", filename);
+        return -1;
     }
 
     char line[1024];  
@@ -150,11 +150,15 @@ void core_config_load(const char *filename) {
                 snprintf(config.python.lb_strategy, sizeof(config.python.lb_strategy), "%s", value);
             } else if (strcmp(key, "request_buffer_size") == 0) {
                 config.request_buffer_size = atoi(value);
+            } else if (strcmp(key, "telemetry_enabled") == 0) {
+                config.telemetry_enabled = (strcasecmp(value, "true") == 0);
             }
         }
     }
 
     fclose(file);
+
+    return 0;
 }
 
 char *trim(char *str) {

@@ -12,12 +12,17 @@
 #include <netinet/tcp.h> // Untuk TCP_NODELAY
 #include <unistd.h>      // Untuk sleep()
 #include <time.h>        // Untuk struct timeval (jika belum ada)
+#include <errno.h>
 
 #include <openssl/ssl.h>
 #include <stdlib.h>
 
 static RateEntry hash_table[HASH_TABLE_SIZE];
 static pthread_mutex_t rate_limit_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_t janitor_tid;
+static volatile bool janitor_running = false;
+static pthread_mutex_t janitor_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t janitor_cond = PTHREAD_COND_INITIALIZER;
 
 static unsigned long hash_ip(const char *str);
 
@@ -85,6 +90,7 @@ bool sec_traffic_is_request_allowed(const char *client_ip, int limit_per_sec) {
     return true; 
 }
 
+/*
 void sec_traffic_start_janitor() {
     pthread_t janitor_tid;
 
@@ -96,6 +102,44 @@ void sec_traffic_start_janitor() {
         pthread_detach(janitor_tid); // Agar thread berjalan mandiri
         write_log("[SEC] Defense System: Janitor background service activated.");
     }
+}
+*/
+
+void sec_traffic_start_janitor(void) {
+    pthread_mutex_lock(&janitor_lock);
+    if (janitor_running) {
+        pthread_mutex_unlock(&janitor_lock);
+        return; // Sudah berjalan, cegah duplikasi thread
+    }
+
+    reset_rate_limits();
+    janitor_running = true;
+
+    // JANGAN di-detach! Kita simpan thread ID agar bisa di-join saat shutdown
+    if (pthread_create(&janitor_tid, NULL, janitor_thread, NULL) == 0) {
+        write_log("[SEC] Defense System: Janitor background service activated.");
+    } else {
+        janitor_running = false;
+        write_log_error("[SEC] Failed to start Janitor thread.");
+    }
+    pthread_mutex_unlock(&janitor_lock);
+}
+
+void sec_traffic_stop_janitor(void) {
+    pthread_mutex_lock(&janitor_lock);
+    if (!janitor_running) {
+        pthread_mutex_unlock(&janitor_lock);
+        return;
+    }
+
+    janitor_running = false;
+    // Bangunkan thread janitor seketika (tanpa menunggu sleep 10 menit)
+    pthread_cond_signal(&janitor_cond);
+    pthread_mutex_unlock(&janitor_lock);
+
+    // Join thread agar shutdown benar-benar bersih
+    pthread_join(janitor_tid, NULL);
+    write_log("[SEC] Defense System: Janitor background service stopped.");
 }
 
 void sec_traffic_anti_slow_loris(int sock_client) {
@@ -168,11 +212,40 @@ void clean_old_rate_limits() {
     }
 }
 
-void* janitor_thread(void* arg) {
+/*void* janitor_thread(void* arg) {
     (void)arg;
     while(1) {
         sleep(600); // Tidur 10 menit
         clean_old_rate_limits();
     }
+    return NULL;
+}*/
+
+void* janitor_thread(void* arg) {
+    (void)arg;
+    pthread_mutex_lock(&janitor_lock);
+    
+    while (janitor_running) {
+        // Hitung waktu tunggu 10 menit (600 detik) dari sekarang
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        ts.tv_sec += 600; 
+
+        // Tidur 10 menit, TAPI langsung bangun jika signal cond dikirim
+        int res = pthread_cond_timedwait(&janitor_cond, &janitor_lock, &ts);
+        
+        if (!janitor_running) {
+            break; // Keluar loop jika diperintahkan stop
+        }
+
+        if (res == ETIMEDOUT) {
+            // Waktu 10 menit habis, lakukan pembersihan
+            pthread_mutex_unlock(&janitor_lock);
+            clean_old_rate_limits();
+            pthread_mutex_lock(&janitor_lock);
+        }
+    }
+
+    pthread_mutex_unlock(&janitor_lock);
     return NULL;
 }

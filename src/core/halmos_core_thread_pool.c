@@ -25,7 +25,13 @@ void *core_thread_pool_worker(void *arg) {
         // 1. Ambil tugas (File Descriptor) dari antrean
         int sock_client = queue_pop(&global_queue, &arrival);
         
-        if (sock_client < 0) continue;
+        // [PERBAIKAN PERTIMBANGAN WORKER]
+        // Nilai < 0: 
+        // - Ret -3: Queue sudah ditutup/stop (Shutdown sequence) -> Exit thread secara elegan.
+        // - Ret -1 / -2: Timeout atau error transient -> Continue loop.
+        if (sock_client < 0) {
+            break; 
+        }    
 
         // Catat statistik global
         global_telemetry.total_requests++;

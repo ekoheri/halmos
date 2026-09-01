@@ -8,9 +8,9 @@
 
 #define NUM_QUEUES 4
 
-void event_loop_start();
+int event_loop_start();
 void event_loop_run();
-void event_loop_stop(int sig);
+void event_loop_stop(void);
 
 //dipanggil di thread pool dan bridge
 void event_loop_rearm_epoll(int fd); 

@@ -40,8 +40,8 @@ static int alpn_select_cb(SSL *ssl, const unsigned char **out, unsigned char *ou
     return SSL_TLSEXT_ERR_OK;
 }
 
-void ssl_init(void) {
-    if (!config.tls_enabled) return;
+int ssl_init(void) {
+    if (!config.tls_enabled) return 0;
 
     SSL_library_init();
     OpenSSL_add_all_algorithms();
@@ -53,7 +53,7 @@ void ssl_init(void) {
     if (!halmos_tls_ctx) {
         write_log_error("[SEC] Failed to create SSL context: %s", 
                         ERR_error_string(ERR_get_error(), NULL));
-        exit(EXIT_FAILURE);
+        return -1;
     }
 
     static unsigned char protos[] = {
@@ -67,16 +67,18 @@ void ssl_init(void) {
     if (SSL_CTX_use_certificate_chain_file(halmos_tls_ctx, config.ssl_certificate_file) <= 0) {
         write_log_error("[SEC] Failed to load certificate file: %s", 
                         ERR_error_string(ERR_get_error(), NULL));
-        exit(EXIT_FAILURE);
+        return -1;
     }
 
     if (SSL_CTX_use_PrivateKey_file(halmos_tls_ctx, config.ssl_private_key_file, SSL_FILETYPE_PEM) <= 0) {
         write_log_error("[SEC] Failed to load private key file: %s", 
                         ERR_error_string(ERR_get_error(), NULL));
-        exit(EXIT_FAILURE);
+        return -1;
     }
 
     write_log("[SEC] TLS Engine: OpenSSL initialized with certificate.");
+
+    return 0;
 }
 
 void ssl_cleanup(void) {

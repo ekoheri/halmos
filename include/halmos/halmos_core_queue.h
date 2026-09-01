@@ -22,6 +22,8 @@ typedef struct {
     int cpu_cores;          // Jumlah core CPU (Tambahkan ini)
     int active_workers;     // Thread yang sedang sibuk (Busy/Blocked)
     int total_workers;      // Total thread yang tercipta saat ini
+
+    int is_running;
     
     // Tambahkan variabel ini agar dinamis
     int min_threads_limit;
@@ -37,6 +39,7 @@ typedef struct {
 void queue_thread_worker_start();
 int queue_push(TaskQueue *q, int sock);
 int queue_pop(TaskQueue *q, struct timeval *arrival);
+void queue_thread_worker_stop();
 //void mark_worker_idle(TaskQueue *q);
 
 #endif

@@ -65,9 +65,11 @@ typedef struct {
     //Virtual Host
     VHostEntry vhosts[32];    // Bisa nampung 32 domain
     int vhost_count;
+
+    bool telemetry_enabled; // <--- Aktif/Non aktif log telemetry
 } Config;
 
 // Fungsi untuk memuat konfigurasi dari file
-void core_config_load(const char *filename);
+int core_config_load(const char *filename);
 
 #endif

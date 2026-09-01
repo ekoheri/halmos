@@ -38,6 +38,7 @@ int sock_server;
 
 volatile sig_atomic_t server_running = 1;
 
+/*
 void event_loop_start() {
     // 1. aktifkan epoll
     // menghitung berapa jumlah core untuk 
@@ -46,6 +47,8 @@ void event_loop_start() {
 
     sock_server = tcp_create_server(config.server_name, config.server_port);
     if (sock_server < 0) {
+        write_log_error("[FATAL] Failed to bind TCP listener on %s:%d", 
+                config.server_name, config.server_port);
         exit(EXIT_FAILURE);
     }
 
@@ -67,13 +70,68 @@ void event_loop_start() {
 
     write_log("[CORE] Server listening on %s:%d", config.server_name, config.server_port);
 }
+*/
+
+// PERBAIKAN: Mengubah void menjadi int
+int event_loop_start(void) {
+    server_running = 1;
+
+    events = malloc(sizeof(struct epoll_event) * g_event_batch_size);
+    if (!events) {
+        write_log_error("[FATAL] Failed to allocate memory for epoll events");
+        return -1;
+    }
+
+    sock_server = tcp_create_server(config.server_name, config.server_port);
+    if (sock_server < 0) {
+        write_log_error("[FATAL] Failed to bind TCP listener on %s:%d", 
+                config.server_name, config.server_port);
+        free(events);
+        events = NULL;
+        return -1; // PERBAIKAN: Return -1, bukan exit(EXIT_FAILURE)
+    }
+
+    epoll_fd = epoll_create1(0);
+    if (epoll_fd < 0) { // PERBAIKAN: Cek kegagalan epoll_create1
+        write_log_error("[FATAL] epoll_create1 failed: %s", strerror(errno));
+        close(sock_server);
+        free(events);
+        events = NULL;
+        return -1;
+    }
+
+    struct epoll_event ev;
+    ev.data.fd = sock_server;
+    ev.events = EPOLLIN;
+    if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, sock_server, &ev) < 0) {
+        write_log_error("[FATAL] Failed to add sock_server to epoll: %s", strerror(errno));
+        close(sock_server);
+        close(epoll_fd);
+        free(events);
+        events = NULL;
+        return -1;
+    }
+
+    bridge_fd = setup_uds_bridge("/tmp/halmos_bridge.sock");
+    if (bridge_fd >= 0) {
+        struct epoll_event ev_bridge;
+        ev_bridge.data.fd = bridge_fd;
+        ev_bridge.events = EPOLLIN;
+        epoll_ctl(epoll_fd, EPOLL_CTL_ADD, bridge_fd, &ev_bridge);
+    } else {
+        write_log_error("[WARN] IPC UDS Bridge initialization failed.");
+    }
+
+    write_log("[CORE] Server listening on %s:%d", config.server_name, config.server_port);
+    return 0; // PERBAIKAN: Return 0 jika sukses
+}
 
 void event_loop_run() {
     while (server_running) {
         // http_route_auto_reload();
         http_vhost_reload_routes();
 
-        int num_fds = epoll_wait(epoll_fd, events, g_event_batch_size, 500); // awalnya -1
+        int num_fds = epoll_wait(epoll_fd, events, g_event_batch_size, 100); // awalnya -1
         if (num_fds < 0) {
             if (errno != EINTR) {
                 write_log_error("[CORE] epoll_wait critical error: %s", strerror(errno));
@@ -85,7 +143,7 @@ void event_loop_run() {
             int current_fd = events[i].data.fd;
             if (current_fd == sock_server) {
                 // LOOP ACCEPT: Ambil semua tamu yang antre sampai ludes
-                while (1) {
+                while (server_running) {
                     struct sockaddr_in client_addr;
                     socklen_t addr_len = sizeof(client_addr);
                     int sock_client = accept(sock_server, (struct sockaddr *)&client_addr, &addr_len);
@@ -106,6 +164,12 @@ void event_loop_run() {
                         }
                         break;
                     }
+
+                    // Set SO_RCVTIMEO agar worker tidak menggantung di read socket I/O (Keep-Alive Safety)
+                    struct timeval tv = { .tv_sec = 5, .tv_usec = 0 };
+                    setsockopt(sock_client, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+                    setsockopt(sock_client, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
                     global_telemetry.active_connections++; // Tambah saat ada tamu masuk
 
                     // --- PANGGIL ANTI SLOW LORIS ---
@@ -155,6 +219,11 @@ void event_loop_run() {
 
                 // 2. CEK I/O EVENT (BACA ATAU TULIS)
                 if (ev & (EPOLLIN | EPOLLOUT)) {
+                    if (!server_running) {
+                        close(client_fd);
+                        continue;
+                    }
+                    
                     int status = queue_push(&global_queue, client_fd); 
 
                     if (status < 0) {
@@ -176,16 +245,47 @@ void event_loop_run() {
         }
     }
 
-    close(sock_server);
-    close(epoll_fd);
-    free(events);
+    // Cleanup resources setelah loop berhenti
+    if (bridge_fd >= 0) {
+        close(bridge_fd);
+        unlink("/tmp/halmos_bridge.sock");
+        bridge_fd = -1;
+    }
+    
+    if (sock_server >= 0) {
+        close(sock_server);
+        sock_server = -1;
+    }
+    
+    if (epoll_fd >= 0) {
+        close(epoll_fd);
+        epoll_fd = -1;
+    }
+    
+    if (events) {
+        free(events);
+        events = NULL;
+    }
 
     write_log("[CORE] Server stopped. Resource cleanup complete."); 
 }
 
-void event_loop_stop(int sig) {
-    (void)sig;
+void event_loop_stop(void) {
+    //(void)sig;
     server_running = 0;
+
+    // 1. Tutup listener socket agar accept() tidak lagi menerima koneksi baru
+    if (sock_server >= 0) {
+        close(sock_server);
+        sock_server = -1;
+    }
+
+    // 2. Bangunkan thread pool worker secara paksa 
+    // agar mereka tidak menunggu timeout timedwait di queue_pop
+    pthread_mutex_lock(&global_queue.lock);
+    global_queue.is_running = 0;
+    pthread_cond_broadcast(&global_queue.cond);
+    pthread_mutex_unlock(&global_queue.lock);
 }
 
 /**

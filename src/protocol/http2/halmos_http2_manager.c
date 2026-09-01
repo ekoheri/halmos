@@ -371,7 +371,7 @@ int http2_manager_session(int sock_client, bool is_tls) {
         
         // Jika sedang kirim file, jangan memblokir socket! Gunakan timeout 1ms.
         // Jika IDLE, baru boleh blocking (misal 10000ms / 10 detik).
-        int read_timeout = has_file ? 1 : 10000;
+        int read_timeout = has_file ? 1 : 2000;
 
         ssize_t n_header = h2_read_exactly(sock_client, is_tls, header_buf, 9, read_timeout);
         
