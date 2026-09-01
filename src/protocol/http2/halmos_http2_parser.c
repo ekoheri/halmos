@@ -228,6 +228,11 @@ bool http2_parser_parse_header(HTTP2Session *session, HTTP2Stream *stream, const
     }
 
     req->is_valid = (req->method[0] != '\0' && req->uri != NULL);
+    // --- LOGGING HTTP/2 REQUEST ---
+    if (req->is_valid) {
+        const char *ip_to_log = (strlen(req->client_ip) > 0) ? req->client_ip : "unknown_ip";
+        write_log("[HTTP2] %s %s (Client IP: %s)", req->method, req->uri, ip_to_log);
+    }
     return req->is_valid;
 }
 

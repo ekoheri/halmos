@@ -13,13 +13,22 @@
 #include <sys/resource.h> // Untuk rlimit (FD)
 #include <sys/sysinfo.h>  // Untuk sysinfo (RAM)
 #include <unistd.h>       // Untuk sysconf (CPU Cores)
+#include <signal.h>
 
 //Pemilik variable global global_queue
 TaskQueue global_queue;
 
+// Pointer ke array pthread_t (dinamis)
+static pthread_t *worker_threads = NULL; 
+static int active_worker_count = 0;
+
 static void init_queue(TaskQueue *q, int min_limit, int max_limit, int max_queue_size);
 
 static int get_adaptive_timeout(TaskQueue *q);
+
+static void sigusr1_handler(int sig) {
+    (void)sig; // Mencegah warning unused parameter
+}
 
 /*
 Algoritma penjadwalan pada Halmos Core mengadopsi pendekatan hibrida 
@@ -31,7 +40,7 @@ untuk mencegah kegagalan sistem akibat limitasi kernel maupun saturasi memori,
 sebuah mekanisme yang memberikan stabilitas lebih tinggi dibandingkan 
 konfigurasi statis pada server konvensional.
 */
-void queue_thread_worker_start() {
+/*void queue_thread_worker_start() {
     // Inisialisasi antrean tugas
     init_queue(&global_queue, g_worker_min, g_worker_max, g_queue_capacity);
 
@@ -40,6 +49,35 @@ void queue_thread_worker_start() {
         pthread_create(&worker_tid, NULL, core_thread_pool_worker, &global_queue);
         pthread_detach(worker_tid);
     }
+}*/
+
+void queue_thread_worker_start() {
+    struct sigaction sa;
+    sa.sa_handler = sigusr1_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0; // Tanpa SA_RESTART agar blocking syscall return EINTR
+    sigaction(SIGUSR1, &sa, NULL);
+    
+    // 1. Inisialisasi struct antrean global agar warning init_queue hilang
+    init_queue(&global_queue, g_worker_min, g_worker_max, g_queue_capacity);
+
+    // 2. Alokasikan memori sebesar g_worker_max dari modul adaptive
+    active_worker_count = g_worker_max;
+    
+    worker_threads = calloc(active_worker_count, sizeof(pthread_t));
+    if (!worker_threads) {
+        write_log_error("[FATAL] Failed to allocate memory for worker threads array.");
+        exit(EXIT_FAILURE);
+    }
+
+    // 3. Buat worker thread sebanyak g_worker_max
+    for (int i = 0; i < active_worker_count; i++) {
+        if (pthread_create(&worker_threads[i], NULL, core_thread_pool_worker, &global_queue) != 0) {
+            write_log_error("[ERR] Failed to create worker thread %d", i);
+        }
+    }
+    
+    write_log("[QUEUE] Thread pool started dynamically with %d workers.", active_worker_count);
 }
 
 /********************************************************************
@@ -117,11 +155,16 @@ int queue_pop(TaskQueue *q, struct timeval *arrival) {
     struct timespec ts;
     struct timeval now;
 
-    // 1. Loop nunggu pesanan
     while (q->head == NULL) {
+        // [CEK 1] Keluar langsung jika flag shutdown aktif
+        if (!q->is_running) {
+            q->total_workers--;
+            pthread_mutex_unlock(&q->lock);
+            return -3;
+        }
+
         gettimeofday(&now, NULL);
 
-        // Ambil timeout adaptif lu
         int current_timeout = get_adaptive_timeout(q); 
         ts.tv_sec = now.tv_sec + current_timeout;
         ts.tv_nsec = now.tv_usec * 1000;
@@ -130,23 +173,32 @@ int queue_pop(TaskQueue *q, struct timeval *arrival) {
             ts.tv_nsec -= 1000000000;
         }
 
-        // Tunggu bel bunyi atau sampai timeout
         int rc = pthread_cond_timedwait(&q->cond, &q->lock, &ts);
         
-        // 2. LOGIKA PERBAIKAN: Cek apakah benar-benar boleh Downscaling
-        // Koki hanya boleh keluar jika:
-        // - Mengalami timeout (ETIMEDOUT)
-        // - Antrean masih kosong (q->head == NULL) -> Ini kunci biar gak mati pas sibuk!
-        // - Jumlah koki masih di atas batas minimal
+        // [CEK 2] WAJIB CEK KEMBALI SEGERA SETELAH BANGUN
+        if (!q->is_running) {
+            q->total_workers--;
+            pthread_mutex_unlock(&q->lock);
+            return -3;
+        }
+
+        // Logika Downscaling (PERBAIKAN: Gunakan return -3 agar keluar secara seragam lewat worker loop)
         if (rc == ETIMEDOUT && q->head == NULL && q->total_workers > q->min_threads_limit) {
             q->total_workers--;
             write_log("[SCALING] Load subsided. Downscaling pool to %d workers", q->total_workers);
             pthread_mutex_unlock(&q->lock);
-            pthread_exit(NULL); 
+            return -3; // PERBAIKAN: Ganti pthread_exit(NULL) dengan return -3
         }
     }
 
-    // 3. Ambil nota (Request) dari antrean
+    // PERBAIKAN VITAL: Walaupun q->head != NULL, JIKA SERVER SEDANG SHUTDOWN, 
+    // JANGAN PROSES TASK LAGI! Langsung exit agar worker cepat mati!
+    if (!q->is_running) {
+        q->total_workers--;
+        pthread_mutex_unlock(&q->lock);
+        return -3;
+    }
+
     Task *tmp = q->head;
     int sock = tmp->client_sock;
     *arrival = tmp->arrival_time;
@@ -155,7 +207,6 @@ int queue_pop(TaskQueue *q, struct timeval *arrival) {
     if (q->head == NULL) q->tail = NULL;
     q->count--;
 
-    // 4. Update status koki jadi sibuk
     q->active_workers++; 
     
     pthread_mutex_unlock(&q->lock);
@@ -164,6 +215,106 @@ int queue_pop(TaskQueue *q, struct timeval *arrival) {
     return sock;
 }
 
+/********************************************************************
+ * queue_thread_worker_stop() TANPA ARRAY
+ * Melakukan shutdown bersih memanfaatkan counter q->total_workers
+ ********************************************************************/
+ void queue_thread_worker_stop() {
+    // 1. Set flag shutdown & broadcast condition variable
+    pthread_mutex_lock(&global_queue.lock);
+    global_queue.is_running = 0; 
+    pthread_cond_broadcast(&global_queue.cond); 
+    pthread_mutex_unlock(&global_queue.lock);
+
+    // 2. UNBLOCK AKTIF: Kirim sinyal interrupt ke setiap worker thread yang ada di array
+    if (worker_threads != NULL) {
+        for (int i = 0; i < active_worker_count; i++) {
+            // Memaksa poll() / read() di worker return EINTR instan
+            pthread_kill(worker_threads[i], SIGUSR1);
+        }
+
+        // 3. JOIN DETERMINISTIK: Tunggu semua worker keluar rapi
+        for (int i = 0; i < active_worker_count; i++) {
+            pthread_join(worker_threads[i], NULL);
+        }
+
+        // 4. BEBASKAN MEMORI ARRAY
+        free(worker_threads);
+        worker_threads = NULL;
+    }
+
+    // 5. Cleanup sisa antrean Task yang belum diambil
+    pthread_mutex_lock(&global_queue.lock);
+    Task *curr = global_queue.head;
+    global_queue.head = global_queue.tail = NULL;
+    global_queue.count = 0;
+    pthread_mutex_unlock(&global_queue.lock);
+
+    while (curr) {
+        Task *tmp = curr;
+        curr = curr->next;
+        if (tmp->client_sock >= 0) {
+            close(tmp->client_sock);
+        }
+        free(tmp);
+    }
+
+    pthread_mutex_destroy(&global_queue.lock);
+    pthread_cond_destroy(&global_queue.cond);
+
+    write_log("[QUEUE] Worker thread pool shutdown instantly & cleanly.");
+}
+
+/* 
+void queue_thread_worker_stop() {
+    pthread_mutex_lock(&global_queue.lock);
+    global_queue.is_running = 0; 
+    pthread_cond_broadcast(&global_queue.cond); 
+    pthread_mutex_unlock(&global_queue.lock);
+
+    int wait_attempts = 0;
+    const int max_attempts = 500; // Naikkan toleransi ke 3 detik (300 * 10ms)
+
+    while (wait_attempts < max_attempts) {
+        pthread_mutex_lock(&global_queue.lock);
+        int remaining = global_queue.total_workers;
+        // Broadcast ulang di setiap loop agar worker yang baru lepas dari http_bridge_dispatch 
+        // langsung melihat is_running = 0 dan keluar
+        pthread_cond_broadcast(&global_queue.cond);
+        pthread_mutex_unlock(&global_queue.lock);
+
+        if (remaining <= 0) break;
+
+        usleep(10000); // 10ms
+        wait_attempts++;
+    }
+
+    if (wait_attempts >= max_attempts) {
+        write_log_error("[QUEUE] Shutdown cutoff hit (%d workers still active).", global_queue.total_workers);
+    }
+
+    // Ambil sisa antrean ke variabel lokal agar cleanup close() dilakukan di luar mutex
+    pthread_mutex_lock(&global_queue.lock);
+    Task *curr = global_queue.head;
+    global_queue.head = global_queue.tail = NULL;
+    global_queue.count = 0;
+    pthread_mutex_unlock(&global_queue.lock);
+
+    while (curr) {
+        Task *tmp = curr;
+        curr = curr->next;
+        if (tmp->client_sock >= 0) {
+            close(tmp->client_sock);
+        }
+        free(tmp);
+    }
+
+    pthread_mutex_destroy(&global_queue.lock);
+    pthread_cond_destroy(&global_queue.cond);
+
+    write_log("[QUEUE] Worker thread pool shutdown cleanly.");
+}
+*/
 /********************************************************************
  * init_queue() -> [Dapur Restoran Halmos]
  * Mengambil logika init_queue milik Boss.
@@ -176,11 +327,12 @@ void init_queue(TaskQueue *q, int min_limit, int max_limit, int max_queue_size) 
     q->total_workers = min_limit;
     q->min_threads_limit = min_limit;
     q->max_threads_limit = max_limit;
+
+    q->is_running = 1; // Mark queue aktif
     
     pthread_mutex_init(&q->lock, NULL);
     pthread_cond_init(&q->cond, NULL);
 }
-
 
 int get_adaptive_timeout(TaskQueue *q) {
     // 1. Ambil jumlah CPU Core yang aktif secara otomatis

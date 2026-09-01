@@ -15,7 +15,7 @@ extern SSL_CTX *halmos_tls_ctx;
 /*
 * Fungsi-fungsi untuk mengaktifkan SSL
 */
-void ssl_init();
+int ssl_init();
 void ssl_cleanup();
 void ssl_init_mapping(int max_fds);
 void ssl_set_for_fd(int fd, SSL *ssl);

@@ -144,10 +144,10 @@ void core_adaptive_init(void) {
 
     // 2. Audit PHP-FPM: Jika settingan user lebay/kegedean
     if (php.max_children > g_worker_max) {
-        write_log_error("[CRIT] PHP-FPM max_children (%d) exceeds hardware capacity!", php.max_children);
+        write_log_error("[CRITICAL] PHP-FPM max_children (%d) exceeds hardware capacity!", php.max_children);
         write_log("[ADVICE] Action: Decrease PHP-FPM max_children to %d to prevent freeze", g_worker_max);
     } else if (php.max_children < (g_worker_max / 2)) {
         write_log("[ADVICE] PHP-FPM max_children (%d) is under-utilized", php.max_children);
-        write_log("[ADVICE] Action: Increase to %d to maximize hardware potential", g_worker_max);
+        write_log("[ADVICE] Action: Increase PHP-FPM max_children to %d to maximize hardware potential", g_worker_max);
     }
 }

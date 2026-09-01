@@ -1,4 +1,5 @@
 #include "halmos_log.h"
+#include "halmos_global.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -54,6 +55,9 @@ void write_log_error(const char *format, ...) {
 }
 
 void write_log_telemetry() {
+    if (!config.telemetry_enabled) {
+        return;
+    }
     // 1. UPDATE RAM: Tanya ke Kernel dulu sebelum lapor!
     update_mem_usage();
 
@@ -90,7 +94,9 @@ void* telemetry_monitor_thread(void* arg) {
     struct timespec ts;
     
     while (log_keep_running) {
-        write_log_telemetry();
+        if (config.telemetry_enabled) {
+            write_log_telemetry();
+        }
 
         // Ambil waktu sekarang untuk dasar timeout
         clock_gettime(CLOCK_REALTIME, &ts);
@@ -115,9 +121,13 @@ void start_thread_logger() {
         fprintf(stderr, "FATAL: Gagal menjalankan thread logger!\n");
     }
 
-    // Thread tambahan untuk monitor telemetry setiap 5 detik
-    if (pthread_create(&monitor_tid, NULL, telemetry_monitor_thread, NULL) != 0) {
-        fprintf(stderr, "ERROR: Gagal menjalankan thread monitor telemetry!\n");
+    // Spawn thread monitor HANYA jika fitur telemetry aktif
+    if (config.telemetry_enabled) {
+        if (pthread_create(&monitor_tid, NULL, telemetry_monitor_thread, NULL) != 0) {
+            fprintf(stderr, "ERROR: Gagal menjalankan thread monitor telemetry!\n");
+        }
+    } else {
+        write_log("[CORE] Telemetry monitoring is DISABLED by configuration.");
     }
 }
 
@@ -240,7 +250,9 @@ void stop_thread_logger() {
     pthread_mutex_unlock(&global_log_queue.mutex);
 
     pthread_join(log_tid, NULL);
-    pthread_join(monitor_tid, NULL);
+    if (config.telemetry_enabled) {
+        pthread_join(monitor_tid, NULL);
+    }
 }
 
 //helper

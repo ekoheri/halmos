@@ -21,6 +21,7 @@ DEST_BIN     = /usr/bin/$(TARGET_NAME)
 DEST_CONF    = /etc/halmos
 DEST_SERVICE = /etc/systemd/system/$(SERVICE_NAME)
 DEST_WWW     = /var/www
+DEST_LOG     = /var/log/halmos
 
 # Sub-folder WWW
 DEST_HTML   = $(DEST_WWW)/html
@@ -29,7 +30,7 @@ DEST_RUST   = $(DEST_WWW)/halmos-rust
 
 # Compiler & Flags
 CC = gcc
-CFLAGS = -Wall -Wextra -O3 -I$(INC_DIR) -I$(INC_DIR)/halmos -DVERSION=\"$(VERSION)\" -D_GNU_SOURCE
+CFLAGS = -Wall -Wextra -g -O0 -I$(INC_DIR) -I$(INC_DIR)/halmos -DVERSION=\"$(VERSION)\" -D_GNU_SOURCE
 LDFLAGS = -lpthread -lm -lssl -lcrypto -ljson-c
 
 # Pencarian Source Files secara otomatis
@@ -63,7 +64,8 @@ $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c
 # ---------------------------------------------------------
 install: all
 	@echo "$(BLUE)[INSTALL]$(NC) Membuat struktur direktori..."
-	sudo mkdir -p $(DEST_HTML) $(DEST_PY) $(DEST_RUST) $(DEST_CONF)
+	sudo mkdir -p $(DEST_HTML) $(DEST_PY) $(DEST_RUST) $(DEST_CONF) $(DEST_LOG)
+	sudo chmod 755 $(DEST_LOG)
 
 	@echo "$(BLUE)[INSTALL]$(NC) Menyalin binari dan konfigurasi..."
 	sudo install -m 755 $(TARGET) $(DEST_BIN)

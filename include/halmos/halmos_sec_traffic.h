@@ -39,5 +39,5 @@ void sec_traffic_anti_slow_loris(int sock_client);
 * FUngsi untuk membersihkan IP user yang nyangkut di RAM 
 */
 void sec_traffic_start_janitor();
-
+void sec_traffic_stop_janitor(void);
 #endif
