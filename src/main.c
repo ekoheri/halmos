@@ -1,6 +1,7 @@
 #include "halmos_global.h"
 #include "halmos_core_config.h"
 #include "halmos_core_adaptive.h"
+#include "halmos_core_connection.h"
 #include "halmos_core_event_loop.h"
 #include "halmos_core_queue.h"
 #include "halmos_core_thread_pool.h"
@@ -43,13 +44,20 @@ int main() {
         return EXIT_FAILURE;
     }
 
+    // 2. Hitung Parameter Hardware & OS Limit
     core_adaptive_init();
 
-    // 2. Aktifkan Logger Asynchronous (Thread Terpisah)
+    // 3. INIALISASI KONEKSI (Menggunakan g_max_fd hasil kalkulasi adaptive)
+    if (core_conn_init() != 0) {
+        fprintf(stderr, "[FATAL] Failed to allocate core connection tracking table.\n");
+        return EXIT_FAILURE;
+    }
+
+    // 4. Aktifkan Logger Asynchronous (Thread Terpisah)
     start_thread_logger();
     write_log("[CORE] Starting Halmos Web Server v1.0.0-rc1...");
 
-    // 3. Inisialisasi Layanan SSL
+    // 5. Inisialisasi Layanan SSL
     if (config.tls_enabled) {
         if(ssl_init() != 0) {
             fprintf(stderr, "[FATAL] Failed to initialize SSL Engine.\n");
@@ -123,7 +131,11 @@ int main() {
         write_log("[CORE] TLS Resources cleaned up.");
     }
    
-        // 5. TERAKHIR: Wajib tempatkan stop_thread_logger() di paling ujung!
+    // DESTROY CORE CONNECTION TABLE (Simetris dengan core_conn_init)
+    core_conn_destroy();
+    write_log("[CORE] Connection Table destroyed.");
+
+    // 5. TERAKHIR: Wajib tempatkan stop_thread_logger() di paling ujung!
     // Ini mengosongkan antrean memori log ke file disk sebelum proses exit.
     write_log("[CORE] Halmos shutdown complete. Bye!");
     stop_thread_logger();

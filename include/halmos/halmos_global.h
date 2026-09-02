@@ -5,7 +5,10 @@
 #include "halmos_core_config.h"
 #include "halmos_core_queue.h"
 
+#include <stdint.h>
+
 // --- Penampung Hasil Adaptive ---
+extern uint32_t g_max_fd;       // Dynamic FD capacity untuk core connection table
 extern int g_event_batch_size;  // Untuk epoll_wait
 extern int g_fcgi_pool_size;    // Untuk FastCGI connection pool
 extern int g_worker_max;        // Untuk Thread Worker max

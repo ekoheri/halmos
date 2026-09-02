@@ -19,6 +19,7 @@
 #define DEFAULT_REQUEST_BUFFER_SIZE 4096
 
 // Definisi variabel global
+uint32_t g_max_fd = 0;
 int g_event_batch_size = 0;
 int g_fcgi_pool_size = 0;
 int g_worker_max = 0;
@@ -113,6 +114,14 @@ void core_adaptive_init(void) {
         memset(&si, 0, sizeof(si));
     }
 
+    // -----------------------------------------------------------------
+    // 2. Adaptive MAX_FD & Inisialisasi Dynamic Connection Table
+    // -----------------------------------------------------------------
+
+    uint32_t calculated_max_fd = (uint32_t)rl.rlim_cur;
+    if (calculated_max_fd < 1024) calculated_max_fd = 1024;
+    g_max_fd = calculated_max_fd;
+
     /*
      * Conservative CPU-based worker heuristic.
      * The 64x multiplier intentionally limits concurrency
@@ -145,10 +154,10 @@ void core_adaptive_init(void) {
     g_worker_min = (int)num_cores * 4;
     if (g_worker_min > g_worker_max) g_worker_min = g_worker_max;
 
-    // 2. Ambil Konfigurasi PHP-FPM
+    // 3. Ambil Konfigurasi PHP-FPM
     PHPConfig php = fetch_php_fpm_config();
     
-    // 3. Pembagian Quota FCGI Presisi (Pure Integer Arithmetic)
+    // 4. Pembagian Quota FCGI Presisi (Pure Integer Arithmetic)
     fcgi_pool.php_quota = php.max_children; 
     
     int sisa_jatah = g_worker_max - fcgi_pool.php_quota;
@@ -163,10 +172,8 @@ void core_adaptive_init(void) {
     fcgi_pool.pool_size = fcgi_pool.php_quota + fcgi_pool.rust_quota + fcgi_pool.python_quota;
     g_fcgi_pool_size    = fcgi_pool.pool_size;
 
-    // 4. Batch Size & Queue Capacity dengan tipe rlim_t Native
+    // 5. Batch Size & Queue Capacity dengan tipe rlim_t Native
     g_event_batch_size = (g_worker_max > MAX_EVENT_BATCH_SIZE) ? MAX_EVENT_BATCH_SIZE : g_worker_max;
-
-    rlim_t smart_ulimit = (rlim_t)g_worker_max + 2000; 
 
     if (rl.rlim_cur > (rlim_t)g_worker_max) {
         g_queue_capacity = (int)((rl.rlim_cur - (rlim_t)g_worker_max) / 2);
@@ -175,7 +182,8 @@ void core_adaptive_init(void) {
     }
     if (g_queue_capacity < 2000) g_queue_capacity = 2000;
 
-    // 5. Logging & Audit System
+    // 6. Logging & Audit System
+    write_log("[CORE] Calculated MAX_FD capacity: %u", g_max_fd);
     write_log("[CORE] Adaptive engine initialized (Ceiling: 1024 Workers)");
     write_log("[CORE] Workers (Min/Max): %d/%d | Event Batch: %d | Queue Capacity: %d", 
               g_worker_min, g_worker_max, g_event_batch_size, g_queue_capacity);
@@ -183,9 +191,11 @@ void core_adaptive_init(void) {
               fcgi_pool.php_quota, fcgi_pool.rust_quota, fcgi_pool.python_quota, g_fcgi_pool_size);
 
     // Audit System ulimit
-    if (rl.rlim_cur < smart_ulimit) {
-        write_log("[ADVICE] System ulimit (%lu) is low for high load", (unsigned long)rl.rlim_cur);
-        write_log("[ADVICE] Action: Run 'ulimit -n %lu' for optimal FD headroom", (unsigned long)smart_ulimit);
+    rlim_t ideal_ulimit = (rlim_t)(g_worker_max + g_queue_capacity + 1000);
+    if (rl.rlim_cur < ideal_ulimit) {
+        write_log("[WARN] System ulimit (%lu) is lower than recommended headroom (%lu)", 
+                  (unsigned long)rl.rlim_cur, (unsigned long)ideal_ulimit);
+        write_log("[ADVICE] Action: Run 'ulimit -n %lu' for optimal FD headroom", (unsigned long)ideal_ulimit);
     }
 
     // Audit PHP-FPM Configuration
