@@ -2,6 +2,7 @@
 #include "halmos_core_event_loop.h"
 #include "halmos_core_config.h"
 #include "halmos_core_tcp_server.h"
+#include "halmos_core_connection.h"
 #include "halmos_core_queue.h"
 #include "halmos_log.h"
 #include "halmos_sec_traffic.h"
@@ -37,40 +38,6 @@ struct epoll_event *events;
 int sock_server;
 
 volatile sig_atomic_t server_running = 1;
-
-/*
-void event_loop_start() {
-    // 1. aktifkan epoll
-    // menghitung berapa jumlah core untuk 
-    // patokan berapa jumlah event pool yang cocok
-    events = malloc(sizeof(struct epoll_event) * g_event_batch_size);
-
-    sock_server = tcp_create_server(config.server_name, config.server_port);
-    if (sock_server < 0) {
-        write_log_error("[FATAL] Failed to bind TCP listener on %s:%d", 
-                config.server_name, config.server_port);
-        exit(EXIT_FAILURE);
-    }
-
-    epoll_fd = epoll_create1(0);
-    struct epoll_event ev;
-    ev.data.fd = sock_server;
-    ev.events = EPOLLIN; // Level Triggered untuk listen socket
-    epoll_ctl(epoll_fd, EPOLL_CTL_ADD, sock_server, &ev);
-
-    //---------- Panggil IPC-Bridge
-
-    bridge_fd = setup_uds_bridge("/tmp/halmos_bridge.sock");
-
-    // 2. Tambahkan ke epoll
-    struct epoll_event ev_bridge;
-    ev_bridge.data.fd = bridge_fd;
-    ev_bridge.events = EPOLLIN; // Cukup EPOLLIN, tidak perlu ONESHOT
-    epoll_ctl(epoll_fd, EPOLL_CTL_ADD, bridge_fd, &ev_bridge);
-
-    write_log("[CORE] Server listening on %s:%d", config.server_name, config.server_port);
-}
-*/
 
 // PERBAIKAN: Mengubah void menjadi int
 int event_loop_start(void) {
@@ -172,6 +139,16 @@ void event_loop_run() {
 
                     global_telemetry.active_connections++; // Tambah saat ada tamu masuk
 
+                    // === MODIFIKASI 2: Aktifkan slot tracking koneksi & ambil generation baru ===
+                    uint32_t conn_gen = core_conn_activate(sock_client);
+                    if (conn_gen == 0) {
+                        // FD berada di luar jangkauan g_max_fd
+                        write_log_error("[CRIT] FD %d exceeds g_max_fd capacity", sock_client);
+                        close(sock_client);
+                        global_telemetry.active_connections--;
+                        break;
+                    }
+
                     // --- PANGGIL ANTI SLOW LORIS ---
                     // Jika di konfigurasi diset true
                     if(config.anti_slow_loris_enabled == true){
@@ -220,11 +197,26 @@ void event_loop_run() {
                 // 2. CEK I/O EVENT (BACA ATAU TULIS)
                 if (ev & (EPOLLIN | EPOLLOUT)) {
                     if (!server_running) {
+                        // === MODIFIKASI 3A: Deaktivasi connection state sebelum close ===
+                        core_conn_deactivate(client_fd);
                         close(client_fd);
                         continue;
                     }
+
+                    // === MODIFIKASI 3B: Bungkus FD & Generation ke halmos_event_t ===
+                    halmos_conn_t *conn = core_conn_get(client_fd);
+                    if (!conn || !atomic_load(&conn->active)) {
+                        // Skip jika koneksi sudah tidak aktif/invalid
+                        continue;
+                    }
                     
-                    int status = queue_push(&global_queue, client_fd); 
+                    halmos_event_t event_item = {
+                        .fd = client_fd,
+                        .generation = atomic_load(&conn->generation)
+                    };
+
+                    int status = queue_push(&global_queue, event_item);
+                    //int status = queue_push(&global_queue, client_fd); 
 
                     if (status < 0) {
                         if (status == -1) {
@@ -237,6 +229,10 @@ void event_loop_run() {
 
                         global_telemetry.active_connections--;
                         epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, NULL);
+
+                        // === MODIFIKASI 3C: Reset atomic state koneksi ===
+                        core_conn_deactivate(client_fd);
+
                         shutdown(client_fd, SHUT_RDWR);
                         close(client_fd);
                     }
@@ -311,6 +307,9 @@ void event_loop_rearm_epoll(int fd) {
 }
 
 void event_loop_cleanup_connection(int sock_client) {
+    // === MODIFIKASI 4: Matikan status aktif atomic connection ===
+    core_conn_deactivate(sock_client);
+    
     // --- [ TAMBAHAN UNTUK WEBSOCKET ] ---
     // Pastikan flag WS dihapus sebelum FD ini dipakai ulang oleh kernel
     ws_system_cleanup_fd(sock_client);

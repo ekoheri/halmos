@@ -1,6 +1,8 @@
 #ifndef HALMOS_CORE_QUEUE_H
 #define HALMOS_CORE_QUEUE_H
 
+#include "halmos_core_connection.h"
+
 #include <pthread.h>
 #include <sys/time.h>
 
@@ -10,7 +12,7 @@
 
 // --- STRUKTUR DATA ---
 typedef struct Task {
-    int client_sock;
+    halmos_event_t event;
     struct timeval arrival_time;
     struct Task* next;
 } Task;
@@ -34,12 +36,12 @@ typedef struct {
 } TaskQueue;
 
 // --- PROTOTIPE FUNGSI ---
-//void *worker_thread_pool(void *arg);
-//void init_queue(TaskQueue *q, int min_limit, int max_limit);
-void queue_thread_worker_start();
-int queue_push(TaskQueue *q, int sock);
-int queue_pop(TaskQueue *q, struct timeval *arrival);
-void queue_thread_worker_stop();
+
+void queue_thread_worker_start(void);
+// Signature disesuaikan dengan halmos_event_t
+int queue_push(TaskQueue *q, halmos_event_t event_item);
+int queue_pop(TaskQueue *q, halmos_event_t *out_event, struct timeval *arrival);
+void queue_thread_worker_stop(void);
 //void mark_worker_idle(TaskQueue *q);
 
 #endif

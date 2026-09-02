@@ -1,6 +1,7 @@
 #include "halmos_core_thread_pool.h"
 #include "halmos_global.h"
 #include "halmos_core_event_loop.h"
+#include "halmos_core_connection.h"
 #include "halmos_http_bridge.h"
 #include "halmos_log.h"
 
@@ -21,17 +22,25 @@ void *core_thread_pool_worker(void *arg) {
     (void)arg;
     while (1) {
         struct timeval arrival;
+        halmos_event_t event_item;
         
-        // 1. Ambil tugas (File Descriptor) dari antrean
-        int sock_client = queue_pop(&global_queue, &arrival);
+        // 1. Ambil tugas (halmos_event_t) dari antrean
+        int sock_client = queue_pop(&global_queue, &event_item, &arrival);
         
-        // [PERBAIKAN PERTIMBANGAN WORKER]
-        // Nilai < 0: 
-        // - Ret -3: Queue sudah ditutup/stop (Shutdown sequence) -> Exit thread secara elegan.
-        // - Ret -1 / -2: Timeout atau error transient -> Continue loop.
+        // Ret -3: Shutdown sequence -> Exit thread secara elegan.
         if (sock_client < 0) {
             break; 
         }    
+
+        // === VALIDASI KRITIS STALE CONNECTION (GENERATION CHECK) ===
+        // Mencegah Race Condition jika socket sudah di-close / di-recycle 
+        // oleh Event Loop saat task masih mengantre di Queue.
+        if (!core_conn_is_valid(event_item.fd, event_item.generation)) {
+            write_log("[WORKER] Stale event detected on FD %d (Gen: %u). Dropping task.", 
+                      event_item.fd, event_item.generation);
+            mark_worker_idle(&global_queue);
+            continue;
+        }
 
         // Catat statistik global
         global_telemetry.total_requests++;
@@ -40,21 +49,20 @@ void *core_thread_pool_worker(void *arg) {
         clock_gettime(CLOCK_MONOTONIC, &start);
 
         // 2. PROSES REQUEST (Dispatcher Utama)
-        // Boss, urusan SSL Handshake, Dekripsi, dan Deteksi Protokol 
-        // semuanya kita pindah ke dalam bridge_dispatch().
         int status = http_bridge_dispatch(sock_client);
 
-        // 3. EVALUASI HASIL DISPATCH
-        if (status == 1) {
-            // Status 1: Keep-Alive atau SSL Handshake butuh data lagi (EAGAIN)
-            // Ambil dari event_loop.c
-            event_loop_rearm_epoll(sock_client);
-        } else {
-            // Status 0 atau -1: Koneksi selesai atau Error
-            // cleanup_connection_properly ada di halmos_event_loop.c
-
-            global_telemetry.active_connections--;
-            event_loop_cleanup_connection(sock_client);
+        // === RE-VALIDASI SEBELUM OPERASI EPOLL / CLEANUP ===
+        // Jika saat proses dispatch terjadi timeout/close eksternal, validasi ulang.
+        if (core_conn_is_valid(event_item.fd, event_item.generation)) {
+            // 3. EVALUASI HASIL DISPATCH
+            if (status == 1) {
+                // Status 1: Keep-Alive atau SSL Handshake butuh data lagi (EAGAIN)
+                event_loop_rearm_epoll(sock_client);
+            } else {
+                // Status 0 atau -1: Koneksi selesai atau Error
+                global_telemetry.active_connections--;
+                event_loop_cleanup_connection(sock_client);
+            }
         }
 
         // --- TELEMETRY & LOGGING ---
