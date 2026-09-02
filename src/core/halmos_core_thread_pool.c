@@ -32,42 +32,61 @@ void *core_thread_pool_worker(void *arg) {
             break; 
         }    
 
+        // === AMBIL POINTER KONEKSI ===
+        halmos_conn_t *conn = core_conn_get(event_item.fd);
+
         // === VALIDASI KRITIS STALE CONNECTION (GENERATION CHECK) ===
         // Mencegah Race Condition jika socket sudah di-close / di-recycle 
-        // oleh Event Loop saat task masih mengantre di Queue.
-        if (!core_conn_is_valid(event_item.fd, event_item.generation)) {
+        if (!conn || !core_conn_is_valid(event_item.fd, event_item.generation)) {
             write_log("[WORKER] Stale event detected on FD %d (Gen: %u). Dropping task.", 
                       event_item.fd, event_item.generation);
             mark_worker_idle(&global_queue);
             continue;
         }
 
+        // --- AKUISISI KUNCI KONEKSI ---
+        // Mengunci koneksi agar Event Loop tidak dapat memanggil 
+        // event_loop_cleanup_connection (yang akan membebaskan SSL & close fd)
+        // selama worker sedang memproses I/O pada koneksi ini.
+        core_conn_lock(conn);
+
+        // Validasi ulang setelah mendapatkan kunci (double-checked locking pattern)
+        // Karena bisa saja Event Loop melakukan cleanup TEPAT SEBELUM worker berhasil mendapat kunci.
+        if (!core_conn_is_valid(event_item.fd, event_item.generation)) {
+            core_conn_unlock(conn);
+            mark_worker_idle(&global_queue);
+            continue;
+        }
+
         // Catat statistik global
-        global_telemetry.total_requests++;
+        atomic_fetch_add(&global_telemetry.total_requests, 1);
 
         struct timespec start, end;
         clock_gettime(CLOCK_MONOTONIC, &start);
 
         // 2. PROSES REQUEST (Dispatcher Utama)
+        // Sepanjang fungsi ini, I/O terproteksi oleh conn->io_lock
         int status = http_bridge_dispatch(sock_client);
 
-        // === RE-VALIDASI SEBELUM OPERASI EPOLL / CLEANUP ===
-        // Jika saat proses dispatch terjadi timeout/close eksternal, validasi ulang.
-        if (core_conn_is_valid(event_item.fd, event_item.generation)) {
-            // 3. EVALUASI HASIL DISPATCH
-            if (status == 1) {
-                // Status 1: Keep-Alive atau SSL Handshake butuh data lagi (EAGAIN)
-                event_loop_rearm_epoll(sock_client);
-            } else {
-                // Status 0 atau -1: Koneksi selesai atau Error
-                global_telemetry.active_connections--;
-                event_loop_cleanup_connection(sock_client);
-            }
+        // 3. EVALUASI HASIL DISPATCH
+        if (status == 1) {
+            // Status 1: Keep-Alive atau SSL Handshake butuh data lagi (EAGAIN)
+            // Rearm harus dilakukan SAAT MASIH TERKUNCI agar tidak berlomba dengan cleanup.
+            event_loop_rearm_epoll(sock_client);
+            core_conn_unlock(conn); // Lepaskan kunci setelah selesai mengatur state
+        } else {
+            // Status 0 atau -1: Koneksi selesai atau Error
+            // Lepaskan kunci TERLEBIH DAHULU, biarkan fungsi cleanup yang mengakuisisi kunci 
+            // agar tidak terjadi deadlock saat cleanup mencoba mengunci ulang.
+            core_conn_unlock(conn);
+            
+            atomic_fetch_sub(&global_telemetry.active_connections, 1);
+            event_loop_cleanup_connection(sock_client);
         }
 
         // --- TELEMETRY & LOGGING ---
         clock_gettime(CLOCK_MONOTONIC, &end);
-        global_telemetry.last_latency_ms = hitung_durasi(start, end);
+        atomic_store(&global_telemetry.last_latency_ms, hitung_durasi(start, end));
         
         // 4. Tandai koki (thread) kembali IDLE
         mark_worker_idle(&global_queue);

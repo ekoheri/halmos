@@ -9,7 +9,8 @@
 #include <pthread.h>
 #include <stdbool.h>
 #include <sys/resource.h>
-#include <unistd.h>  // <--- TAMBAHKAN INI UNTUK FUNGSI sleep()
+#include <unistd.h>
+#include <stdatomic.h>
 
 // Header fungsi helper
 
@@ -58,30 +59,31 @@ void write_log_telemetry() {
     if (!config.telemetry_enabled) {
         return;
     }
-    // 1. UPDATE RAM: Tanya ke Kernel dulu sebelum lapor!
+    
+    // 1. UPDATE RAM
     update_mem_usage();
 
     char meta_buffer[MAX_LOG_MESSAGE];
     
-    // 2. AMBIL WAKTU PRESISI (Milidetik)
+    // 2. AMBIL WAKTU PRESISI
     struct timespec ts_now;
     clock_gettime(CLOCK_REALTIME, &ts_now);
     struct tm *t = localtime(&ts_now.tv_sec);
     long ms = ts_now.tv_nsec / 1000000;
 
-    // 3. FORMAT TIMESTAMP (YYYY-MM-DD HH:MM:SS.mmm)
+    // 3. FORMAT TIMESTAMP
     char ts_full[32];
     strftime(ts_full, sizeof(ts_full), "%Y-%m-%d %H:%M:%S", t);
     snprintf(ts_full + strlen(ts_full), sizeof(ts_full) - strlen(ts_full), ".%03ld", ms);
 
-    // 4. BUNGKUS KE JSON
+    // 4. BUNGKUS KE JSON (Gunakan atomic_load untuk membaca variabel _Atomic)
     snprintf(meta_buffer, MAX_LOG_MESSAGE, 
              "{\"ts\":\"%s\",\"type\":\"metrics\",\"req\":%lu,\"conn\":%u,\"ram_kb\":%zu,\"lat_ms\":%.3f}", 
              ts_full,
-             global_telemetry.total_requests,
-             global_telemetry.active_connections,
-             global_telemetry.mem_usage_kb,
-             global_telemetry.last_latency_ms);
+             atomic_load(&global_telemetry.total_requests),
+             atomic_load(&global_telemetry.active_connections),
+             atomic_load(&global_telemetry.mem_usage_kb),
+             atomic_load(&global_telemetry.last_latency_ms));
 
     // 5. KIRIM KE ANTREAN
     enqueue_log(LOG_TYPE_METRICS, meta_buffer, (va_list){0});
@@ -208,8 +210,8 @@ void* log_thread_routine(void* arg) {
 void update_mem_usage() {
     struct rusage usage;
     if (getrusage(RUSAGE_SELF, &usage) == 0) {
-        // Di Linux, ru_maxrss hasilnya dalam Kilobytes (KB)
-        global_telemetry.mem_usage_kb = (size_t)usage.ru_maxrss;
+        // Gunakan atomic_store untuk menyimpan ukuran memori
+        atomic_store(&global_telemetry.mem_usage_kb, (size_t)usage.ru_maxrss);
     }
 }
 
