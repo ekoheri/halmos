@@ -8,6 +8,7 @@
 #include "halmos_http2_manager.h"
 #include "halmos_http_bridge.h"
 #include "halmos_core_event_loop.h"
+#include "halmos_core_connection.h"
 #include "halmos_log.h"
 #include "halmos_sec_tls.h"
 #include "halmos_ws_system.h"
@@ -20,6 +21,7 @@
 #include <errno.h>
 #include <unistd.h>
 #include <stdio.h>
+#include <sys/epoll.h>
 
 // Fungsi pembantu khusus debug HTTP/HTTPS
 // Fungsi ini saya remark, karena memang tidak dipakai. 
@@ -71,17 +73,11 @@ static halmos_protocol_t bridge_detect(int fd, SSL *ssl);
  * Multiplexer Utama: Jembatan antara Core FD dan Protocol Manager
  */
 int http_bridge_dispatch(int sock_client) {
-    // --- [ LANGKAH 0: CEK STATUS WEBSOCKET ] ---
-    // Jika FD ini sudah terdaftar sebagai WebSocket, langsung lempar ke dispatcher WS.
-    // Kita nggak perlu peek-peek lagi, langsung gas pol.
-
-    //fprintf(stderr, "[DEBUG-BRIDGE] Thread %ld menangani FD %d\n", (long)pthread_self(), sock_client);
     if (halmos_is_websocket_fd(sock_client)) {
         return ws_system_dispatch(sock_client);
     }
 
-    char peek_buf[1];     // cukup diset 1 untuk kebutuhan jalannya sistem normal
-    //char peek_buf[256]; // di set 256 untuk kebutuhan debug data
+    char peek_buf[1];
 
     // 1. Ambil state SSL jika ada
     SSL *ssl = ssl_get_for_fd(sock_client);
@@ -91,45 +87,31 @@ int http_bridge_dispatch(int sock_client) {
     if (!is_actually_tls) {
         ssize_t n = recv(sock_client, peek_buf, 1, MSG_PEEK | MSG_DONTWAIT);
         
-        // CCTV 1
-        //fprintf(stderr, "[DEBUG-BRIDGE] FD %d: recv peek result = %zd\n", sock_client, n);
-        //di set 256 untuk kebutuhan debug data
-        //ssize_t n = recv(sock_client, peek_buf, 256, MSG_PEEK | MSG_DONTWAIT);
-        
         if (n < 0) {
-            // CCTV 2
-            //fprintf(stderr, "[DEBUG-BRIDGE] FD %d: recv error, errno = %d (%s)\n", 
-            //    sock_client, errno, strerror(errno));
-
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                event_loop_rearm_epoll(sock_client);
+                // HANYA REARM EPOLLIN agar tidak Spinning/Busy-loop di EPOLLOUT
+                event_loop_rearm_epoll_ex(sock_client, EPOLLIN);
                 return 1; 
             }
-            return 0; 
+            return 0; // Kembalikan 0 agar diproses event_loop_cleanup_connection
         }
 
-        // CCTV 3
         if (n == 0) {
-            //fprintf(stderr, "[DEBUG-BRIDGE] FD %d: recv returned 0 (Client closed prematurely)\n", sock_client);
-            return 0; 
+            return 0; // Client close koneksi
         }
-
-        // CCTV 4
-        //fprintf(stderr, "[DEBUG-BRIDGE] FD %d: Byte pertama terdeteksi: 0x%02X\n", 
-        //    sock_client, (unsigned char)peek_buf[0]);
-        // ======================== DEBUG START ========================
-        // Memanggil helper hex dump untuk ngintip data HTTP/HTTPS
-        // hex_dump_debug(sock_client, peek_buf, n);
-        // ======================== DEBUG END ==========================
 
         if (peek_buf[0] == 0x16) {
             is_actually_tls = true;
             
-            // Lazy Allocation: Baru bikin objek SSL di sini!
             if (config.tls_enabled) {
                 ssl = SSL_new(halmos_tls_ctx);
                 SSL_set_fd(ssl, sock_client);
                 ssl_set_for_fd(sock_client, ssl);
+
+                halmos_conn_t *conn = core_conn_get(sock_client);
+                if (conn) {
+                    conn->ssl = ssl;
+                }
             }
         }
     }
@@ -137,14 +119,13 @@ int http_bridge_dispatch(int sock_client) {
     // 3. EKSEKUSI JALUR TLS
     if (is_actually_tls) {
         if (!config.tls_enabled) {
-            write_log_error("[BRIDGE] Reject: TLS request on HTTP-only server. FD %d", sock_client);
+            //write_log_error("[BRIDGE] Reject: TLS request on HTTP-only server. FD %d", sock_client);
             char *msg = "HTTP/1.1 400 Bad Request\r\n"
-                            "Content-Type: text/plain\r\n"
-                            "Connection: close\r\n\r\n"
-                            "This server only speaks HTTP, Boss!";
+                        "Content-Type: text/plain\r\n"
+                        "Connection: close\r\n\r\n"
+                        "This server only speaks HTTP, Boss!";
             
             send(sock_client, msg, strlen(msg), MSG_NOSIGNAL);
-
             return 0; 
         }
 
@@ -155,13 +136,16 @@ int http_bridge_dispatch(int sock_client) {
             int r = SSL_accept(ssl);
             if (r <= 0) {
                 int err = SSL_get_error(ssl, r);
-                if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
-                    // Rearm event loop jika menggunakan EPOLLET / EPOLLONESHOT
+                if (err == SSL_ERROR_WANT_READ) {
+                    event_loop_rearm_epoll_ex(sock_client, EPOLLIN);
                     return 1; 
+                } else if (err == SSL_ERROR_WANT_WRITE) {
+                    event_loop_rearm_epoll_ex(sock_client, EPOLLOUT);
+                    return 1;
                 }
                 
-                // Handshake gagal: Bebaskan objek SSL secara atomic
-                ssl_free_for_fd(sock_client);
+                // Handshake gagal total: Biarkan event_loop yang melepaskan memori SSL
+                //write_log_error("[BRIDGE] SSL_accept handshake failed on FD %d (SSL err: %d)", sock_client, err);
                 return 0;
             }
         }
@@ -169,23 +153,23 @@ int http_bridge_dispatch(int sock_client) {
     // 4. EKSEKUSI JALUR PLAIN (Kalau TLS aktif tapi user maksa HTTP)
     else if (config.tls_enabled) {
         char *msg = "HTTP/1.1 400 Bad Request\r\n"
-                                "Content-Type: text/html\r\n"
-                                "Connection: close\r\n\r\n"
-                                "<html><head><title>400 Bad Request</title></head>"
-                                "<body style='font-family:sans-serif; text-align:center; padding-top:50px;'>"
-                                "<h1>HTTPS Required</h1>"
-                                "<p>Halmos Server only accepts <b>HTTPS</b> connections, Boss!</p>"
-                                "<hr><i style='color:gray;'>Halmos Core Engine</i>"
-                                "</body></html>";
+                    "Content-Type: text/html\r\n"
+                    "Connection: close\r\n\r\n"
+                    "<html><head><title>400 Bad Request</title></head>"
+                    "<body style='font-family:sans-serif; text-align:center; padding-top:50px;'>"
+                    "<h1>HTTPS Required</h1>"
+                    "<p>Halmos Server only accepts <b>HTTPS</b> connections, Boss!</p>"
+                    "<hr><i style='color:gray;'>Halmos Core Engine</i>"
+                    "</body></html>";
         send(sock_client, msg, strlen(msg), MSG_NOSIGNAL);
         return 0; 
     }
 
-    // 5. PENYERAHAN KE PROTOCOL MANAGER (halmos_http1_manager.c)
+    // 5. PENYERAHAN KE PROTOCOL MANAGER
     halmos_protocol_t proto = bridge_detect(sock_client, ssl);
 
     if (proto == PROTOCOL_RETRY) {
-        event_loop_rearm_epoll(sock_client);
+        event_loop_rearm_epoll_ex(sock_client, EPOLLIN);
         return 1;
     }
 
