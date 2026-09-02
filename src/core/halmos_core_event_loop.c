@@ -28,6 +28,7 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <signal.h>
+#include <stdatomic.h>
 
 // Pemilik variable global
 int epoll_fd;
@@ -137,7 +138,7 @@ void event_loop_run() {
                     setsockopt(sock_client, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
                     setsockopt(sock_client, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
-                    global_telemetry.active_connections++; // Tambah saat ada tamu masuk
+                    atomic_fetch_add(&global_telemetry.active_connections, 1); // Tambah saat ada tamu masuk
 
                     // === MODIFIKASI 2: Aktifkan slot tracking koneksi & ambil generation baru ===
                     uint32_t conn_gen = core_conn_activate(sock_client);
@@ -145,7 +146,7 @@ void event_loop_run() {
                         // FD berada di luar jangkauan g_max_fd
                         write_log_error("[CRIT] FD %d exceeds g_max_fd capacity", sock_client);
                         close(sock_client);
-                        global_telemetry.active_connections--;
+                        atomic_fetch_sub(&global_telemetry.active_connections, 1);
                         break;
                     }
 
@@ -169,15 +170,12 @@ void event_loop_run() {
                     ev_client.events = EPOLLIN | EPOLLET | EPOLLONESHOT; 
                     
                     if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, sock_client, &ev_client) == -1) {
-                       // Jika gagal karena FD sudah tidak ada (EBADF), jangan panik
-                        if (errno == EBADF) {
-                            // Cukup tutup saja, tidak perlu lapor perror yang bikin panik
-                            close(sock_client); 
-                        } else {
-                            // Jika error lain (misal ENOMEM), baru kita catat
+                        if (errno != EBADF) {
                             write_log_error("[CRIT] Epoll add failed for client FD %d: %s", sock_client, strerror(errno));
-                            close(sock_client);
                         }
+                        // Kurangi counter & jalankan cleanup terisolasi agar slot connection kembali reset
+                        atomic_fetch_sub(&global_telemetry.active_connections, 1);
+                        event_loop_cleanup_connection(sock_client);
                     }
                 }
             } else if(current_fd == bridge_fd) {
@@ -189,7 +187,7 @@ void event_loop_run() {
                 // 1. CEK ERROR / DISCONNECT DULU
                 if (ev & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) {
                     write_log_error("[NET] Closing FD %d (EPOLLERR/HUP/RDHUP)", client_fd);
-                    global_telemetry.active_connections--;
+                    atomic_fetch_sub(&global_telemetry.active_connections, 1);
                     event_loop_cleanup_connection(client_fd);
                     continue;
                 }
@@ -197,9 +195,8 @@ void event_loop_run() {
                 // 2. CEK I/O EVENT (BACA ATAU TULIS)
                 if (ev & (EPOLLIN | EPOLLOUT)) {
                     if (!server_running) {
-                        // === MODIFIKASI 3A: Deaktivasi connection state sebelum close ===
-                        core_conn_deactivate(client_fd);
-                        close(client_fd);
+                        // [BARU] Bersihkan koneksi beserta SSL context secara thread-safe
+                        event_loop_cleanup_connection(client_fd);
                         continue;
                     }
 
@@ -216,7 +213,6 @@ void event_loop_run() {
                     };
 
                     int status = queue_push(&global_queue, event_item);
-                    //int status = queue_push(&global_queue, client_fd); 
 
                     if (status < 0) {
                         if (status == -1) {
@@ -227,14 +223,10 @@ void event_loop_run() {
                             write_log_error("[CORE] Enqueue failed for FD %d (Internal Error)", client_fd);
                         }
 
-                        global_telemetry.active_connections--;
-                        epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, NULL);
+                        atomic_fetch_sub(&global_telemetry.active_connections, 1);
 
-                        // === MODIFIKASI 3C: Reset atomic state koneksi ===
-                        core_conn_deactivate(client_fd);
-
-                        shutdown(client_fd, SHUT_RDWR);
-                        close(client_fd);
+                        // [BARU] Cukup panggil cleanup_connection yang sudah memegang io_lock
+                        event_loop_cleanup_connection(client_fd);
                     }
                 }
             }
@@ -307,41 +299,46 @@ void event_loop_rearm_epoll(int fd) {
 }
 
 void event_loop_cleanup_connection(int sock_client) {
-    // === MODIFIKASI 4: Matikan status aktif atomic connection ===
-    core_conn_deactivate(sock_client);
+    halmos_conn_t *conn = core_conn_get(sock_client);
     
-    // --- [ TAMBAHAN UNTUK WEBSOCKET ] ---
-    // Pastikan flag WS dihapus sebelum FD ini dipakai ulang oleh kernel
-    ws_system_cleanup_fd(sock_client);
+    // Hapus dari epoll lebih awal
+    epoll_ctl(epoll_fd, EPOLL_CTL_DEL, sock_client, NULL);
 
-    // 1. Ambil SSL-nya (kalau ada)
-    SSL *ssl = ssl_get_for_fd(sock_client);
+    if (conn) {
+        // [BARU] Kunci slot untuk mengamankan SSL free & close() dari worker
+        core_conn_lock(conn);
 
-    // 2. Cabut dari map biar thread lain nggak ganggu
-    ssl_nullify_ptr(sock_client); 
-    
-    if (ssl) {
-        // Cek dulu apa ada error nyangkut di OpenSSL sebelum dibuang
-        unsigned long err_code = ERR_peek_last_error(); 
-        if (err_code != 0) {
-            write_log_error("[SEC] Ending FD %d with SSL error: %s", 
-                            sock_client, ERR_error_string(err_code, NULL));
+        atomic_store(&conn->active, false);
+        atomic_store(&conn->state, CONN_STATE_DEAD);
+
+        ws_system_cleanup_fd(sock_client);
+
+        // [BARU] Ambil SSL dari conn->ssl atau modul TLS
+        SSL *ssl = conn->ssl ? conn->ssl : ssl_get_for_fd(sock_client);
+        ssl_nullify_ptr(sock_client); 
+        conn->ssl = NULL;
+
+        if (ssl) {
+            unsigned long err_code = ERR_peek_last_error(); 
+            if (err_code != 0) {
+                write_log_error("[SEC] Ending FD %d with SSL error: %s", 
+                                sock_client, ERR_error_string(err_code, NULL));
+            }
+            SSL_shutdown(ssl);
+            SSL_free(ssl);
+            ERR_clear_error();
         }
 
-        // SSL_shutdown kirim "Close Notify" (sopan)
-        SSL_shutdown(ssl);
-        SSL_free(ssl);
-        ERR_clear_error(); // Bersihkan error queue per-thread
+        // Drain & Close TCP
+        shutdown(sock_client, SHUT_WR);
+        char junk[1024];
+        while (recv(sock_client, junk, sizeof(junk), MSG_DONTWAIT) > 0);
+        
+        close(sock_client);
+
+        // [BARU] Buka kunci slot
+        core_conn_unlock(conn);
+    } else {
+        close(sock_client);
     }
-
-    // 3. SHUTDOWN TCP (Graceful)
-    // Kirim paket FIN, bukan RST
-    shutdown(sock_client, SHUT_WR);
-
-    // 4. DRAIN (Kuras data sisa agar kernel nggak kirim RST)
-    char junk[1024];
-    while (recv(sock_client, junk, sizeof(junk), MSG_DONTWAIT) > 0);
-    
-    // 5. CLOSE TOTAL
-    close(sock_client);
 }

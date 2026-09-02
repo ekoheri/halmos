@@ -44,22 +44,17 @@ int core_config_load(const char *filename) {
         // --- 1. DETEKSI SECTION [HEADER] ---
         if (current_line[0] == '[') {
             if (sscanf(current_line, "[%255[^]]]", section) == 1) {
-                // Jika Section VHost Spesifik
                 if (strncmp(section, "VHost:", 6) == 0) {
                     if (config.vhost_count < 32) {
                         current_vh_idx = config.vhost_count;
                         char *host_name = section + 6; 
-                        snprintf(config.vhosts[current_vh_idx].host, sizeof(config.vhosts[0].host), "%s", trim(host_name));
-                        
-                        // Inisialisasi node_count agar tidak sampah memori
-                        config.vhosts[current_vh_idx].python.node_count = 0;
-                        config.vhosts[current_vh_idx].php.node_count = 0;
-                        config.vhosts[current_vh_idx].rust.node_count = 0;
-                        
+                        snprintf(config.vhosts[current_vh_idx].host, 
+                                 sizeof(config.vhosts[0].host), 
+                                 "%s", trim(host_name));
                         config.vhost_count++;
                     }
                 } else {
-                    current_vh_idx = -1; // Section global (Network, dll)
+                    current_vh_idx = -1; // Section global
                 }
             }
             continue;
@@ -75,26 +70,13 @@ int core_config_load(const char *filename) {
             // --- 2. LOGIKA JIKA DI DALAM BLOK VHOST ---
             if (current_vh_idx != -1) {
                 VHostEntry *vh = &config.vhosts[current_vh_idx];
-                
                 if (strcmp(key, "root") == 0) {
                     snprintf(vh->root, sizeof(vh->root), "%s", value);
-                } 
-                else if (strcmp(key, "py_server") == 0) parse_csv_to_group(value, &vh->python, false);
-                else if (strcmp(key, "py_port") == 0)   parse_csv_to_group(value, &vh->python, true);
-                else if (strcmp(key, "py_lb") == 0)     snprintf(vh->python.lb_strategy, sizeof(vh->python.lb_strategy), "%s", value);
-                
-                else if (strcmp(key, "php_server") == 0) parse_csv_to_group(value, &vh->php, false);
-                else if (strcmp(key, "php_port") == 0)   parse_csv_to_group(value, &vh->php, true);
-                else if (strcmp(key, "php_lb") == 0)     snprintf(vh->php.lb_strategy, sizeof(vh->php.lb_strategy), "%s", value);
-                
-                else if (strcmp(key, "rs_server") == 0)  parse_csv_to_group(value, &vh->rust, false);
-                else if (strcmp(key, "rs_port") == 0)   parse_csv_to_group(value, &vh->rust, true);
-                else if (strcmp(key, "rs_lb") == 0)     snprintf(vh->rust.lb_strategy, sizeof(vh->rust.lb_strategy), "%s", value);
-                
-                continue; // Lanjut ke baris berikutnya, jangan tabrakan dengan global
+                }
+                continue; 
             }
 
-            // --- 3. LOGIKA GLOBAL CONFIG (Lama & Tetap) ---
+            // --- 3. LOGIKA GLOBAL CONFIG ---
             // Network
             if (strcmp(key, "server_name") == 0) {
                 snprintf(config.server_name, sizeof(config.server_name), "%s", value);
@@ -124,6 +106,7 @@ int core_config_load(const char *filename) {
                 config.keep_alive_timeout = atoi(value);
             } else if (strcmp(key, "trust_proxy") == 0) {
                 config.trust_proxy = (strcasecmp(value, "true") == 0);
+            // Backend PHP    
             } else if (strcmp(key, "php_server") == 0) {
                 parse_csv_to_group(value, &config.php, false);
             } else if (strcmp(key, "php_port") == 0) {
@@ -132,6 +115,8 @@ int core_config_load(const char *filename) {
                 snprintf(config.php_fpm_config_path, sizeof(config.php_fpm_config_path), "%s", value);
             } else if(strcmp(key, "php_lb_strategy") == 0) {
                 snprintf(config.php.lb_strategy, sizeof(config.php.lb_strategy), "%s", value);
+            
+            // Backend Rust
             } else if (strcmp(key, "rust_ext") == 0) {
                 snprintf(config.rust.ext, sizeof(config.rust.ext), "%s", value);
             } else if (strcmp(key, "rust_server") == 0) {
@@ -140,6 +125,8 @@ int core_config_load(const char *filename) {
                 parse_csv_to_group(value, &config.rust, true);
             } else if(strcmp(key, "rust_lb_strategy") == 0) {
                 snprintf(config.rust.lb_strategy, sizeof(config.rust.lb_strategy), "%s", value);
+
+            // Backend Python    
             } else if (strcmp(key, "python_ext") == 0) {
                 snprintf(config.python.ext, sizeof(config.python.ext), "%s", value);
             } else if (strcmp(key, "python_server") == 0) {

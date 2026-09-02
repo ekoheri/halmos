@@ -2,6 +2,7 @@
 #define HALMOS_LOG_H
 
 #include <pthread.h>
+#include <stdatomic.h>
 
 #define LOG_DIR "/var/log/halmos/"
 #define MAX_LOG_QUEUE 1024
@@ -9,10 +10,10 @@
 
 // --- 1. Struktur Telemetry (Wadah Angka) ---
 typedef struct {
-    unsigned long total_requests;    // Counter total request
-    unsigned int  active_connections; // Koneksi yang sedang berjalan
-    size_t        mem_usage_kb;      // Pemakaian RAM (RSS)
-    double        last_latency_ms;   // Durasi proses terakhir
+    _Atomic unsigned long total_requests;    // <--- 2. Ubah jadi _Atomic
+    _Atomic unsigned int  active_connections; // <--- 3. Ubah jadi _Atomic
+    _Atomic size_t        mem_usage_kb;      // <--- 4. Ubah jadi _Atomic
+    _Atomic double        last_latency_ms;   // <--- 5. Ubah jadi _Atomic
 } HalmosTelemetry;
 
 // Tipe Log
