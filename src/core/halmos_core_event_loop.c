@@ -186,7 +186,7 @@ void event_loop_run() {
 
                 // 1. CEK ERROR / DISCONNECT DULU
                 if (ev & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) {
-                    write_log_error("[NET] Closing FD %d (EPOLLERR/HUP/RDHUP)", client_fd);
+                    //write_log_error("[NET] Closing FD %d (EPOLLERR/HUP/RDHUP)", client_fd);
                     atomic_fetch_sub(&global_telemetry.active_connections, 1);
                     event_loop_cleanup_connection(client_fd);
                     continue;
@@ -319,13 +319,34 @@ void event_loop_cleanup_connection(int sock_client) {
         conn->ssl = NULL;
 
         if (ssl) {
-            unsigned long err_code = ERR_peek_last_error(); 
+            // 1. Ambil error yang mengendap dari operasi I/O sebelumnya
+            /*
+            unsigned long err_code = ERR_get_error(); // Ambil & hapus dari queue
+
             if (err_code != 0) {
+               
+                int reason = ERR_GET_REASON(err_code);
+                
+                // Filter out unexpected EOF dari curl / non-graceful shutdown
+        
+        #ifdef SSL_R_UNEXPECTED_EOF_WHILE_READING
+                if (reason != SSL_R_UNEXPECTED_EOF_WHILE_READING) {
+                    write_log_error("[SEC] Ending FD %d with SSL error: %s", 
+                                    sock_client, ERR_error_string(err_code, NULL));
+                }
+        #else
                 write_log_error("[SEC] Ending FD %d with SSL error: %s", 
                                 sock_client, ERR_error_string(err_code, NULL));
+        #endif
+        
             }
-            SSL_shutdown(ssl);
+            */
+
+            // 2. Jika peer sudah EOF / socket rusak, hindari SSL_shutdown agar tidak crash/error tambahan
+            // Cukup panggil SSL_free()
             SSL_free(ssl);
+            
+            // 3. Bersihkan sisa queue OpenSSL untuk thread ini
             ERR_clear_error();
         }
 
