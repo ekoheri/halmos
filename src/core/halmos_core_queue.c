@@ -38,10 +38,10 @@ void queue_thread_worker_start(void) {
     // Inisialisasi struct antrean global
     init_queue(&global_queue, g_worker_min, g_worker_max, g_queue_capacity);
 
-    // Alokasikan memori sebesar g_worker_max dari modul adaptive
-    active_worker_count = g_worker_max;
+    // Alokasikan memori sebesar g_worker_min dari modul adaptive
+    active_worker_count = g_worker_min;
     
-    worker_threads = calloc(active_worker_count, sizeof(pthread_t));
+    worker_threads = calloc(g_worker_max, sizeof(pthread_t)); 
     if (!worker_threads) {
         write_log_error("[FATAL] Failed to allocate memory for worker threads array.");
         exit(EXIT_FAILURE);
@@ -102,7 +102,11 @@ int queue_push(TaskQueue *q, halmos_event_t event_item) {
             if (q->total_workers < q->max_threads_limit) {
                 pthread_t tid;
                 if (pthread_create(&tid, NULL, core_thread_pool_worker, q) == 0) {
-                    pthread_detach(tid);
+                    // PERBAIKAN: Simpan ke array worker_threads agar aman saat shutdown
+                    if (worker_threads && active_worker_count < g_worker_max) {
+                        worker_threads[active_worker_count++] = tid;
+                    }
+                    pthread_detach(tid); // Atau hilangkan detach jika ingin di-join manual saat stop
                     q->total_workers++;
                 }
             }
