@@ -438,7 +438,7 @@ void ws_system_on_message(int sock_client, uint32_t stream_id, unsigned char *da
     struct json_object *parsed_json = json_tokener_parse_ex(tok, (const char *)data, len);
 
     if (parsed_json == NULL) {
-        write_log_error("[WS-JSON] Malformed JSON on FD %d (Stream %u)", sock_client, stream_id);
+        //write_log_error("[WS-JSON] Malformed JSON on FD %d (Stream %u)", sock_client, stream_id);
         json_tokener_free(tok);
         return;
     }
