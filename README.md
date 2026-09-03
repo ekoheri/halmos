@@ -29,10 +29,8 @@ Menegakkan kebijakan keamanan wajib (Strict HTTPS-only policy), menolak koneksi 
 - Menangani parsing permintaan/tanggapan standar, manajemen stream framing, serta terowongan komunikasi real-time WebSocket (H1/H2).
 
 - FastCGI & Application Integration Layer:
-
--- Menghubungkan permintaan dinamis ke backend aplikasi (seperti PHP-FPM) melalui connection pool asinkronus.
-
--- Dilengkapi pengaman timeout (30 detik) untuk membersihkan soket macet secara bersih (stalled socket cleanup).
+    - Menghubungkan permintaan dinamis ke backend aplikasi (seperti PHP-FPM) melalui connection pool asinkronus.
+    - Dilengkapi pengaman timeout (30 detik) untuk membersihkan soket macet secara bersih (stalled socket cleanup).
 
 ## 3. Fitur : Dynamic Routing, TLS/SSL,HTTP/1.1, HTTP2, Websocket, Multiple Backend
 Versi 0.2.8 memperkenalkan sistem manajemen yang lebih fleksibel:
@@ -151,23 +149,23 @@ Halmos dirancang dengan sistem cerdas yang otomatis mendengarkan spesifikasi per
 
 - Calculated MAX_FD capacity: 1024
 
--- Artinya bagi Admin: Server mendeteksi batas maksimal koneksi bersamaan (File Descriptor atau jatah soket jaringan aktif) yang diizinkan oleh sistem operasi Linux Anda saat ini adalah 1024 koneksi.
+    - Artinya bagi Admin: Server mendeteksi batas maksimal koneksi bersamaan (File Descriptor atau jatah soket jaringan aktif) yang diizinkan oleh sistem operasi Linux Anda saat ini adalah 1024 koneksi.
 
 - Workers (Min/Max): 32/512
 
--- Artinya bagi Admin: Berdasarkan jumlah inti prosesor (CPU) dan kapasitas RAM di server ini, Halmos otomatis membatasi jumlah pelayan aktif (Workers). Server akan menyiapkan minimal 32 pelayan saat sepi, dan bisa melarikan diri hingga maksimal 512 pelayan saat lalu lintas pengunjung sedang padat.
+    - Artinya bagi Admin: Berdasarkan jumlah inti prosesor (CPU) dan kapasitas RAM di server ini, Halmos otomatis membatasi jumlah pelayan aktif (Workers). Server akan menyiapkan minimal 32 pelayan saat sepi, dan bisa melarikan diri hingga maksimal 512 pelayan saat lalu lintas pengunjung sedang padat.
 
 - Event Batch: 512
 
--- Artinya bagi Admin: Jumlah paket koneksi masuk yang ditarik dan diproses oleh CPU secara bersamaan dalam satu siklus putaran sistem (menggunakan teknologi asinkronus Linux epoll).
+    - Artinya bagi Admin: Jumlah paket koneksi masuk yang ditarik dan diproses oleh CPU secara bersamaan dalam satu siklus putaran sistem (menggunakan teknologi asinkronus Linux epoll).
 
 - Queue Capacity: 2000
 
--- Artinya bagi Admin: Ruang tunggu darurat (buffer antrean). Jika 512 pelayan sedang sibuk seratus persen, server akan menampung hingga 2,000 antrean pengunjung berikutnya di ruang tunggu RAM agar tidak langsung mendapat error Connection Refused.
+    - Artinya bagi Admin: Ruang tunggu darurat (buffer antrean). Jika 512 pelayan sedang sibuk seratus persen, server akan menampung hingga 2,000 antrean pengunjung berikutnya di ruang tunggu RAM agar tidak langsung mendapat error Connection Refused.
 
 - Quotas -> PHP: 5 | Rust: 202 | Python: 305 | Total Pool: 512
 
--- Artinya bagi Admin: Pembagian jatah pelayan (backend bridge) untuk masing-masing bahasa pemrograman berdasarkan porsi kinerjanya. PHP dijatah 5 proses (sesuai setelan PHP-FPM), sementara sisanya dibagi proporsional untuk backend Rust dan Python.
+    - Artinya bagi Admin: Pembagian jatah pelayan (backend bridge) untuk masing-masing bahasa pemrograman berdasarkan porsi kinerjanya. PHP dijatah 5 proses (sesuai setelan PHP-FPM), sementara sisanya dibagi proporsional untuk backend Rust dan Python.
 
 ### 3. Membaca Peringatan & Tindakan (Action) yang Harus Diambil
 
@@ -188,4 +186,4 @@ ulimit -n 3512
 
 - Artinya: Hardware Anda mubazir. Server mendeteksi spesifikasi CPU dan RAM Anda sanggup melayani ratusan proses sekaligus, tetapi konfigurasi bawaan PHP-FPM Anda hanya mengizinkan 5 proses (max_children = 5). Akibatnya, website terasa lambat saat diakses banyak orang karena antre di PHP, padahal RAM dan CPU masih santai.
 
-- Solusi Admin: Buka file konfigurasi PHP-FPM Anda (bisanya di folder /etc/php/<versi-PHP FPM>/fpm/pool.d/www.conf), lalu naikkan nilai pm.max_children mendekati angka yang disarankan log (misal ke 256) agar potensi hardware terpakai secara optimal.
+- Solusi Admin: Buka file konfigurasi PHP-FPM Anda (bisanya di folder /etc/php/|versi-PHP FPM|/fpm/pool.d/www.conf), lalu naikkan nilai pm.max_children mendekati angka yang disarankan log (misal ke 256) agar potensi hardware terpakai secara optimal.
