@@ -14,11 +14,9 @@
 #include <stdint.h>
 #include <errno.h>
 
-// Macro konstan untuk arsitektur adaptive
 #define MAX_EVENT_BATCH_SIZE 1024
-#define DEFAULT_REQUEST_BUFFER_SIZE 4096
+#define MAX_QUEUE_CAPACITY 4096
 
-// Definisi variabel global
 uint32_t g_max_fd = 0;
 int g_event_batch_size = 0;
 int g_fcgi_pool_size = 0;
@@ -33,7 +31,6 @@ typedef struct {
 } PHPConfig;
 
 PHPConfig fetch_php_fpm_config(void) {
-    // Fallback baseline konservatif jika parsing gagal
     PHPConfig cfg = {50, 511, "dynamic"}; 
 
     if (strlen(config.php_fpm_config_path) == 0) {
@@ -50,22 +47,30 @@ PHPConfig fetch_php_fpm_config(void) {
     char line[256];
     while (fgets(line, sizeof(line), fp)) {
         char *ptr = line;
+
+        // 1. Bersihkan newline / carriage return di akhir baris (mendukung format Linux & Windows CRLF)
+        line[strcspn(line, "\r\n")] = '\0';
+
+        // 2. Buang komentar inline (simbol ';' atau '#') dengan mengubahnya menjadi string terminator ('\0')
+        char *comment = strchr(ptr, ';');
+        if (!comment) comment = strchr(ptr, '#');
+        if (comment) *comment = '\0';
+
+        // 3. Lewati spasi atau tab di awal baris
         while (*ptr == ' ' || *ptr == '\t') ptr++;
 
-        if (*ptr == ';' || *ptr == '#' || *ptr == '\n' || *ptr == '\0') continue;
+        // 4. Lewati baris kosong atau baris komentar penuh
+        if (*ptr == '\0') continue;
 
+        // 5. Parse konfigurasi dengan aman
         if (strstr(ptr, "pm.max_children")) {
             char *eq = strchr(ptr, '=');
             if (eq) {
                 char *endptr;
                 errno = 0;
                 long val = strtol(eq + 1, &endptr, 10);
-                
-                // Robust Parsing: Pastikan ada angka valid dan berharga positif
                 if (errno == 0 && endptr != (eq + 1) && val > 0) {
                     cfg.max_children = (int)val;
-                } else {
-                    write_log_error("[WARN] Invalid pm.max_children format in PHP config. Fallback to default (%d)", cfg.max_children);
                 }
             }
         }
@@ -80,13 +85,21 @@ PHPConfig fetch_php_fpm_config(void) {
                 }
             }
         }
-        else if (strstr(ptr, "pm =") || strstr(ptr, "pm=")) {
+        else if (strstr(ptr, "pm") && (strstr(ptr, "pm =") || strstr(ptr, "pm="))) {
             char *eq = strchr(ptr, '=');
             if (eq) {
-                char *val = eq + 1;
-                while (*val == ' ' || *val == '\t') val++;
-                // Boundary check %15s untuk keamanan buffer
-                sscanf(val, "%15s", cfg.mode); 
+                // Pastikan key persis "pm" (tidak ada titik '.' sebelum tanda '=' seperti pm.max_children)
+                int has_dot = 0;
+                for (char *p = ptr; p < eq; p++) {
+                    if (*p == '.') { has_dot = 1; break; }
+                }
+                if (!has_dot) {
+                    char *val = eq + 1;
+                    while (*val == ' ' || *val == '\t') val++;
+                    if (sscanf(val, "%15s", cfg.mode) == 1) {
+                        // Mode berhasil diekstrak dengan aman tanpa gangguan komentar/spasi
+                    }
+                }
             }
         }
     }
@@ -95,58 +108,43 @@ PHPConfig fetch_php_fpm_config(void) {
 }
 
 void core_adaptive_init(void) {
-    // 1. Deteksi Hardware Baseline dengan Defense Error Handling
+    // 1. Hardware Awareness Baseline Detection
     long num_cores = sysconf(_SC_NPROCESSORS_ONLN);
     if (num_cores < 1) num_cores = 1;
 
     struct rlimit rl;
     struct sysinfo si;
 
-    // Pengecekan return value getrlimit
     if (getrlimit(RLIMIT_NOFILE, &rl) != 0) {
-        write_log_error("[ERR] Failed to retrieve RLIMIT_NOFILE, setting fallback rlim_cur=4096");
         rl.rlim_cur = 4096;
     }
-
-    // Pengecekan return value sysinfo
     if (sysinfo(&si) != 0) {
-        write_log_error("[ERR] Failed to retrieve system memory info via sysinfo()");
         memset(&si, 0, sizeof(si));
     }
 
-    // -----------------------------------------------------------------
-    // 2. Adaptive MAX_FD & Inisialisasi Dynamic Connection Table
-    // -----------------------------------------------------------------
+    uint32_t calculated_max_fd;
+    
+    // Periksa apakah nilainya unlimited
+    if (rl.rlim_cur == RLIM_INFINITY) {
+        // Berikan batas aman rasional untuk server (misal: 65536 atau baca dari konstanta sysctl)
+        calculated_max_fd = 65536; 
+    } else if (rl.rlim_cur > UINT32_MAX) {
+        calculated_max_fd = UINT32_MAX; // Mencegah overflow casting
+    } else {
+        calculated_max_fd = (uint32_t)rl.rlim_cur;
+    }
 
-    uint32_t calculated_max_fd = (uint32_t)rl.rlim_cur;
     if (calculated_max_fd < 1024) calculated_max_fd = 1024;
     g_max_fd = calculated_max_fd;
 
     /*
-     * Conservative CPU-based worker heuristic.
-     * The 64x multiplier intentionally limits concurrency
-     * to avoid excessive context switching and memory pressure.
+     * Hardware-aware recommended worker ceiling.
+     * This value is an initialization baseline, not a runtime
+     * auto-scaling decision and not an administrator override.
      */
     int cpu_based_max = (int)(num_cores * 64); 
-
-    /*
-     * Memory-based worker heuristic using integer arithmetic (uint64_t).
-     * Allocates a conservative 10% memory budget to connection buffers
-     * while preventing 32-bit/64-bit platform overflow.
-     */
-    uint64_t buf_size = (config.request_buffer_size > 0) ? (uint64_t)config.request_buffer_size : DEFAULT_REQUEST_BUFFER_SIZE;
-    uint64_t total_ram_bytes = (uint64_t)si.totalram * (uint64_t)si.mem_unit;
+    int recommended_val = cpu_based_max;
     
-    int ram_based_max = 0;
-    if (total_ram_bytes > 0 && buf_size > 0) {
-        ram_based_max = (int)((total_ram_bytes / buf_size) / 10);
-    } else {
-        ram_based_max = cpu_based_max; // Fallback jika sysinfo gagal
-    }
-
-    int recommended_val = (cpu_based_max < ram_based_max) ? cpu_based_max : ram_based_max;
-    
-    // Baseline Worker Ceiling: 1024
     if (recommended_val > 1024) recommended_val = 1024;
     if (recommended_val < 32)   recommended_val = 32;
 
@@ -154,58 +152,74 @@ void core_adaptive_init(void) {
     g_worker_min = (int)num_cores * 4;
     if (g_worker_min > g_worker_max) g_worker_min = g_worker_max;
 
-    // 3. Ambil Konfigurasi PHP-FPM
+    // 2. Fetch Administrator's PHP-FPM Configuration
     PHPConfig php = fetch_php_fpm_config();
     
-    // 4. Pembagian Quota FCGI Presisi (Pure Integer Arithmetic)
+    // 3. FCGI Quota Mapping (Murni mencerminkan konfigurasi administrator)
     fcgi_pool.php_quota = php.max_children; 
     
     int sisa_jatah = g_worker_max - fcgi_pool.php_quota;
     if (sisa_jatah < 0) {
-        sisa_jatah = 0;
+        sisa_jatah = 0; 
     }
 
-    // Alokasi presisi tanpa floating point
     fcgi_pool.rust_quota   = (sisa_jatah * 2) / 5; 
     fcgi_pool.python_quota = sisa_jatah - fcgi_pool.rust_quota; 
-    
-    fcgi_pool.pool_size = fcgi_pool.php_quota + fcgi_pool.rust_quota + fcgi_pool.python_quota;
-    g_fcgi_pool_size    = fcgi_pool.pool_size;
+    fcgi_pool.pool_size    = fcgi_pool.php_quota + fcgi_pool.rust_quota + fcgi_pool.python_quota;
+    g_fcgi_pool_size       = fcgi_pool.pool_size;
 
-    // 5. Batch Size & Queue Capacity dengan tipe rlim_t Native
+    // 4. Queue Capacity Berbasis g_max_fd yang sudah ternormalisasi (Aman dari RLIM_INFINITY)
     g_event_batch_size = (g_worker_max > MAX_EVENT_BATCH_SIZE) ? MAX_EVENT_BATCH_SIZE : g_worker_max;
 
-    if (rl.rlim_cur > (rlim_t)g_worker_max) {
-        g_queue_capacity = (int)((rl.rlim_cur - (rlim_t)g_worker_max) / 2);
+    if (g_max_fd > (uint32_t)g_worker_max) {
+        uint32_t sisa_fd = g_max_fd - (uint32_t)g_worker_max;
+        g_queue_capacity = (int)((sisa_fd * 60U) / 100U);
     } else {
-        g_queue_capacity = 2000;
+        g_queue_capacity = 256; 
     }
-    if (g_queue_capacity < 2000) g_queue_capacity = 2000;
 
-    // 6. Logging & Audit System
-    write_log("[CORE] Calculated MAX_FD capacity: %u", g_max_fd);
-    write_log("[CORE] Adaptive engine initialized (Ceiling: 1024 Workers)");
-    write_log("[CORE] Workers (Min/Max): %d/%d | Event Batch: %d | Queue Capacity: %d", 
+    // Batasi queue dengan upper bound agar tidak membengkak berlebihan (Resource-Aware Boundary)
+    if (g_queue_capacity > MAX_QUEUE_CAPACITY) {
+        g_queue_capacity = MAX_QUEUE_CAPACITY;
+    }
+
+    if (g_queue_capacity < 256) {
+        g_queue_capacity = 256;
+    }
+
+    // 5. Logging & Advisory System (Decision Support untuk Administrator)
+    write_log("[CORE] Hardware-Aware Init -> Cores: %ld | RAM: %lu MB | Max FD: %u", 
+              num_cores, (unsigned long)((si.totalram * si.mem_unit) / (1024 * 1024)), g_max_fd);
+    write_log("[CORE] Workers (Min/Recommended Ceiling): %d/%d | Event Batch: %d | Queue Capacity: %d", 
               g_worker_min, g_worker_max, g_event_batch_size, g_queue_capacity);
     write_log("[FCGI] Quotas -> PHP: %d | Rust: %d | Python: %d | Total Pool: %d", 
               fcgi_pool.php_quota, fcgi_pool.rust_quota, fcgi_pool.python_quota, g_fcgi_pool_size);
 
     // Audit System ulimit
-    rlim_t ideal_ulimit = (rlim_t)(g_worker_max + g_queue_capacity + 1000);
+    rlim_t ideal_ulimit = (rlim_t)(g_worker_max + g_queue_capacity + 500);
     if (rl.rlim_cur < ideal_ulimit) {
         write_log("[WARN] System ulimit (%lu) is lower than recommended headroom (%lu)", 
                   (unsigned long)rl.rlim_cur, (unsigned long)ideal_ulimit);
         write_log("[ADVICE] Action: Run 'ulimit -n %lu' for optimal FD headroom", (unsigned long)ideal_ulimit);
     }
 
-    // Audit PHP-FPM Configuration
+    // Audit PHP-FPM Configuration (Advisory murni, menghormati kebijakan administrator)
     if (php.max_children > g_worker_max) {
-        write_log_error("[CRITICAL] PHP-FPM max_children (%d) exceeds server worker capacity (%d)!", 
-                        php.max_children, g_worker_max);
-        write_log("[ADVICE] Action: Decrease PHP-FPM max_children to %d to prevent CPU starvation", g_worker_max);
+        write_log("[WARN] PHP-FPM max_children (%d) exceeds hardware-aware worker baseline (%d)", 
+                  php.max_children, g_worker_max);
+        write_log("[ADVICE] Action: Review PHP-FPM max_children in '%s' if resource contention occurs", 
+                  config.php_fpm_config_path);
     } 
-    else if (php.max_children < (g_worker_max / 2)) {
-        write_log("[ADVICE] PHP-FPM max_children (%d) is under-utilized for this hardware", php.max_children);
-        write_log("[ADVICE] Action: Consider increasing PHP-FPM max_children up to %d", g_worker_max / 2);
+    else if (php.max_children < (g_worker_max / 4)) {
+        int suggested_max = g_worker_max / 2;
+        int suggested_start = suggested_max / 4;
+        int suggested_min = suggested_start;
+        int suggested_max_spare = suggested_max / 2;
+
+        write_log("[ADVICE] PHP-FPM max_children (%d) is conservative for detected hardware", php.max_children);
+        write_log("[ADVICE] Action: Consider scaling pool in '%s' up to max_children = %d based on PHP workload", 
+                  config.php_fpm_config_path, suggested_max);
+        write_log("[ADVICE] Supporting Config Tip -> Adjust pm.start_servers = %d, min_spare = %d, max_spare = %d accordingly", 
+                  suggested_start, suggested_min, suggested_max_spare);
     }
 }
