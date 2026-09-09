@@ -135,55 +135,61 @@ Halmos dirancang dengan sistem cerdas yang otomatis mendengarkan spesifikasi per
 ### 1. Contoh Baris Log Startup & Artinya
 
 ```bash
-[11:48:58.934] [INFO] [CORE] Calculated MAX_FD capacity: 1024
-[11:48:58.935] [INFO] [CORE] Adaptive engine initialized (Ceiling: 1024 Workers)
-[11:48:58.935] [INFO] [CORE] Workers (Min/Max): 32/512 | Event Batch: 512 | Queue Capacity: 2000
-[11:48:58.935] [INFO] [FCGI] Quotas -> PHP: 5 | Rust: 202 | Python: 305 | Total Pool: 512
-[11:48:58.935] [INFO] [WARN] System ulimit (1024) is lower than recommended headroom (3512)
-[11:48:58.935] [INFO] [ADVICE] Action: Run 'ulimit -n 3512' for optimal FD headroom
-[11:48:58.935] [INFO] [ADVICE] PHP-FPM max_children (5) is under-utilized for this hardware
-[11:48:58.935] [INFO] [ADVICE] Action: Consider increasing PHP-FPM max_children up to 256
+[12:09:31.539] [INFO] [CORE] Hardware-Aware Init -> Cores: 8 | RAM: 7836 MB | Max FD: 1024
+[12:09:31.539] [INFO] [CORE] Workers (Min/Recommended Ceiling): 32/512 | Event Batch: 512 | Queue Capacity: 307
+[12:09:31.539] [INFO] [FCGI] Quotas -> PHP: 5 | Rust: 202 | Python: 305 | Total Pool: 512
+[12:09:31.539] [INFO] [WARN] System ulimit (1024) is lower than recommended headroom (1319)
+[12:09:31.539] [INFO] [ADVICE] Action: Run 'ulimit -n 1319' for optimal FD headroom
+[12:09:31.539] [INFO] [ADVICE] PHP-FPM max_children (5) is conservative for detected hardware
+[12:09:31.539] [INFO] [ADVICE] Action: Consider scaling pool in '/etc/php/8.2/fpm/pool.d/www.conf' up to max_children = 256 based on PHP workload
+[12:09:31.539] [INFO] [ADVICE] Supporting Config Tip -> Adjust pm.start_servers = 64, min_spare = 64, max_spare = 128 accordingly
 ```
 
 ### 2. Penjelasan Detail Angka Berdasarkan Kondisi Hardware
 
-- Calculated MAX_FD capacity: 1024
+- Cores: 8 | RAM: 7836 MB | Max FD: 1024
 
-    - Artinya bagi Admin: Server mendeteksi batas maksimal koneksi bersamaan (File Descriptor atau jatah soket jaringan aktif) yang diizinkan oleh sistem operasi Linux Anda saat ini adalah 1024 koneksi.
+    - Artinya bagi Admin: Halmos membaca realitas perangkat keras sistem operasi Anda secara langsung saat booting. Batas maksimal koneksi bersamaan (File Descriptor atau jatah soket jaringan aktif) yang diizinkan oleh sistem Linux Anda saat ini adalah 1024 koneksi.
 
-- Workers (Min/Max): 32/512
+- Workers (Min/Recommended Ceiling): 32/512
 
-    - Artinya bagi Admin: Berdasarkan jumlah inti prosesor (CPU) dan kapasitas RAM di server ini, Halmos otomatis membatasi jumlah pelayan aktif (Workers). Server akan menyiapkan minimal 32 pelayan saat sepi, dan bisa melarikan diri hingga maksimal 512 pelayan saat lalu lintas pengunjung sedang padat.
+    - Artinya bagi Admin: Berdasarkan jumlah inti (core) prosesor (CPU), Halmos merekomendasikan batas plafon (ceiling) kapasitas pelayan aktif sebanyak 512 worker (dengan minimal 32 worker saat sistem sepi). Angka ini adalah baseline adaptif, bukan batas mati (hard limit)..
 
 - Event Batch: 512
 
     - Artinya bagi Admin: Jumlah paket koneksi masuk yang ditarik dan diproses oleh CPU secara bersamaan dalam satu siklus putaran sistem (menggunakan teknologi asinkronus Linux epoll).
 
-- Queue Capacity: 2000
+- Queue Capacity: 307
 
-    - Artinya bagi Admin: Ruang tunggu darurat (buffer antrean). Jika 512 pelayan sedang sibuk seratus persen, server akan menampung hingga 2,000 antrean pengunjung berikutnya di ruang tunggu RAM agar tidak langsung mendapat error Connection Refused.
+    - Artinya bagi Admin: Ruang tunggu darurat (buffer antrean) yang dihitung secara proporsional dari sisa File Descriptor aktual (Max FD dikurangi alokasi Worker). Jika 512 pelayan sedang sibuk, server menampung hingga 307 antrean pengunjung berikutnya di RAM agar tidak langsung mendapat error Connection Refused.
 
 - Quotas -> PHP: 5 | Rust: 202 | Python: 305 | Total Pool: 512
 
-    - Artinya bagi Admin: Pembagian jatah pelayan (backend bridge) untuk masing-masing bahasa pemrograman berdasarkan porsi kinerjanya. PHP dijatah 5 proses (sesuai setelan PHP-FPM), sementara sisanya dibagi proporsional untuk backend Rust dan Python.
+    - Artinya bagi Admin: Pembagian jatah pelayan (backend bridge) untuk masing-masing bahasa. Halmos tetap menghormati konfigurasi murni administrator (max_children = 5 untuk PHP-FPM), sementara sisa kapasitas pool dibagi secara proporsional untuk backend Rust dan Python.
 
 ### 3. Membaca Peringatan & Tindakan (Action) yang Harus Diambil
 
 ### A. Peringatan Batasan Sistem ([WARN] & [ADVICE] Ulimit):
 
-- Pesan: System ulimit (1024) is lower than recommended headroom (3512)
+- Pesan: System ulimit (1024) is lower than recommended headroom (1319)
 
-- Artinya: Skenario bahaya penolakan koneksi. Server Anda punya kapasitas hardware yang kuat, tapi sistem operasi Linux Anda masih membatasi akses file/koneksi jaringan di angka 1024. Jika pengunjung tembus angka tersebut, website bisa gagal diakses.
+- Artinya: Batas sistem operasi Linux Anda (1024) lebih kecil dari kalkulasi ideal yang dibutuhkan server (512 worker + 307 queue + 500 buffer keamanan = 1319). Jika trafik memuncak, koneksi baru bisa tertolak oleh OS.
 
-- Solusi Admin: Jalankan perintah terminal sesuai saran log sebelum menjalankan ulang server:
+- Solusi Admin: Jalankan perintah terminal dibawah ini, sesuai saran log. Lalu restart ulang web server Halmos.
 ```bash
-ulimit -n 3512
+ulimit -n 1319
 ```
 
 ### B. Saran Pengaturan Backend ([ADVICE] PHP-FPM):
 
-- Pesan: PHP-FPM max_children (5) is under-utilized
+- Pesan: PHP-FPM max_children (5) is conservative for detected hardware.
 
-- Artinya: Hardware Anda mubazir. Server mendeteksi spesifikasi CPU dan RAM Anda sanggup melayani ratusan proses sekaligus, tetapi konfigurasi bawaan PHP-FPM Anda hanya mengizinkan 5 proses (max_children = 5). Akibatnya, website terasa lambat saat diakses banyak orang karena antre di PHP, padahal RAM dan CPU masih santai.
+- Artinya: Konfigurasi PHP-FPM Anda saat ini tergolong sangat konservatif (5 proses) dibandingkan kapasitas perangkat keras 8 core yang terdeteksi. Halmos tidak memaksakan perubahan secara otomatis, melainkan memberikan pengingat berbasis advisory.
 
-- Solusi Admin: Buka file konfigurasi PHP-FPM Anda (bisanya di folder /etc/php/|versi-PHP FPM|/fpm/pool.d/www.conf), lalu naikkan nilai pm.max_children mendekati angka yang disarankan log (misal ke 256) agar potensi hardware terpakai secara optimal.
+- Solusi Admin: Buka file konfigurasi PHP-FPM Anda sesuai jalur yang tertera di log (/etc/php/8.2/fpm/pool.d/www.conf), lalu sesuaikan parameter prosesnya secara holistik agar manajemen proses tetap stabil. Tetapi angka konfigurasi dibawah ini, hanya contoh ya, untuk angka persisnya silahkan disesuaikan dengan kondisi hardware dan kebutuhan anda. 
+```bash
+pm.max_children = 256
+pm.start_servers = 64
+pm.min_spare_servers = 64
+pm.max_spare_servers = 128
+```
