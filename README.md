@@ -78,10 +78,47 @@ sudo make install
 ```
 ### Konfigurasi Sistem
 
-Lakukan konfigurasi sistem, sebelum web server dijalankan. Sesuaikan dengan environment system anda. Konfigurasi terletak di folder /etc/halmos/halmos.conf, dan ikuti petunjuk yang ada.
+Lakukan konfigurasi sistem, sebelum web server dijalankan. Sesuaikan dengan environment system anda. 
+
+Konfigurasi terletak di folder 
+```bash
+/etc/halmos/halmos.conf
+```
+
+Buka file konfigurasi dengan:
 ```bash
 nano /etc/halmos/halmos.conf
 ```
+
+⚠️ PENTING — Periksa Konfigurasi PHP-FPM
+
+Perhatikan konfigurasi berikut:
+```bash
+php_fpm_config_path = /etc/php/8.2/fpm/pool.d/www.conf
+```
+Path tersebut tidak selalu sama pada setiap sistem. Angka 8.2 pada contoh di atas hanya menunjukkan versi PHP-FPM yang digunakan pada environment pengembang Halmos.
+
+Jika sistem Anda menggunakan versi PHP-FPM yang berbeda, sesuaikan php_fpm_config_path dengan versi PHP-FPM yang terpasang pada sistem Anda.
+
+Untuk mengetahui versi PHP yang terpasang, jalankan:
+```bash
+php -v
+```
+Anda juga dapat melihat versi PHP yang tersedia pada sistem dengan:
+```bash
+ls /etc/php/
+```
+Misalnya, jika sistem Anda menggunakan PHP 8.3, ubah menjadi:
+```bash
+php_fpm_config_path = /etc/php/8.3/fpm/pool.d/www.conf
+```
+
+Pastikan file konfigurasi PHP-FPM tersebut benar-benar tersedia:
+```bash
+ls -l /etc/php/8.3/fpm/pool.d/www.conf
+```
+Jika php_fpm_config_path tidak sesuai dengan sistem Anda, Halmos tetap dapat mengalami masalah ketika membaca konfigurasi PHP-FPM. Konfigurasi ini digunakan oleh Adaptive Engine Halmos untuk membaca parameter PHP-FPM, termasuk max_children, sehingga path yang benar diperlukan agar mekanisme Adaptive dapat bekerja sebagaimana mestinya.
+
 Simpan perubahan konfigurasinya, dan sistem siap dijalankan.
 
 ## 7. Cara Menjalankan

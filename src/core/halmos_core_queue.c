@@ -106,7 +106,6 @@ int queue_push(TaskQueue *q, halmos_event_t event_item) {
                     if (worker_threads && active_worker_count < g_worker_max) {
                         worker_threads[active_worker_count++] = tid;
                     }
-                    pthread_detach(tid); // Atau hilangkan detach jika ingin di-join manual saat stop
                     q->total_workers++;
                 }
             }
