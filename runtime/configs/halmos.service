@@ -5,11 +5,19 @@ After=network.target
 [Service]
 User=root
 Group=root
-# Gunakan path absolut yang baru
+# Lokasi path absolut Halmos
 ExecStart=/usr/bin/halmos
 WorkingDirectory=/var/www
-#Restart=always
-#RestartSec=5s
+
+# --- BARIS INI UNTUK MENGIZINKAN HIGH CONCURRENCY ---
+LimitNOFILE=65536
+LimitNPROC=65536
+
+# Jika Halmos tidak ingin otomatis restart setelah server dinyalakan, 
+# maka 2 perintah ini di remark saja 
+Restart=always
+RestartSec=5s
+
 KillSignal=SIGINT
 
 [Install]

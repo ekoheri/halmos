@@ -106,7 +106,8 @@ void *core_thread_pool_worker(void *arg) {
  * Status active_workers dikurangi satu.
  ********************************************************************/
 void mark_worker_idle(TaskQueue *q) {
-    pthread_mutex_lock(&q->lock);
-    q->active_workers--;
-    pthread_mutex_unlock(&q->lock);
+    //pthread_mutex_lock(&q->lock);
+    //q->active_workers--;
+    //pthread_mutex_unlock(&q->lock);
+    atomic_fetch_sub(&q->active_workers, 1);
 }
