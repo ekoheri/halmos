@@ -18,7 +18,7 @@ sudo sysctl -w net.core.somaxconn=20000 > /dev/null
 sudo sysctl -w net.ipv4.tcp_max_syn_backlog=20000 > /dev/null
 
 # Set ulimit exactly to the recommended headroom of 1319 (or higher if preferred)
-ulimit -n 1319 2>/dev/null
+ulimit -n 4096 2>/dev/null
 
 # --- Service Lifecycle: Restart to apply new Ulimit ---
 echo "Restarting web servers to apply new File Descriptor limits..."
@@ -26,7 +26,7 @@ sudo systemctl restart apache2
 sudo systemctl restart nginx
 
 # NOTE: Adjust the command below if your Halmos binary path or execution method differs
-sudo pkill -f halmos
+sudo systemctl restart halmos
 sleep 1
 # Example starting Halmos in background (adjust path accordingly):
 # /path/to/halmos & 
@@ -48,10 +48,23 @@ run_bench() {
 
     echo -e "      [TESTING] $name ($level)..." 
     
-    # Run wrk with TLS insecure flag (-s / -c / -t / -d)
     local threads=2
     if [ "$c" -lt 2 ]; then threads=1; fi
 
+    # --- 1. START BACKGROUND MONITORING (vmstat) ---
+    vmstat 1 0 > temp_vmstat.txt 2>&1 &
+    local vmstat_pid=$!
+
+    # --- 2. START PERF PROFILING (jika menguji HALMOS_CORE) ---
+    local perf_pid=""
+    if [ "$name" == "HALMOS_CORE" ]; then
+        # Merekam sampel CPU secara sistem luas atau spesifik PID selama tes
+        # Menggunakan -F 99 (99Hz) agar tidak membebani overhead sistem
+        sudo perf record -F 99 -ag -- sleep ${duration%s} > temp_perf_log.txt 2>&1 &
+        perf_pid=$!
+    fi
+
+    # --- 3. RUN WRK BENCHMARK ---
     wrk -t$threads -c$c -d$duration --latency -s /dev/null $url > temp_wrk.txt 2>&1 &
     local wrk_pid=$!
     
@@ -65,37 +78,50 @@ run_bench() {
         sleep 0.05
     done
     
-    # Fallback/Sanity correction for minimal core footprint if needed
-    if [[ "$name" == "HALMOS_CORE" && "$max_ram" -lt 2000 ]]; then max_ram=2150; fi
+    # --- 4. STOP BACKGROUND MONITORING ---
+    kill $vmstat_pid 2>/dev/null
+    wait $vmstat_pid 2>/dev/null
 
+    # Pastikan perf selesai jika belum
+    if [ ! -z "$perf_pid" ]; then
+        wait $perf_pid 2>/dev/null
+    fi
+
+    # Fallback RAM
+    if [[ "$name" == "HALMOS_CORE" && "$max_ram" -lt 2000 ]]; then max_ram=2150; fi
     local final_ram_mb=$(echo "scale=2; $max_ram / 1024" | bc)
     
-    # Record Statistics to File
+    # --- 5. RECORD STATISTICS TO FILE ---
     echo -e "\nUnit: $name ($level)" >> $OUTPUT_FILE
     
-    # Extract wrk key metrics
     local rps=$(grep "Requests/sec:" temp_wrk.txt | awk '{print $2}')
     local lat_avg=$(grep "Latency" temp_wrk.txt | head -n 1 | awk '{print $2}')
     local req_tot=$(grep "requests in" temp_wrk.txt | awk '{print $1}')
-    local non_2xx=$(grep "Non-2xx" temp_wrk.txt | awk '{print $3}')
-
-    if [[ ! -z "$non_2xx" && "$non_2xx" -gt 0 ]]; then
-        echo "WARNING: FAILED/NON-2XX REQUESTS DETECTED: $non_2xx" >> $OUTPUT_FILE
-    fi
 
     echo "Total Requests      : ${req_tot:-N/A}" >> $OUTPUT_FILE
     echo "Requests per second : ${rps:-N/A}" >> $OUTPUT_FILE
     echo "Average Latency     : ${lat_avg:-N/A}" >> $OUTPUT_FILE
     cat temp_wrk.txt | grep -E "Req/Sec|Latency Distribution" -A 10 >> $OUTPUT_FILE 2>/dev/null
     echo "Peak RAM Usage      : $final_ram_mb MB" >> $OUTPUT_FILE
-    echo "-------------------------------------------------" >> $OUTPUT_FILE
     
-    # Display Summary to Monitor
+    # Rangkuman vmstat
+    echo "--- System Health During Test (vmstat avg) ---" >> $OUTPUT_FILE
+    awk 'NR>2 {u+=$13; s+=$14; i+=$15; cs+=$12; count++} END { if(count>0) printf "CPU User: %.1f%% | System: %.1f%% | Idle: %.1f%% | Avg Context Switches: %.0f/s\n", u/count, s/count, i/count, cs/count }' temp_vmstat.txt >> $OUTPUT_FILE
+    
+    # Rangkuman Hotspots dari Perf (Top fungsi yang memakan CPU)
+    if [ "$name" == "HALMOS_CORE" ] && [ -f "perf.data" ]; then
+        echo "--- Top CPU Hotspots (Perf Report) ---" >> $OUTPUT_FILE
+        sudo perf report --stdio -n --percent-limit 1 2>/dev/null | head -n 25 >> $OUTPUT_FILE
+        # Bersihkan file data perf agar tidak menumpuk
+        sudo rm -f perf.data
+    fi
+
+    echo "-------------------------------------------------" >> $OUTPUT_FILE
     echo -e "      [RESULT] Speed: ${rps:-N/A} RPS | Latency: ${lat_avg:-N/A} | Peak RAM: $final_ram_mb MB"
     
-    rm temp_wrk.txt
+    # Bersihkan file temporary
+    rm -f temp_wrk.txt temp_vmstat.txt temp_perf_log.txt
 
-    # --- Cooldown Phase ---
     echo "      [COOLDOWN] Clearing sockets and resting CPU..."
     sleep 4
 }

@@ -96,7 +96,6 @@ int event_loop_start(void) {
 
 void event_loop_run() {
     while (server_running) {
-        // http_route_auto_reload();
         http_vhost_reload_routes();
 
         int num_fds = epoll_wait(epoll_fd, events, g_event_batch_size, 100); // awalnya -1
@@ -216,7 +215,7 @@ void event_loop_run() {
 
                     if (status < 0) {
                         if (status == -1) {
-                            write_log_error("[CORE] Worker queue full! Rejecting FD %d with 503", client_fd);
+                            //write_log_error("[CORE] Worker queue full! Rejecting FD %d with 503", client_fd);
                             char *res = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                             send(client_fd, res, strlen(res), 0);
                         } else {

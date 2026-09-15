@@ -4,6 +4,7 @@
 #include "halmos_core_connection.h"
 
 #include <pthread.h>
+#include <stdatomic.h>
 #include <sys/time.h>
 
 // --- KONFIGURASI DYNAMIC CONTROL ---
@@ -22,8 +23,10 @@ typedef struct {
     int count;              // Jumlah request dalam antrean
     int max_queue_limit;    // Batas maksimal antrean (Tambahkan ini)
     int cpu_cores;          // Jumlah core CPU (Tambahkan ini)
-    int active_workers;     // Thread yang sedang sibuk (Busy/Blocked)
+    _Atomic int active_workers;     // Thread yang sedang sibuk (Busy/Blocked)
     int total_workers;      // Total thread yang tercipta saat ini
+
+    int scaling_in_progress;
 
     int is_running;
     

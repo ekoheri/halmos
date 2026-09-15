@@ -126,6 +126,127 @@ void core_adaptive_init(void) {
     
     // Periksa apakah nilainya unlimited
     if (rl.rlim_cur == RLIM_INFINITY) {
+        calculated_max_fd = 65536; 
+    } else if (rl.rlim_cur > UINT32_MAX) {
+        calculated_max_fd = UINT32_MAX; 
+    } else {
+        calculated_max_fd = (uint32_t)rl.rlim_cur;
+    }
+
+    // Koreksi Poin 5: Jangan menaikkan batas FD secara artifisial ke 1024 jika OS membatasi lebih kecil.
+    // Cukup pastikan nilainya tidak 0/negatif (batas aman minimal misal 64), lalu biarkan g_max_fd jujur apa adanya.
+    if (calculated_max_fd < 64) calculated_max_fd = 64;
+    g_max_fd = calculated_max_fd;
+
+    // Hardware-aware recommended worker ceiling
+    int cpu_based_max = (int)(num_cores * 64); 
+    int recommended_val = cpu_based_max;
+    
+    if (recommended_val > 1024) recommended_val = 1024;
+    if (recommended_val < 32)   recommended_val = 32;
+
+    g_worker_max = recommended_val;
+    g_worker_min = (int)num_cores * 4;
+    if (g_worker_min > g_worker_max) g_worker_min = g_worker_max;
+
+    // 2. Fetch Administrator's PHP-FPM Configuration
+    PHPConfig php = fetch_php_fpm_config();
+    
+    // 3. FCGI Quota Mapping
+    fcgi_pool.php_quota = php.max_children; 
+    
+    int sisa_jatah = g_worker_max - fcgi_pool.php_quota;
+    if (sisa_jatah < 0) {
+        sisa_jatah = 0; 
+    }
+
+    fcgi_pool.rust_quota   = (sisa_jatah * 2) / 5; 
+    fcgi_pool.python_quota = sisa_jatah - fcgi_pool.rust_quota; 
+    fcgi_pool.pool_size    = fcgi_pool.php_quota + fcgi_pool.rust_quota + fcgi_pool.python_quota;
+    g_fcgi_pool_size       = fcgi_pool.pool_size;
+
+    // 4. Queue Capacity Berbasis g_max_fd aktual
+    g_event_batch_size = (g_worker_max > MAX_EVENT_BATCH_SIZE) ? MAX_EVENT_BATCH_SIZE : g_worker_max;
+
+    if (g_max_fd > (uint32_t)g_worker_max) {
+        uint32_t sisa_fd = g_max_fd - (uint32_t)g_worker_max;
+        g_queue_capacity = (int)((sisa_fd * 60U) / 100U);
+    } else {
+        g_queue_capacity = 256; 
+    }
+
+    if (g_queue_capacity > MAX_QUEUE_CAPACITY) {
+        g_queue_capacity = MAX_QUEUE_CAPACITY;
+    }
+
+    if (g_queue_capacity < 256) {
+        g_queue_capacity = 256;
+    }
+
+    // 5. Logging & Advisory System
+    write_log("[CORE] Hardware-Aware Init -> Cores: %ld | RAM: %lu MB | Max FD: %u", 
+              num_cores, (unsigned long)((si.totalram * si.mem_unit) / (1024 * 1024)), g_max_fd);
+    write_log("[CORE] Workers (Min/Recommended Ceiling): %d/%d | Event Batch: %d | Queue Capacity: %d", 
+              g_worker_min, g_worker_max, g_event_batch_size, g_queue_capacity);
+    write_log("[FCGI] Quotas -> PHP: %d | Rust: %d | Python: %d | Total Pool: %d", 
+              fcgi_pool.php_quota, fcgi_pool.rust_quota, fcgi_pool.python_quota, g_fcgi_pool_size);
+
+    // Koreksi Poin 2 & 4: Advisory ulimit yang bersih, tidak kaku, dan informatif
+    rlim_t min_safe_ulimit = 4096;
+    if (rl.rlim_cur != RLIM_INFINITY && rl.rlim_cur < min_safe_ulimit) {
+        write_log("[WARN] System ulimit (%lu) is relatively low for high-concurrency workloads (recommended baseline: %lu)",
+                  (unsigned long)rl.rlim_cur,
+                  (unsigned long)min_safe_ulimit);
+        write_log("[ADVICE] Consider increasing RLIMIT_NOFILE (for example: 4096, 16384, or 65536) according to expected concurrency");
+    }
+
+    // Berikan juga warning jika g_max_fd yang dibaca aktual terlalu rendah
+    if (g_max_fd < 1024) {
+        write_log("[WARN] RLIMIT_NOFILE (%u) is low for a high-concurrency server", g_max_fd);
+    }
+
+    // Audit PHP-FPM Configuration
+    if (php.max_children > g_worker_max) {
+        write_log("[WARN] PHP-FPM max_children (%d) exceeds hardware-aware worker baseline (%d)", 
+                  php.max_children, g_worker_max);
+        write_log("[ADVICE] Action: Review PHP-FPM max_children in '%s' if resource contention occurs", 
+                  config.php_fpm_config_path);
+    } 
+    else if (php.max_children < (g_worker_max / 4)) {
+        int suggested_max = g_worker_max / 2;
+        int suggested_start = suggested_max / 4;
+        int suggested_min = suggested_start;
+        int suggested_max_spare = suggested_max / 2;
+
+        write_log("[ADVICE] PHP-FPM max_children (%d) is conservative for detected hardware", php.max_children);
+        write_log("[ADVICE] Action: Consider scaling pool in '%s' up to max_children = %d based on PHP workload", 
+                  config.php_fpm_config_path, suggested_max);
+        write_log("[ADVICE] Supporting Config Tip -> Adjust pm.start_servers = %d, min_spare = %d, max_spare = %d accordingly", 
+                  suggested_start, suggested_min, suggested_max_spare);
+    }
+}
+
+
+/*
+void core_adaptive_init(void) {
+    // 1. Hardware Awareness Baseline Detection
+    long num_cores = sysconf(_SC_NPROCESSORS_ONLN);
+    if (num_cores < 1) num_cores = 1;
+
+    struct rlimit rl;
+    struct sysinfo si;
+
+    if (getrlimit(RLIMIT_NOFILE, &rl) != 0) {
+        rl.rlim_cur = 4096;
+    }
+    if (sysinfo(&si) != 0) {
+        memset(&si, 0, sizeof(si));
+    }
+
+    uint32_t calculated_max_fd;
+    
+    // Periksa apakah nilainya unlimited
+    if (rl.rlim_cur == RLIM_INFINITY) {
         // Berikan batas aman rasional untuk server (misal: 65536 atau baca dari konstanta sysctl)
         calculated_max_fd = 65536; 
     } else if (rl.rlim_cur > UINT32_MAX) {
@@ -137,11 +258,11 @@ void core_adaptive_init(void) {
     if (calculated_max_fd < 1024) calculated_max_fd = 1024;
     g_max_fd = calculated_max_fd;
 
-    /*
-     * Hardware-aware recommended worker ceiling.
-     * This value is an initialization baseline, not a runtime
-     * auto-scaling decision and not an administrator override.
-     */
+    //
+    // * Hardware-aware recommended worker ceiling.
+    // * This value is an initialization baseline, not a runtime
+    // * auto-scaling decision and not an administrator override.
+    // 
     int cpu_based_max = (int)(num_cores * 64); 
     int recommended_val = cpu_based_max;
     
@@ -223,3 +344,4 @@ void core_adaptive_init(void) {
                   suggested_start, suggested_min, suggested_max_spare);
     }
 }
+*/

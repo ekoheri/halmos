@@ -120,6 +120,7 @@ install: all
 
 	@echo "$(BLUE)[INSTALL]$(NC) Mendaftarkan service ke systemd..."
 	sudo systemctl daemon-reload
+	sudo systemctl enable $(SERVICE_NAME)
 	@echo "\n$(GREEN)[OK] Halmos terpasang sempurna!$(NC)"
 	@echo "Gunakan 'make run' untuk jalan di background."
 	@echo "Atau 'make debug' untuk jalan di terminal."
