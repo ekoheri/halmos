@@ -1,15 +1,17 @@
-#ifndef HTTP1_HALMOS_RESPONSE_H
-#define HTTP1_HALMOS_RESPONSE_H
+#ifndef HALMOS_HTTP1_RESPONSE_H
+#define HALMOS_HTTP1_RESPONSE_H
 
-#include <stddef.h>
 #include <stdbool.h>
-#include "halmos_http1_header.h"
+#include <stddef.h>
 
-// Nama fungsi harus persis dengan yang ada di response.c ente
-void http1_response_send_mem(int client_fd, int status_code, const char *status_text, const char *content, bool keep_alive);
+void http1_response_send_headers(int client_fd, int status, const char *msg, 
+                                 const char *mime, size_t len, bool ka, bool is_tls);
 
-void http1_response_routing(int sock_client, RequestHeader *req);
+void http1_response_send_mem(int client_fd, int status_code, const char *status_text, 
+                            const char *content, bool keep_alive, bool is_tls);
 
-void http1_response_zerocopy(int sock_client, RequestHeader *req, VHostEntry *vh);
+void http1_response_send_dir_listing(int sock_client, const char *path, const char *uri, bool is_tls);
+
+void http1_response_send_error(int sock_client, int code, bool is_tls);
 
 #endif

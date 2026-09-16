@@ -8,9 +8,9 @@
 #include "halmos_http1_header.h"
 #include "halmos_http_utils.h"
 #include "halmos_http_vhost.h"
-#include "halmos_fcgi.h"
 #include "halmos_log.h"
 #include "halmos_http1_manager.h"
+#include "halmos_sec_tls.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,200 +19,116 @@
 #include <fcntl.h>
 #include <dirent.h>
 #include <errno.h>
-#include <poll.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
-#include <sys/sendfile.h>
-#include <netinet/tcp.h>
-#include <netinet/in.h>  // Untuk IPPROTO_TCP
-#include <netinet/tcp.h> // Untuk TCP_NODELAY
-
-/* * CATATAN: Fungsi halmos_send dan proses SSL_write 
- * sekarang sudah dipindah ke Manager sesuai instruksi Boss. 
- * File ini fokus pada pengiriman Plaintext & Zero-Copy.
- */
+#include <netinet/in.h>
 
 /********************************************************************
- * 1. SEND HTTP HEADERS (PLAIN)
+ * 1. HELPER SEND HEADER PLAIN & TLS
+ * Non-blocking memory send dengan MSG_NOSIGNAL
  ********************************************************************/
-static void send_headers_plain(int client_fd, int status, const char *msg, const char *mime, size_t len, bool ka) {
+static ssize_t halmos_send_mem(int fd, const void *buf, size_t len, bool is_tls) {
+    if (is_tls) {
+        return ssl_send(fd, buf, len);
+    }
+    return send(fd, buf, len, MSG_NOSIGNAL);
+}
+
+void http1_response_send_headers(int client_fd, int status, const char *msg, 
+                                 const char *mime, size_t len, bool ka, bool is_tls) {
     char header[1024];
     int h_len = snprintf(header, sizeof(header),
-        "HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %zu\r\n"
-        "Connection: %s\r\nServer: Halmos-Savage/2.1\r\n\r\n",
+        "HTTP/1.1 %d %s\r\n"
+        "Content-Type: %s\r\n"
+        "Content-Length: %zu\r\n"
+        "Connection: %s\r\n"
+        "Server: Halmos-Savage/2.1\r\n\r\n",
         status, msg, mime, len, ka ? "keep-alive" : "close");
     
-    send(client_fd, header, h_len, MSG_NOSIGNAL);
+    if (h_len > 0) {
+        halmos_send_mem(client_fd, header, (size_t)h_len, is_tls);
+    }
 }
 
 /********************************************************************
- * 2. MEMORY RESPONSE (PLAIN)
+ * 2. MEMORY RESPONSE (PLAIN & TLS)
+ * Untuk pengiriman respon singkat langsung dari RAM (HTML/JSON/Text)
  ********************************************************************/
 void http1_response_send_mem(int client_fd, int status_code, const char *status_text, 
-                            const char *content, bool keep_alive) {
+                            const char *content, bool keep_alive, bool is_tls) {
     size_t len = content ? strlen(content) : 0;
-    send_headers_plain(client_fd, status_code, status_text, "text/html", len, keep_alive);
-    if (len > 0) {
-        send(client_fd, content, len, MSG_NOSIGNAL);
-    }
-}
-
-/********************************************************************
- * 3. STATIC RESPONSE (ZERO-COPY STRATEGY)
- * Hanya dipanggil oleh Manager jika req->is_tls == false
- ********************************************************************/
-void http1_response_zerocopy(int sock_client, RequestHeader *req, VHostEntry *vh) {
-    const char *active_root = (vh) ? vh->root : config.document_root;
-
-    // Sanitize path adalah WAJIB sebelum stat atau open
-    char *safe_path = sanitize_path(active_root, req->uri);
-    struct stat st;
-
-    if (!safe_path || stat(safe_path, &st) != 0 || !S_ISREG(st.st_mode)) {
-        http1_response_send_mem(sock_client, 404, "Not Found", "<h1>404 Not Found</h1>", req->is_keep_alive);
-        if (safe_path) free(safe_path);
-        return;
-    }
-
-    int fd = open(safe_path, O_RDONLY);
-    if (fd == -1) {
-        http1_response_send_mem(sock_client, 500, "Internal Error", "<h1>500</h1>", false);
-        free(safe_path);
-        return;
-    }
-
-    // TCP Optimization untuk Zero-Copy
-    int state = 1;
-    setsockopt(sock_client, IPPROTO_TCP, TCP_NODELAY, &state, sizeof(state));
-
-    // Kirim Header Plain
-    send_headers_plain(sock_client, 200, "OK", get_mime_type(req->uri), st.st_size, req->is_keep_alive);
-
-    // SENDFILE: Data pindah dari Disk ke Socket langsung di level Kernel
+    http1_response_send_headers(client_fd, status_code, status_text, "text/html", len, keep_alive, is_tls);
     
-    off_t offset = 0;
-    size_t remaining = st.st_size;
-    while (remaining > 0) {
-        ssize_t sent = sendfile(sock_client, fd, &offset, remaining);
-        if (sent <= 0) {
-            if (errno == EAGAIN || errno == EINTR) {
-                struct pollfd pfd = { .fd = sock_client, .events = POLLOUT };
-                poll(&pfd, 1, 100);
-                continue;
-            }
-            break;
-        }
-        remaining -= (size_t)sent;
+    if (len > 0 && content != NULL) {
+        halmos_send_mem(client_fd, content, len, is_tls);
     }
-
-    close(fd);
-    free(safe_path);
 }
 
 /********************************************************************
- * 4. DIRECTORY LISTING (PLAIN)
+ * 3. DIRECTORY LISTING
+ * Aman dari SIGPIPE dan dikirim secara terkontrol
  ********************************************************************/
-static void send_directory_listing_plain(int sock_client, const char *path, const char *uri) {
+void http1_response_send_dir_listing(int sock_client, const char *path, const char *uri, bool is_tls) {
     DIR *d = opendir(path);
-    if (!d) return;
+    if (!d) {
+        http1_response_send_mem(sock_client, 403, "Forbidden", "<h1>403 Directory Access Denied</h1>", false, is_tls);
+        return;
+    }
 
-    const char *h = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n"
-                    "<html><body><h1>Index of ";
-    send(sock_client, h, strlen(h), 0);
-    send(sock_client, uri, strlen(uri), 0);
-    send(sock_client, "</h1><hr><ul>", 13, 0);
+    // Kirim Header Chunked/Close untuk Directory Listing Dynamic
+    const char *h = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\nServer: Halmos-Savage/2.1\r\n\r\n"
+                    "<!DOCTYPE html><html><head><title>Index of ";
+    halmos_send_mem(sock_client, h, strlen(h), is_tls);
+    halmos_send_mem(sock_client, uri, strlen(uri), is_tls);
+    
+    const char *h2 = "</title></head><body><h1>Index of ";
+    halmos_send_mem(sock_client, h2, strlen(h2), is_tls);
+    halmos_send_mem(sock_client, uri, strlen(uri), is_tls);
+    
+    const char *h3 = "</h1><hr><ul>";
+    halmos_send_mem(sock_client, h3, strlen(h3), is_tls);
 
     struct dirent *dir;
+    char entry[1024];
     while ((dir = readdir(d)) != NULL) {
-        char entry[1024];
-        int e_len = snprintf(entry, sizeof(entry), "<li><a href=\"%s/%s\">%s</a></li>", 
-                             uri, dir->d_name, dir->d_name);
-        send(sock_client, entry, e_len, 0);
+        // Abaikan "."
+        if (strcmp(dir->d_name, ".") == 0) continue;
+
+        int e_len = snprintf(entry, sizeof(entry), "<li><a href=\"%s%s%s\">%s%s</a></li>", 
+                             uri, 
+                             (uri[strlen(uri) - 1] == '/') ? "" : "/", 
+                             dir->d_name, 
+                             dir->d_name,
+                             (dir->d_type == DT_DIR) ? "/" : "");
+        if (e_len > 0) {
+            halmos_send_mem(sock_client, entry, (size_t)e_len, is_tls);
+        }
     }
-    send(sock_client, "</ul></body></html>", 20, 0);
+    
+    const char *footer = "</ul><hr><i>Halmos-Savage/2.1 Server</i></body></html>";
+    halmos_send_mem(sock_client, footer, strlen(footer), is_tls);
+    
     closedir(d);
 }
 
 /********************************************************************
- * 5. PROCESS REQUEST ROUTING
- * Memisahkan takdir: SSL ke Manager, Plain ke Zero-Copy
+ * 4. STANDARD ERROR RESPONSES
+ * Short helper untuk pemanggilan cepat respon HTTP Error
  ********************************************************************/
-
-void http1_response_routing(int sock_client, RequestHeader *req) {
-    int backend_type = -1; // -1 berarti bukan FastCGI
-
-    // 1. IDENTIFIKASI GRUP BACKEND BERDASARKAN EKSTENSI
-    if (has_extension(req->uri, req->path_info, ".php")) { 
-        backend_type = 0; // PHP
-    } 
-    else if (has_extension(req->uri, req->path_info, config.rust.ext)) { 
-        backend_type = 1; // Rust
-    } 
-    else if (has_extension(req->uri, req->path_info, config.python.ext)) { 
-        backend_type = 2; // Python
+void http1_response_send_error(int sock_client, int code, bool is_tls) {
+    switch (code) {
+        case 400:
+            http1_response_send_mem(sock_client, 400, "Bad Request", "<h1>400 Bad Request</h1>", false, is_tls);
+            break;
+        case 403:
+            http1_response_send_mem(sock_client, 403, "Forbidden", "<h1>403 Forbidden</h1>", false, is_tls);
+            break;
+        case 404:
+            http1_response_send_mem(sock_client, 404, "Not Found", "<h1>404 Not Found</h1>", false, is_tls);
+            break;
+        case 500:
+        default:
+            http1_response_send_mem(sock_client, 500, "Internal Server Error", "<h1>500 Internal Server Error</h1>", false, is_tls);
+            break;
     }
-
-    // 2. JALUR FASTCGI (Delegasikan pemilihan Node ke API Request Stream)
-    if (backend_type != -1) {
-        /* KITA TIDAK KIRIM IP/PORT LAGI DISINI.
-           Kita kirim backend_type, biar di dalam sana Halmos melakukan Load Balancing.
-           Note: Jika fungsi api kamu masih butuh signature lama, kita kirim NULL & backend_type.
-        */
-        fcgi_api_request_stream(req, sock_client, backend_type, req->body_data, req->content_length);
-        return;
-    }
-
-    // 2. JALUR TLS (Hanya untuk File Statis, karena PHP sudah di-handle di atas)
-    if (req->is_tls) {
-        //fprintf(stderr, "[ROUTING DEBUG] Memanggil http1_manager_ssl_response untuk file statis...\n");
-        http1_manager_ssl_response(sock_client, req); 
-        return;
-    }
-
-    // DAPATKAN KONTEKS VHOST
-    // Kita panggil context-nya di sini untuk menentukan root folder yang aktif.
-    //VHostEntry *vh = http_vhost_get_context(req->host);
-    //const char *active_root = (vh) ? vh->root : config.document_root;
-
-    // --- UBAH DI SINI: Jangan cari ulang, ambil dari req ---
-    VHostEntry *vh = (VHostEntry *)req->vhost_context; // <--- AMBIL DARI STRUCT
-    const char *active_root = (vh && vh->root[0] != '\0') ? vh->root : config.document_root;
-
-    // 3. AMANKAN PATH DIREKTORI
-    char *safe_dir_path = sanitize_path(active_root, req->directory);
-    if (!safe_dir_path) {
-        http1_response_send_mem(sock_client, 403, "Forbidden", "<h1>403 Forbidden</h1>", false);
-        return;
-    }
-
-    struct stat st;
-    if (stat(safe_dir_path, &st) == 0 && S_ISDIR(st.st_mode)) {
-        char index_check[PATH_MAX];
-        
-        // Cek index.html menggunakan path yang sudah disanitasi
-        snprintf(index_check, sizeof(index_check), "%s/index.html", safe_dir_path);
-        if (access(index_check, F_OK) == 0) {
-            strcat(req->uri, "index.html"); 
-            http1_response_zerocopy(sock_client, req, vh); // Oper vh
-            free(safe_dir_path);
-            return;
-        }
-
-        // Cek index.php
-        snprintf(index_check, sizeof(index_check), "%s/index.php", safe_dir_path);
-        if (access(index_check, F_OK) == 0) {
-            strcat(req->uri, "index.php");
-            free(safe_dir_path);
-            http1_response_routing(sock_client, req); // Rekursif aman
-            return;
-        }
-
-        send_directory_listing_plain(sock_client, safe_dir_path, req->uri);
-        free(safe_dir_path);
-        return;
-    }
-
-    // 4. Static File
-    if (safe_dir_path) free(safe_dir_path);
-    http1_response_zerocopy(sock_client, req, vh); // Oper vh
 }

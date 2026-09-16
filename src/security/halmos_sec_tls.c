@@ -86,6 +86,22 @@ int ssl_init(void) {
     SSL_CTX_set_alpn_protos(halmos_tls_ctx, protos, sizeof(protos));
     SSL_CTX_set_alpn_select_cb(halmos_tls_ctx, alpn_select_cb, protos);
  
+    // === PERBAIKAN: izinkan buffer SSL_write() "berpindah" alamat saat retry ===
+    // Kontrak default OpenSSL untuk socket non-blocking: kalau SSL_write()
+    // gagal dengan WANT_WRITE/WANT_READ, panggilan retry berikutnya WAJIB
+    // pakai POINTER buffer yang PERSIS SAMA dengan panggilan yang gagal -
+    // bukan cuma isi yang sama. Beberapa jalur kirim kita (misal body file
+    // statis di http1_manager_ssl_response) memakai buffer stack lokal yang
+    // beda alamat tiap kali fungsi dipanggil ulang (tiap dispatch/resume),
+    // melanggar kontrak ini - menyebabkan OpenSSL bingung state internalnya
+    // dan mengembalikan error protokol di tengah transfer (koneksi ditutup
+    // paksa, client dapat data parsial). SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER
+    // melonggarkan aturan ini (boleh beda alamat, asal isi byte yang sama
+    // persis dikirim ulang). SSL_MODE_ENABLE_PARTIAL_WRITE juga diaktifkan
+    // supaya SSL_write() boleh mengirim SEBAGIAN data dan melaporkan jumlah
+    // byte terkirim, alih-alih memaksa all-or-nothing per panggilan.
+    SSL_CTX_set_mode(halmos_tls_ctx, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER | SSL_MODE_ENABLE_PARTIAL_WRITE);
+ 
     if (SSL_CTX_use_certificate_chain_file(halmos_tls_ctx, config.ssl_certificate_file) <= 0) {
         write_log_error("[SEC] Failed to load certificate file: %s", 
                         ERR_error_string(ERR_get_error(), NULL));
@@ -181,16 +197,20 @@ ssize_t ssl_send(int fd, const void *buf, size_t len) {
     SSL *ssl = ssl_get_for_fd(fd);
     if (!ssl) return -1;
  
-    int ret = SSL_write(ssl, buf, (int)len);
+    int to_write = (len > 32768) ? 32768 : (int)len; 
+    int ret = SSL_write(ssl, buf, to_write);
     
-    if (ret <= 0) {
-        int err = SSL_get_error(ssl, ret);
-        if (err == SSL_ERROR_WANT_WRITE || err == SSL_ERROR_WANT_READ) {
-            return 0; 
-        }
-        return -1;
+    if (ret > 0) {
+        return (ssize_t)ret;
     }
  
-    return ret;
+    int err = SSL_get_error(ssl, ret);
+    if (err == SSL_ERROR_WANT_WRITE) {
+        return -EAGAIN;      // <-- Diubah dari return 0;
+    } 
+    if (err == SSL_ERROR_WANT_READ) {
+        return -EWOULDBLOCK; // <-- Diubah dari return 0;
+    }
+    
+    return -1; // Error fatal
 }
- 
