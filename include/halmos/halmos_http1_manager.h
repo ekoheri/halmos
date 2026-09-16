@@ -3,7 +3,7 @@
 
 #include <stdbool.h>
 #include <sys/types.h>
-#include "halmos_core_connection.h"
+#include "halmos_core_conn_table.h"
 #include "halmos_http1_header.h"
 
 // Enumerasi state sesi HTTP/1 untuk mendukung arsitektur non-blocking / event-driven

@@ -1,5 +1,5 @@
-#ifndef HALMOS_CORE_CONNECTION_H
-#define HALMOS_CORE_CONNECTION_H
+#ifndef HALMOS_CORE_CONN_TABLE_H
+#define HALMOS_CORE_CONN_TABLE_H
  
 #include <stdint.h>
 #include <stdbool.h>
@@ -71,17 +71,17 @@ typedef struct {
 } halmos_event_t;
  
 // API Core Connection Metadata (Dinamis berdasarkan g_max_fd)
-int core_conn_init(void);
-void core_conn_destroy(void);
+int core_conn_t_init(void);
+void core_conn_t_destroy(void);
  
-halmos_conn_t* core_conn_get(int fd);
-uint32_t core_conn_activate(int fd);
-void core_conn_deactivate(int fd);
-bool core_conn_is_valid(int fd, uint32_t expected_generation);
+halmos_conn_t* core_conn_t_get(int fd);
+uint32_t core_conn_t_activate(int fd);
+void core_conn_t_deactivate(int fd);
+bool core_conn_t_is_valid(int fd, uint32_t expected_generation);
  
 // Helpmate Lock Operations
-void core_conn_lock(halmos_conn_t *conn);
-void core_conn_unlock(halmos_conn_t *conn);
+void core_conn_t_lock(halmos_conn_t *conn);
+void core_conn_t_unlock(halmos_conn_t *conn);
  
 /**
  * Generic protocol-session helpers.
@@ -92,8 +92,8 @@ void core_conn_unlock(halmos_conn_t *conn);
  * (dispatch di worker, cleanup di event loop) sudah berada di bawah
  * io_lock yang sama.
  */
-void core_conn_set_protocol_session(halmos_conn_t *conn, void *session, void (*destroy_fn)(void *));
-void core_conn_destroy_protocol_session(halmos_conn_t *conn);
-void core_conn_clear_write_buf(halmos_conn_t *conn);
+void core_conn_t_set_protocol_session(halmos_conn_t *conn, void *session, void (*destroy_fn)(void *));
+void core_conn_t_destroy_protocol_session(halmos_conn_t *conn);
+void core_conn_t_clear_write_buf(halmos_conn_t *conn);
  
-#endif // HALMOS_CORE_CONNECTION_H
+#endif // HALMOS_CORE_CONN_TABLE_H

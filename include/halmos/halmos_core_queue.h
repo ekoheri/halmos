@@ -1,7 +1,7 @@
 #ifndef HALMOS_CORE_QUEUE_H
 #define HALMOS_CORE_QUEUE_H
 
-#include "halmos_core_connection.h"
+#include "halmos_core_conn_table.h"
 
 #include <pthread.h>
 #include <stdatomic.h>

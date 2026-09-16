@@ -62,7 +62,7 @@ void http2_send_frame(int fd, bool is_tls, uint8_t type, uint8_t flags, uint32_t
     // h2_write_or_buffer() yang menyimpan sisa yang belum terkirim ke
     // session->pending_write_buf untuk di-flush di iterasi loop berikutnya,
     // menjaga urutan byte frame tetap benar.
-    halmos_conn_t *conn = core_conn_get(fd);
+    halmos_conn_t *conn = core_conn_t_get(fd);
     HTTP2Session *session = (conn) ? (HTTP2Session *)conn->protocol_session : NULL;
  
     if (!session) {
