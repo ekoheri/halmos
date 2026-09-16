@@ -6,7 +6,18 @@
 #include <openssl/ssl.h>
  
 static halmos_conn_t *g_connections = NULL;
- 
+
+// Helper opsional untuk reset write buffer pada koneksi
+void core_conn_clear_write_buf(halmos_conn_t *conn) {
+    if (!conn) return;
+    if (conn->write_buf) {
+        free(conn->write_buf);
+        conn->write_buf = NULL;
+    }
+    conn->write_len = 0;
+    conn->write_offset = 0;
+}
+
 int core_conn_init(void) {
     if (g_max_fd == 0) {
         write_log_error("[ERR] Invalid g_max_fd (0) for connection system initialization");
@@ -25,6 +36,8 @@ int core_conn_init(void) {
         atomic_init(&g_connections[i].active, false);
         atomic_init(&g_connections[i].state, CONN_STATE_DEAD);
         g_connections[i].ssl = NULL;
+        g_connections[i].protocol_session = NULL;
+        g_connections[i].protocol_session_destroy = NULL;
  
         // Inisialisasi Mutex Per Slot FD
         if (pthread_mutex_init(&g_connections[i].io_lock, NULL) != 0) {
@@ -52,6 +65,14 @@ void core_conn_destroy(void) {
                 SSL_free(g_connections[i].ssl);
                 g_connections[i].ssl = NULL;
             }
+            // === TAMBAHAN: bereskan sisa protocol_session (mis. HTTP2Session) ===
+            // Dipanggil generik lewat function pointer, connection.c tidak
+            // perlu tahu isi struct-nya.
+            if (g_connections[i].protocol_session && g_connections[i].protocol_session_destroy) {
+                g_connections[i].protocol_session_destroy(g_connections[i].protocol_session);
+                g_connections[i].protocol_session = NULL;
+                g_connections[i].protocol_session_destroy = NULL;
+            }
         }
  
         for (uint32_t i = 0; i < g_max_fd; i++) {
@@ -73,11 +94,20 @@ uint32_t core_conn_activate(int fd) {
  
     halmos_conn_t *conn = &g_connections[fd];
     
-    // Kunci slot sebentar saat aktivasi untuk reset pointer SSL & state
     pthread_mutex_lock(&conn->io_lock);
  
     uint32_t new_gen = atomic_fetch_add(&conn->generation, 1) + 1;
     conn->ssl = NULL;
+
+    /* Reset Write Buffer State */
+    core_conn_clear_write_buf(conn);
+    conn->epoll_events = 0;
+ 
+    if (conn->protocol_session && conn->protocol_session_destroy) {
+        conn->protocol_session_destroy(conn->protocol_session);
+    }
+    conn->protocol_session = NULL;
+    conn->protocol_session_destroy = NULL;
     
     atomic_store(&conn->state, CONN_STATE_READING);
     atomic_store(&conn->active, true);
@@ -92,13 +122,20 @@ void core_conn_deactivate(int fd) {
  
     halmos_conn_t *conn = &g_connections[fd];
     
-    // Matikan flag active terlebih dahulu (atomic signal untuk fast path)
     atomic_store(&conn->active, false);
     atomic_store(&conn->state, CONN_STATE_DEAD);
  
-    // Kunci slot untuk mengosongkan resource terikat (seperti pointer SSL)
     pthread_mutex_lock(&conn->io_lock);
     conn->ssl = NULL;
+
+    /* Bebaskan memory jika koneksi mati saat payload belum selesai terkirim */
+    core_conn_clear_write_buf(conn);
+
+    if (conn->protocol_session && conn->protocol_session_destroy) {
+        conn->protocol_session_destroy(conn->protocol_session);
+    }
+    conn->protocol_session = NULL;
+    conn->protocol_session_destroy = NULL;
     pthread_mutex_unlock(&conn->io_lock);
 }
  
@@ -126,4 +163,22 @@ void core_conn_lock(halmos_conn_t *conn) {
  
 void core_conn_unlock(halmos_conn_t *conn) {
     if (conn) pthread_mutex_unlock(&conn->io_lock);
+}
+ 
+// PRASYARAT: pemanggil harus sudah memegang conn->io_lock (core_conn_lock).
+// Tidak ada locking internal di sini - lihat catatan di header.
+void core_conn_set_protocol_session(halmos_conn_t *conn, void *session, void (*destroy_fn)(void *)) {
+    if (!conn) return;
+    conn->protocol_session = session;
+    conn->protocol_session_destroy = destroy_fn;
+}
+ 
+// PRASYARAT: pemanggil harus sudah memegang conn->io_lock (core_conn_lock).
+void core_conn_destroy_protocol_session(halmos_conn_t *conn) {
+    if (!conn) return;
+    if (conn->protocol_session && conn->protocol_session_destroy) {
+        conn->protocol_session_destroy(conn->protocol_session);
+    }
+    conn->protocol_session = NULL;
+    conn->protocol_session_destroy = NULL;
 }

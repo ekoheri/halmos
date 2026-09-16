@@ -1,13 +1,13 @@
 #ifndef HALMOS_HTTP2_CORE_H
 #define HALMOS_HTTP2_CORE_H
-
+ 
 #include <stdint.h>
 #include <stdbool.h>
 #include <pthread.h>             // Wajib ada karena kamu pakai pthread_mutex_t
 #include <sys/types.h>
-
+ 
 #include "halmos_http1_header.h" 
-
+ 
 /* --- HTTP/2 FRAME TYPES --- */
 #define HTTP2_FRAME_DATA          0x0
 #define HTTP2_FRAME_HEADERS       0x1
@@ -19,14 +19,14 @@
 #define HTTP2_FRAME_GOAWAY        0x7
 #define HTTP2_FRAME_WINDOW_UPDATE 0x8
 #define HTTP2_FRAME_CONTINUATION  0x9
-
+ 
 /* --- FRAME FLAGS --- */
 #define HTTP2_FLAG_END_STREAM     0x01
 #define HTTP2_FLAG_ACK            0x01
 #define HTTP2_FLAG_END_HEADERS    0x04
 #define HTTP2_FLAG_PADDED         0x08
 #define HTTP2_FLAG_PRIORITY       0x20
-
+ 
 /* --- CONFIGURATION FOR GOLDEN RATIO HASH TABLE --- */
 /**
  * Ukuran bucket ditentukan berdasarkan pangkat 2 agar optimasi bitwise shift bekerja.
@@ -36,11 +36,11 @@
 #define HTTP2_HASH_POWER          5             
 #define HTTP2_STREAM_BUCKETS      (1 << HTTP2_HASH_POWER)
 #define HTTP2_GOLDEN_RATIO_32     2654435769U   // (2^32) * (\phi - 1)
-
+ 
 /* --- HPACK CONSTANTS --- */
 #define HPACK_NAME_MAX   128
 #define HPACK_VALUE_MAX  512
-
+ 
 /**
  * Representasi Header Frame HTTP/2 (9 Bytes)
  */
@@ -50,7 +50,7 @@ typedef struct {
     uint8_t  flags;      // 8-bit
     uint32_t stream_id;  // 31-bit
 } HTTP2FrameHeader;
-
+ 
 /**
  * State sebuah Stream (RFC 7540)
  */
@@ -63,7 +63,7 @@ typedef enum {
     HTTP2_STATE_HALF_CLOSED_REMOTE,
     HTTP2_STATE_CLOSED
 } HTTP2StreamState;
-
+ 
 /**
  * HPACK Dynamic Table Entry
  */
@@ -72,13 +72,13 @@ typedef enum {
     char *value;
     uint32_t entry_size; // Dihitung: name_len + value_len + 32 (RFC overhead)
 } HPACKEntry;*/
-
+ 
 typedef struct {
     char name[HPACK_NAME_MAX];
     char value[HPACK_VALUE_MAX];
     uint32_t entry_size;
 } HPACKEntry;
-
+ 
 /**
  * Manajemen Dynamic Table per Koneksi
  */
@@ -89,7 +89,7 @@ typedef struct {
     uint32_t current_size;    // Total size dalam bytes
     uint32_t max_size;        // Batas byte (Default: 4096)
 } HPACKDynamicTable;
-
+ 
 /**
  * RequestHeader versi H2 (Satu stream = Satu request)
  */
@@ -102,7 +102,7 @@ typedef struct HTTP2Stream {
     RequestHeader http1_compat; 
     
     int32_t window_size;
-
+ 
     /* --- TAMBAHAN BARU: STATE PENGIRIMAN FILE NON-BLOCKING --- */
     int file_fd;           // FD file static (-1 jika tidak ada file)
     off_t file_offset;     // Posisi byte terakhir yang berhasil terkirim
@@ -111,23 +111,23 @@ typedef struct HTTP2Stream {
     
     struct HTTP2Stream *node_next; // Point ke stream aktif lainnya
 } HTTP2Stream;
-
+ 
 /**
  * Konteks per satu Koneksi TCP (Session)
  */
 typedef struct {
     int fd;
     bool is_tls;
-
+ 
     int32_t out_window_size; // Default RFC 7540: 65535
     uint32_t peer_initial_window_size;
-
+ 
     /* --- HPACK STATE --- */
     HPACKDynamicTable dyn_table;
     
     // Lock ini krusial untuk sinkronisasi state HPACK antar thread
     pthread_mutex_t hpack_lock;
-
+ 
     /* --- STREAM MANAGEMENT (Multiplexing) --- */
     HTTP2Stream *streams_hash[HTTP2_STREAM_BUCKETS];
     pthread_mutex_t streams_lock; 
@@ -136,11 +136,42 @@ typedef struct {
     uint32_t last_stream_id;
     int32_t  remote_window_size;
     int32_t  local_window_size;
-
+ 
     /* --- TAMBAHAN BARU: PENDING WRITE BUFFER (Jika SSL_write EAGAIN) --- */
     uint8_t *pending_write_buf;     // Buffer penyimpan sisa frame yang tertunda
     size_t   pending_write_len;     // Total byte sisa yang harus dikirim
     size_t   pending_write_offset;  // Byte offset yang sudah terkirim dari buffer
+ 
+    /* --- TAMBAHAN: Penanda hard-error saat menulis (bukan EAGAIN/retry) ---
+     * Dicek di awal setiap iterasi loop - kalau true, koneksi ditutup.
+     * Tidak butuh lock terpisah: field ini (sama seperti pending_write_*
+     * dan read_state dkk di atas) hanya diakses dari SATU worker thread
+     * yang sedang memegang conn->io_lock sepanjang durasi dispatch.
+     */
+    bool write_error;
+ 
+    /* --- TAMBAHAN BARU: PENDING READ BUFFER UNTUK EVENT-DRIVEN (TAHAP 2) --- */
+    unsigned char header_buf_partial[9];
+    size_t header_bytes_read;
+ 
+    /* --- TAMBAHAN: PROGRES BACA CLIENT CONNECTION PREFACE (24 byte) ---
+     * bridge_detect() di http_bridge.c cuma MENGINTIP (peek) byte-byte ini
+     * untuk deteksi protokol, tidak mengonsumsinya - jadi 24 byte preface
+     * standar HTTP/2 ("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n") masih harus benar-benar
+     * dibaca/dibuang di awal session, sebelum mulai parsing frame header.
+     * Isinya tidak perlu disimpan (tidak divalidasi, sama seperti perilaku
+     * versi lama) - cukup hitung progresnya supaya resumable lintas
+     * beberapa kali dispatch non-blocking. 0..24, selesai saat == 24.
+     */
+    size_t preface_bytes_read;
+    
+    // Status mesin state membaca HTTP/2
+    // 0 = membaca header 9 byte, 1 = membaca payload
+    int read_state; 
+    HTTP2FrameHeader current_frame_head;
+    unsigned char *payload_buf;
+    size_t payload_bytes_read;
+ 
 } HTTP2Session;
-
+ 
 #endif

@@ -2,6 +2,7 @@
 #define HALMOS_HTTP2_MANAGER_H
 
 #include "halmos_http2_core.h"
+#include "halmos_core_connection.h"
 
 /**
  * Handler untuk tipe frame yang masuk
@@ -16,7 +17,7 @@ void http2_handle_data_frame(HTTP2Session *session, HTTP2FrameHeader *head, cons
  * Main Loop untuk HTTP/2
  * Menggantikan http1_manager_session
  */
-int http2_manager_session(int sock_client, bool is_tls);
+int http2_manager_session(halmos_conn_t *conn);
 
 uint32_t get_bucket_fibonacci(uint32_t stream_id);
 #endif
