@@ -8,7 +8,7 @@
 #include "halmos_http2_manager.h"
 #include "halmos_http_bridge.h"
 #include "halmos_core_event_loop.h"
-#include "halmos_core_connection.h"
+#include "halmos_core_conn_table.h"
 #include "halmos_log.h"
 #include "halmos_sec_tls.h"
 #include "halmos_ws_system.h"
@@ -95,7 +95,7 @@ int http_bridge_dispatch(int sock_client, uint32_t events) {
         return ws_system_dispatch(sock_client);
     }
  
-    halmos_conn_t *conn = core_conn_get(sock_client);
+    halmos_conn_t *conn = core_conn_t_get(sock_client);
     if (!conn) return 0;
  
     // === PERBAIKAN KRITIS: RESUME session yang SUDAH ADA, jangan deteksi ulang ===

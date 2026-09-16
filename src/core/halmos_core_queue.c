@@ -285,7 +285,7 @@ void queue_thread_worker_stop(void) {
         // === MODIFIKASI: Akses client_sock lewat tmp->event.fd ===
         if (tmp->event.fd >= 0) {
             // === MODIFIKASI: Deaktivasi connection state sebelum close ===
-            core_conn_deactivate(tmp->event.fd);
+            core_conn_t_deactivate(tmp->event.fd);
             close(tmp->event.fd);
         }
         free(tmp);

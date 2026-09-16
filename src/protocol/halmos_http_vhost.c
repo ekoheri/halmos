@@ -2,10 +2,17 @@
 #include "halmos_global.h"
 #include "halmos_log.h"
 #include "halmos_http_utils.h"
+
 #include <string.h>
 #include <stdio.h>
 #include <sys/stat.h>
 #include <errno.h>
+#include <sys/inotify.h>
+#include <unistd.h>
+#include <sys/epoll.h>
+
+// Variabel global internal untuk menyimpan FD inotify vhost
+static int g_vhost_inotify_fd = -1;
 
 static void _vhost_load_single_route_file(VHostEntry *vh, const char *path);
 
@@ -47,10 +54,6 @@ VHostEntry* http_vhost_get_context(const char *incoming_host) {
 }
 
 /**
- * Inisialisasi awal. Memastikan semua VHost mulai dengan 0 rute
- * dan melakukan load awal untuk semua .htroute yang tersedia.
- */
-/**
  * Inisialisasi awal. Memastikan semua VHost mulai dengan 0 rute,
  * membersihkan BackendGroup khusus, dan memuat .htroute.
  */
@@ -74,25 +77,54 @@ void http_vhost_init_all() {
     http_vhost_reload_routes();
 }
 
-void http_vhost_reload_routes() {
-    // Hapus static timer dulu buat debug supaya setiap dipanggil pasti jalan
-    static time_t last_check_time = 0;
-    time_t now = time(NULL);
-
-    // GERBANG: Cek file cuma setiap 5 detik sekali
-    if (now - last_check_time < 5) {
-        return; 
+/**
+ * Menginisialisasi inotify untuk memantau perubahan file .htroute di setiap direktori vhost root.
+ * Dipanggil sekali saat server start (misal di http_vhost_init_all atau main initialization).
+ */
+int http_vhost_init_inotify(int epoll_fd) {
+    g_vhost_inotify_fd = inotify_init1(IN_NONBLOCK);
+    if (g_vhost_inotify_fd < 0) {
+        write_log_error("[VHOST] Failed to initialize inotify: %s", strerror(errno));
+        return -1;
     }
-    last_check_time = now;
 
-    //fprintf(stderr, "[DEBUG] Masuk http_vhost_reload_routes\n");
-    
+    for (int i = 0; i < config.vhost_count; i++) {
+        if (config.vhosts[i].root[0] == '\0') continue;
+
+        char root_clean[256];
+        strncpy(root_clean, config.vhosts[i].root, sizeof(root_clean) - 1);
+        root_clean[sizeof(root_clean) - 1] = '\0';
+        trim_whitespace(root_clean);
+
+        // Awasi direktori vhost root untuk event modifikasi/pembuatan file
+        int wd = inotify_add_watch(g_vhost_inotify_fd, root_clean, IN_MODIFY | IN_CREATE | IN_MOVED_TO);
+        if (wd < 0) {
+            write_log_error("[VHOST] Failed to add watch for path %s: %s", root_clean, strerror(errno));
+        } else {
+            // Opsional: Anda bisa menyimpan watch descriptor (wd) jika ingin memetakan rute secara spesifik per vhost
+        }
+    }
+
+    // Daftarkan g_vhost_inotify_fd ke epoll utama server
+    struct epoll_event ev;
+    ev.data.fd = g_vhost_inotify_fd;
+    ev.events = EPOLLIN;
+    if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, g_vhost_inotify_fd, &ev) < 0) {
+        write_log_error("[VHOST] Failed to add vhost inotify to epoll: %s", strerror(errno));
+        close(g_vhost_inotify_fd);
+        g_vhost_inotify_fd = -1;
+        return -1;
+    }
+
+    return g_vhost_inotify_fd;
+}
+
+void http_vhost_reload_routes() {
     for (int i = 0; i < config.vhost_count; i++) {
         char path_route[512];
         char root_clean[256];
         
         if (config.vhosts[i].root[0] == '\0') {
-            //fprintf(stderr, "[DEBUG] VHost %d root kosong, skip\n", i);
             continue;
         }
 
@@ -107,25 +139,57 @@ void http_vhost_reload_routes() {
             snprintf(path_route, sizeof(path_route), "%s/.htroute", root_clean);
         }
 
-        //fprintf(stderr, "[DEBUG] Checking file: %s\n", path_route);
         struct stat st;
         if (stat(path_route, &st) == 0) {
-            // FILE ADA: Baru proses kalau mtime berubah
+            // FILE ADA: Reload jika mtime berubah
             if (st.st_mtime > config.vhosts[i].last_route_mtime) {
                 _vhost_load_single_route_file(&config.vhosts[i], path_route);
                 config.vhosts[i].last_route_mtime = st.st_mtime;
-                write_log("[VHOST] Routes updated for %s", config.vhosts[i].host);
+                write_log("[VHOST] Routes updated dynamically for %s", config.vhosts[i].host);
             }
         } else {
-            // FILE TIDAK ADA: Cukup pastikan rute nol dan mtime reset
-            // Tidak perlu fprintf/error karena ini kondisi normal
+            // FILE TIDAK ADA: Reset rute
             if (config.vhosts[i].total_routes > 0) {
                 config.vhosts[i].total_routes = 0;
                 config.vhosts[i].last_route_mtime = 0;
             }
         }
     }
-    //fprintf(stderr, "[DEBUG] Keluar http_vhost_reload_routes\n");
+}
+
+/**
+ * Fungsi handler yang dipanggil oleh event loop utama ketika g_vhost_inotify_fd siap dibaca (EPOLLIN)
+ */
+void http_vhost_handle_inotify_event() {
+    if (g_vhost_inotify_fd < 0) return;
+
+    char buffer[4096] __attribute__((aligned(__alignof__(struct inotify_event))));
+    ssize_t len = read(g_vhost_inotify_fd, buffer, sizeof(buffer));
+    
+    if (len > 0) {
+        int triggered = 0;
+        const struct inotify_event *event;
+        for (char *ptr = buffer; ptr < buffer + len;
+             ptr += sizeof(struct inotify_event) + event->len) {
+            
+            event = (const struct inotify_event *)ptr;
+            if (event->len > 0) {
+                // Cek apakah file yang berubah mengandung unsur '.htroute'
+                if (strstr(event->name, ".htroute") != NULL) {
+                    triggered = 1;
+                }
+            }
+        }
+
+        // Jika ada perubahan pada file .htroute, jalankan reload secara aman
+        if (triggered) {
+            http_vhost_reload_routes();
+        }
+    }
+}
+
+int http_vhost_get_inotify_fd(void) {
+    return g_vhost_inotify_fd;
 }
 
 /*

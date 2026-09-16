@@ -1,7 +1,7 @@
 #include "halmos_global.h"
 #include "halmos_core_config.h"
 #include "halmos_core_adaptive.h"
-#include "halmos_core_connection.h"
+#include "halmos_core_conn_table.h"
 #include "halmos_core_event_loop.h"
 #include "halmos_core_queue.h"
 #include "halmos_core_thread_pool.h"
@@ -48,7 +48,7 @@ int main() {
     core_adaptive_init();
 
     // 3. INIALISASI KONEKSI (Menggunakan g_max_fd hasil kalkulasi adaptive)
-    if (core_conn_init() != 0) {
+    if (core_conn_t_init() != 0) {
         fprintf(stderr, "[FATAL] Failed to allocate core connection tracking table.\n");
         return EXIT_FAILURE;
     }
@@ -93,6 +93,13 @@ int main() {
         return EXIT_FAILURE;
     }
 
+    // === TAMBAHKAN INI DI SINI ===
+    // Karena epoll_fd sudah tercipta di dalam event_loop_start(), 
+    // kita bisa langsung mendaftarkan inotify vhost ke epoll utama.
+    // (Asumsikan epoll_fd bisa diakses secara global atau diekspos via getter)
+    extern int epoll_fd; // Jika epoll_fd dideklarasikan global di core event loop
+    http_vhost_init_inotify(epoll_fd);
+    
     /*
     printf("==================================================\n");
     printf("  HALMOS SAVAGE SERVER IS RUNNING\n");
@@ -131,8 +138,8 @@ int main() {
         write_log("[CORE] TLS Resources cleaned up.");
     }
    
-    // DESTROY CORE CONNECTION TABLE (Simetris dengan core_conn_init)
-    core_conn_destroy();
+    // DESTROY CORE CONNECTION TABLE (Simetris dengan core_conn_t_init)
+    core_conn_t_destroy();
     write_log("[CORE] Connection Table destroyed.");
 
     // 5. TERAKHIR: Wajib tempatkan stop_thread_logger() di paling ujung!

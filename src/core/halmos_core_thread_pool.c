@@ -1,7 +1,7 @@
 #include "halmos_core_thread_pool.h"
 #include "halmos_global.h"
 #include "halmos_core_event_loop.h"
-#include "halmos_core_connection.h"
+#include "halmos_core_conn_table.h"
 #include "halmos_http_bridge.h"
 #include "halmos_log.h"
  
@@ -33,11 +33,11 @@ void *core_thread_pool_worker(void *arg) {
         }    
  
         // === AMBIL POINTER KONEKSI ===
-        halmos_conn_t *conn = core_conn_get(event_item.fd);
+        halmos_conn_t *conn = core_conn_t_get(event_item.fd);
  
         // === VALIDASI KRITIS STALE CONNECTION (GENERATION CHECK) ===
         // Mencegah Race Condition jika socket sudah di-close / di-recycle 
-        if (!conn || !core_conn_is_valid(event_item.fd, event_item.generation)) {
+        if (!conn || !core_conn_t_is_valid(event_item.fd, event_item.generation)) {
             write_log("[WORKER] Stale event detected on FD %d (Gen: %u). Dropping task.", 
                       event_item.fd, event_item.generation);
             mark_worker_idle(&global_queue);
@@ -48,12 +48,12 @@ void *core_thread_pool_worker(void *arg) {
         // Mengunci koneksi agar Event Loop tidak dapat memanggil 
         // event_loop_cleanup_connection (yang akan membebaskan SSL & close fd)
         // selama worker sedang memproses I/O pada koneksi ini.
-        core_conn_lock(conn);
+        core_conn_t_lock(conn);
  
         // Validasi ulang setelah mendapatkan kunci (double-checked locking pattern)
         // Karena bisa saja Event Loop melakukan cleanup TEPAT SEBELUM worker berhasil mendapat kunci.
-        if (!core_conn_is_valid(event_item.fd, event_item.generation)) {
-            core_conn_unlock(conn);
+        if (!core_conn_t_is_valid(event_item.fd, event_item.generation)) {
+            core_conn_t_unlock(conn);
             mark_worker_idle(&global_queue);
             continue;
         }
@@ -86,28 +86,28 @@ void *core_thread_pool_worker(void *arg) {
 
             //event_loop_rearm_epoll(sock_client);
             event_loop_rearm_epoll_ex(sock_client, EPOLLIN);
-            core_conn_unlock(conn); // Lepaskan kunci setelah selesai mengatur state
+            core_conn_t_unlock(conn); // Lepaskan kunci setelah selesai mengatur state
         } else if (status == 2) {
             // Status 2: Butuh BACA lagi saja
             // fprintf(stderr, "[DEBUG-WORKER] FD: %d -> Status 2 (WANT_READ). Rearm EPOLLIN\n", sock_client);
             event_loop_rearm_epoll_ex(sock_client, EPOLLIN);
-            core_conn_unlock(conn);
+            core_conn_t_unlock(conn);
         } else if (status == 3) {
             // fprintf(stderr, "[DEBUG-WORKER] FD: %d -> Status 3 (WANT_WRITE). Rearm EPOLLOUT\n", sock_client);
             // Status 3: Butuh TULIS lagi saja
             event_loop_rearm_epoll_ex(sock_client, EPOLLOUT);
-            core_conn_unlock(conn);
+            core_conn_t_unlock(conn);
         } else if (status == 4) {
             // --- TAMBAHAN UNTUK HTTP/2 FILE STREAMING / WRITE BACKLOG ---
             // fprintf(stderr, "[DEBUG-WORKER] FD: %d -> Status 4 (WANT_WRITE). Rearm EPOLLIN | EPOLLOUT\n", sock_client);
             event_loop_rearm_epoll_ex(sock_client, EPOLLIN | EPOLLOUT);
-            core_conn_unlock(conn);
+            core_conn_t_unlock(conn);
         } else {
             // fprintf(stderr, "[DEBUG-WORKER] FD: %d -> Status %d (Close/Error). Cleaning up...\n", sock_client, status);
             // Status 0 atau -1: Koneksi selesai atau Error
             // Lepaskan kunci TERLEBIH DAHULU, biarkan fungsi cleanup yang mengakuisisi kunci 
             // agar tidak terjadi deadlock saat cleanup mencoba mengunci ulang.
-            core_conn_unlock(conn);
+            core_conn_t_unlock(conn);
             
             atomic_fetch_sub(&global_telemetry.active_connections, 1);
             event_loop_cleanup_connection(sock_client);

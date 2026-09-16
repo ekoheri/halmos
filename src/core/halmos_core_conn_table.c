@@ -1,4 +1,4 @@
-#include "halmos_core_connection.h"
+#include "halmos_core_conn_table.h"
 #include "halmos_global.h"
 #include "halmos_log.h"
 #include <stdlib.h>
@@ -8,7 +8,7 @@
 static halmos_conn_t *g_connections = NULL;
 
 // Helper opsional untuk reset write buffer pada koneksi
-void core_conn_clear_write_buf(halmos_conn_t *conn) {
+void core_conn_t_clear_write_buf(halmos_conn_t *conn) {
     if (!conn) return;
     if (conn->write_buf) {
         free(conn->write_buf);
@@ -18,7 +18,7 @@ void core_conn_clear_write_buf(halmos_conn_t *conn) {
     conn->write_offset = 0;
 }
 
-int core_conn_init(void) {
+int core_conn_t_init(void) {
     if (g_max_fd == 0) {
         write_log_error("[ERR] Invalid g_max_fd (0) for connection system initialization");
         return -1;
@@ -50,7 +50,7 @@ int core_conn_init(void) {
     return 0;
 }
  
-void core_conn_destroy(void) {
+void core_conn_t_destroy(void) {
     if (g_connections) {
         // === PERBAIKAN: Bereskan sisa conn->ssl di sini. ===
         // Dulu ini tugas fd_to_ssl_map[] loop di halmos_sec_tls.c (sudah
@@ -84,12 +84,12 @@ void core_conn_destroy(void) {
     write_log("[CORE] Connection system destroyed");
 }
  
-halmos_conn_t* core_conn_get(int fd) {
+halmos_conn_t* core_conn_t_get(int fd) {
     if (fd < 0 || (uint32_t)fd >= g_max_fd || !g_connections) return NULL;
     return &g_connections[fd];
 }
  
-uint32_t core_conn_activate(int fd) {
+uint32_t core_conn_t_activate(int fd) {
     if (fd < 0 || (uint32_t)fd >= g_max_fd || !g_connections) return 0;
  
     halmos_conn_t *conn = &g_connections[fd];
@@ -100,7 +100,7 @@ uint32_t core_conn_activate(int fd) {
     conn->ssl = NULL;
 
     /* Reset Write Buffer State */
-    core_conn_clear_write_buf(conn);
+    core_conn_t_clear_write_buf(conn);
     conn->epoll_events = 0;
  
     if (conn->protocol_session && conn->protocol_session_destroy) {
@@ -117,7 +117,7 @@ uint32_t core_conn_activate(int fd) {
     return new_gen;
 }
  
-void core_conn_deactivate(int fd) {
+void core_conn_t_deactivate(int fd) {
     if (fd < 0 || (uint32_t)fd >= g_max_fd || !g_connections) return;
  
     halmos_conn_t *conn = &g_connections[fd];
@@ -129,7 +129,7 @@ void core_conn_deactivate(int fd) {
     conn->ssl = NULL;
 
     /* Bebaskan memory jika koneksi mati saat payload belum selesai terkirim */
-    core_conn_clear_write_buf(conn);
+    core_conn_t_clear_write_buf(conn);
 
     if (conn->protocol_session && conn->protocol_session_destroy) {
         conn->protocol_session_destroy(conn->protocol_session);
@@ -139,7 +139,7 @@ void core_conn_deactivate(int fd) {
     pthread_mutex_unlock(&conn->io_lock);
 }
  
-bool core_conn_is_valid(int fd, uint32_t expected_generation) {
+bool core_conn_t_is_valid(int fd, uint32_t expected_generation) {
     if (fd < 0 || (uint32_t)fd >= g_max_fd || !g_connections) return false;
  
     halmos_conn_t *conn = &g_connections[fd];
@@ -157,24 +157,24 @@ bool core_conn_is_valid(int fd, uint32_t expected_generation) {
     return true;
 }
  
-void core_conn_lock(halmos_conn_t *conn) {
+void core_conn_t_lock(halmos_conn_t *conn) {
     if (conn) pthread_mutex_lock(&conn->io_lock);
 }
  
-void core_conn_unlock(halmos_conn_t *conn) {
+void core_conn_t_unlock(halmos_conn_t *conn) {
     if (conn) pthread_mutex_unlock(&conn->io_lock);
 }
  
 // PRASYARAT: pemanggil harus sudah memegang conn->io_lock (core_conn_lock).
 // Tidak ada locking internal di sini - lihat catatan di header.
-void core_conn_set_protocol_session(halmos_conn_t *conn, void *session, void (*destroy_fn)(void *)) {
+void core_conn_t_set_protocol_session(halmos_conn_t *conn, void *session, void (*destroy_fn)(void *)) {
     if (!conn) return;
     conn->protocol_session = session;
     conn->protocol_session_destroy = destroy_fn;
 }
  
 // PRASYARAT: pemanggil harus sudah memegang conn->io_lock (core_conn_lock).
-void core_conn_destroy_protocol_session(halmos_conn_t *conn) {
+void core_conn_t_destroy_protocol_session(halmos_conn_t *conn) {
     if (!conn) return;
     if (conn->protocol_session && conn->protocol_session_destroy) {
         conn->protocol_session_destroy(conn->protocol_session);

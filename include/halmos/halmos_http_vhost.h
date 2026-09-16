@@ -19,6 +19,12 @@ VHostEntry* http_vhost_get_context(const char *incoming_host);
  */
 void http_vhost_init_all();
 
+int http_vhost_init_inotify(int epoll_fd);
+
+void http_vhost_handle_inotify_event();
+
+int http_vhost_get_inotify_fd(void);
+
 /**
  * Menjalankan auto-reload .htroute untuk SETIAP Virtual Host.
  * Fungsi ini dipanggil secara periodik di event loop utama.

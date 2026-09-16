@@ -5,7 +5,7 @@
 #include "halmos_sec_tls.h"
 #include "halmos_global.h"
 #include "halmos_core_config.h"
-#include "halmos_core_connection.h"
+#include "halmos_core_conn_table.h"
 #include "halmos_log.h"
 #include "halmos_ws_system.h"
  
@@ -42,14 +42,14 @@ SSL_CTX *halmos_tls_ctx = NULL;
 // Fungsi-fungsi di bawah ini TIDAK melakukan locking sendiri karena
 // SEMUA titik pemanggilan yang sudah ada (core_thread_pool_worker() saat
 // dispatch, event_loop_cleanup_connection() saat cleanup) SUDAH memegang
-// conn->io_lock (lewat core_conn_lock()) sepanjang durasi operasi SSL.
-// Kalau fungsi ini ikut memanggil core_conn_lock() lagi di dalamnya,
+// conn->io_lock (lewat core_conn_t_lock()) sepanjang durasi operasi SSL.
+// Kalau fungsi ini ikut memanggil core_conn_t_lock() lagi di dalamnya,
 // thread yang sama akan mengunci mutex non-recursive yang SAMA dua kali
 // -> SELF-DEADLOCK.
 //
 // Karena itu: SETIAP pemanggil baru terhadap fungsi-fungsi ini (misalnya
 // kode handshake TLS di http_bridge) WAJIB memastikan sudah memanggil
-// core_conn_lock(conn) sebelumnya. Kalau ragu, panggil core_conn_lock()
+// core_conn_t_lock(conn) sebelumnya. Kalau ragu, panggil core_conn_t_lock()
 // eksplisit di titik pemanggilan sebelum menyentuh SSL.
  
 static int alpn_select_cb(SSL *ssl, const unsigned char **out, unsigned char *outlen,
@@ -124,7 +124,7 @@ void ssl_cleanup(void) {
  
     // === PERBAIKAN: Tidak ada lagi fd_to_ssl_map[] untuk di-iterasi di sini. ===
     // Pembersihan conn->ssl per-koneksi yang masih tersisa saat shutdown
-    // sekarang jadi tanggung jawab core_conn_destroy() di
+    // sekarang jadi tanggung jawab core_conn_t_destroy() di
     // halmos_core_connection.c, karena modul itu yang memiliki array
     // koneksi & lock granularnya. Modul TLS ini cukup membereskan
     // resource global miliknya sendiri (SSL_CTX).
@@ -147,9 +147,9 @@ void ssl_init_mapping(int max_fds) {
     write_log("[SEC] ssl_init_mapping() is deprecated (no-op): SSL pointers now live in conn->ssl.");
 }
  
-// PRASYARAT: pemanggil harus sudah memegang conn->io_lock (core_conn_lock).
+// PRASYARAT: pemanggil harus sudah memegang conn->io_lock (core_conn_t_lock).
 void ssl_set_for_fd(int fd, SSL *ssl) {
-    halmos_conn_t *conn = core_conn_get(fd);
+    halmos_conn_t *conn = core_conn_t_get(fd);
     if (!conn) {
         write_log_error("[SEC] Mapping failed: FD %d has no connection slot", fd);
         return;
@@ -157,28 +157,28 @@ void ssl_set_for_fd(int fd, SSL *ssl) {
     conn->ssl = ssl;
 }
  
-// PRASYARAT: pemanggil harus sudah memegang conn->io_lock (core_conn_lock).
+// PRASYARAT: pemanggil harus sudah memegang conn->io_lock (core_conn_t_lock).
 SSL* ssl_get_for_fd(int fd) {
-    halmos_conn_t *conn = core_conn_get(fd);
+    halmos_conn_t *conn = core_conn_t_get(fd);
     if (!conn) return NULL;
     return conn->ssl;
 }
  
-// PRASYARAT: pemanggil harus sudah memegang conn->io_lock (core_conn_lock).
+// PRASYARAT: pemanggil harus sudah memegang conn->io_lock (core_conn_t_lock).
 void ssl_nullify_ptr(int fd) {
-    halmos_conn_t *conn = core_conn_get(fd);
+    halmos_conn_t *conn = core_conn_t_get(fd);
     if (!conn) return;
     conn->ssl = NULL;
 }
  
 /**
  * Pembebasan SSL objek. 
- * PRASYARAT: pemanggil harus sudah memegang conn->io_lock (core_conn_lock),
+ * PRASYARAT: pemanggil harus sudah memegang conn->io_lock (core_conn_t_lock),
  * sama seperti pola yang sudah dipakai event_loop_cleanup_connection().
  * Fungsi ini TIDAK mengunci apa pun sendiri untuk menghindari self-deadlock.
  */
 void ssl_free_for_fd(int fd) {
-    halmos_conn_t *conn = core_conn_get(fd);
+    halmos_conn_t *conn = core_conn_t_get(fd);
     if (!conn) return;
  
     SSL *ssl_to_free = conn->ssl;
@@ -191,7 +191,7 @@ void ssl_free_for_fd(int fd) {
 }
  
 // ssl_send() dipanggil dari dalam http_bridge_dispatch(), yang di
-// core_thread_pool_worker() sudah dijalankan di bawah core_conn_lock(conn).
+// core_thread_pool_worker() sudah dijalankan di bawah core_conn_t_lock(conn).
 // Jadi ssl_get_for_fd() di sini aman diakses tanpa lock tambahan.
 ssize_t ssl_send(int fd, const void *buf, size_t len) {
     SSL *ssl = ssl_get_for_fd(fd);

@@ -2,7 +2,7 @@
 #include "halmos_global.h"
 #include "halmos_core_event_loop.h"
 #include "halmos_core_config.h"
-#include "halmos_core_connection.h"
+#include "halmos_core_conn_table.h"
 #include "halmos_core_queue.h"
 #include "halmos_log.h"
 #include "halmos_sec_traffic.h"
@@ -96,9 +96,6 @@ int event_loop_start(void) {
  
 void event_loop_run() {
     while (server_running) {
-        // http_route_auto_reload();
-        //http_vhost_reload_routes();
- 
         int num_fds = epoll_wait(epoll_fd, events, g_event_batch_size, 100); // awalnya -1
         if (num_fds < 0) {
             if (errno != EINTR) {
@@ -109,7 +106,10 @@ void event_loop_run() {
  
         for (int i = 0; i < num_fds; i++) {
             int current_fd = events[i].data.fd;
-            if (current_fd == sock_server) {
+            // TAMBAHKAN HANDLER INOTIFY DI SINI
+            if (current_fd == http_vhost_get_inotify_fd()) {
+                http_vhost_handle_inotify_event();
+            } else if (current_fd == sock_server) {
                 // LOOP ACCEPT: Ambil semua tamu yang antre sampai ludes
                 while (server_running) {
                     struct sockaddr_in client_addr;
@@ -141,7 +141,7 @@ void event_loop_run() {
                     atomic_fetch_add(&global_telemetry.active_connections, 1); // Tambah saat ada tamu masuk
  
                     // === MODIFIKASI 2: Aktifkan slot tracking koneksi & ambil generation baru ===
-                    uint32_t conn_gen = core_conn_activate(sock_client);
+                    uint32_t conn_gen = core_conn_t_activate(sock_client);
                     if (conn_gen == 0) {
                         // FD berada di luar jangkauan g_max_fd
                         write_log_error("[CRIT] FD %d exceeds g_max_fd capacity", sock_client);
@@ -198,7 +198,7 @@ void event_loop_run() {
                         continue;
                     }
  
-                    halmos_conn_t *conn = core_conn_get(client_fd);
+                    halmos_conn_t *conn = core_conn_t_get(client_fd);
                     if (!conn || !atomic_load(&conn->active)) {
                         continue;
                     }
@@ -293,25 +293,25 @@ void event_loop_rearm_epoll(int fd) {
 }
 
 void event_loop_cleanup_connection(int sock_client) {
-    halmos_conn_t *conn = core_conn_get(sock_client);
+    halmos_conn_t *conn = core_conn_t_get(sock_client);
     
     // Hapus dari epoll lebih awal
     epoll_ctl(epoll_fd, EPOLL_CTL_DEL, sock_client, NULL);
  
     if (conn) {
         // Kunci slot untuk mengamankan SSL free & close() dari worker
-        core_conn_lock(conn);
+        core_conn_t_lock(conn);
  
         atomic_store(&conn->active, false);
         atomic_store(&conn->state, CONN_STATE_DEAD);
 
         // === PERBAIKAN KRITIS: Bebaskan memory write_buf jika koneksi putus di tengah transfer ===
-        core_conn_clear_write_buf(conn);
+        core_conn_t_clear_write_buf(conn);
  
         ws_system_cleanup_fd(sock_client);
  
         // Bereskan protocol_session (misal HTTP2Session)
-        core_conn_destroy_protocol_session(conn);
+        core_conn_t_destroy_protocol_session(conn);
  
         // Ambil SSL dari conn->ssl atau modul TLS
         SSL *ssl = conn->ssl ? conn->ssl : ssl_get_for_fd(sock_client);
@@ -331,7 +331,7 @@ void event_loop_cleanup_connection(int sock_client) {
         close(sock_client);
  
         // Buka kunci slot
-        core_conn_unlock(conn);
+        core_conn_t_unlock(conn);
     } else {
         close(sock_client);
     }

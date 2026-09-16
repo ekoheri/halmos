@@ -2,7 +2,7 @@
 #define HALMOS_HTTP2_MANAGER_H
 
 #include "halmos_http2_core.h"
-#include "halmos_core_connection.h"
+#include "halmos_core_conn_table.h"
 
 /**
  * Handler untuk tipe frame yang masuk
