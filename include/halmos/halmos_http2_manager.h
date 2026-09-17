@@ -5,19 +5,12 @@
 #include "halmos_core_conn_table.h"
 
 /**
- * Handler untuk tipe frame yang masuk
- */
-void http2_send_frame(int fd, bool is_tls, uint8_t type, uint8_t flags, uint32_t stream_id, const void *payload, uint32_t len);
-
-void http2_handle_headers_frame(HTTP2Session *session, HTTP2FrameHeader *head, const unsigned char *payload);
-
-void http2_handle_data_frame(HTTP2Session *session, HTTP2FrameHeader *head, const unsigned char *payload);
-
-/**
  * Main Loop untuk HTTP/2
  * Menggantikan http1_manager_session
  */
-int http2_manager_session(halmos_conn_t *conn);
 
-uint32_t get_bucket_fibonacci(uint32_t stream_id);
+
+int http2_manager_session(halmos_conn_t *conn);
+void http2_session_destroy(void *sess);
+
 #endif

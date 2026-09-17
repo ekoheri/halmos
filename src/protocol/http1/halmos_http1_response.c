@@ -9,7 +9,6 @@
 #include "halmos_http_utils.h"
 #include "halmos_http_vhost.h"
 #include "halmos_log.h"
-#include "halmos_http1_manager.h"
 #include "halmos_sec_tls.h"
 
 #include <stdio.h>
@@ -22,17 +21,13 @@
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <sys/sendfile.h>
 
 /********************************************************************
  * 1. HELPER SEND HEADER PLAIN & TLS
  * Non-blocking memory send dengan MSG_NOSIGNAL
  ********************************************************************/
-static ssize_t halmos_send_mem(int fd, const void *buf, size_t len, bool is_tls) {
-    if (is_tls) {
-        return ssl_send(fd, buf, len);
-    }
-    return send(fd, buf, len, MSG_NOSIGNAL);
-}
+static ssize_t halmos_send_mem(int fd, const void *buf, size_t len, bool is_tls);
 
 void http1_response_send_headers(int client_fd, int status, const char *msg, 
                                  const char *mime, size_t len, bool ka, bool is_tls) {
@@ -111,24 +106,111 @@ void http1_response_send_dir_listing(int sock_client, const char *path, const ch
     closedir(d);
 }
 
-/********************************************************************
- * 4. STANDARD ERROR RESPONSES
- * Short helper untuk pemanggilan cepat respon HTTP Error
- ********************************************************************/
-void http1_response_send_error(int sock_client, int code, bool is_tls) {
-    switch (code) {
-        case 400:
-            http1_response_send_mem(sock_client, 400, "Bad Request", "<h1>400 Bad Request</h1>", false, is_tls);
-            break;
-        case 403:
-            http1_response_send_mem(sock_client, 403, "Forbidden", "<h1>403 Forbidden</h1>", false, is_tls);
-            break;
-        case 404:
-            http1_response_send_mem(sock_client, 404, "Not Found", "<h1>404 Not Found</h1>", false, is_tls);
-            break;
-        case 500:
-        default:
-            http1_response_send_mem(sock_client, 500, "Internal Server Error", "<h1>500 Internal Server Error</h1>", false, is_tls);
-            break;
+int http1_response_plain(int sock_client, HTTP1Session *session) {
+    // 1. Kirim HTTP Header
+    if (!session->is_header_sent) {
+        while (session->header_sent_offset < session->header_len) {
+            size_t remaining = session->header_len - session->header_sent_offset;
+            ssize_t n = send(sock_client, session->header_buf + session->header_sent_offset, remaining, MSG_NOSIGNAL);
+            
+            if (n > 0) {
+                session->header_sent_offset += n;
+            } else if (n < 0) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK) return 3;
+                return 0;
+            } else {
+                return 0;
+            }
+        }
+        session->is_header_sent = true;
     }
+
+    // 2. Kirim Body via sendfile() Zero-Copy
+    if (session->file_fd >= 0 && session->file_remaining > 0) {
+        while (session->file_remaining > 0) {
+            off_t offset = session->file_offset;
+            ssize_t n_sent = sendfile(sock_client, session->file_fd, &offset, session->file_remaining);
+
+            if (n_sent > 0) {
+                session->file_offset = offset;
+                session->file_remaining -= (size_t)n_sent;
+            } else if (n_sent < 0) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK) return 3;
+                return 0;
+            } else { 
+                if (session->file_remaining > 0) return 0;
+                break;
+            }
+        }
+    }
+
+    return 1; // Transmisi Selesai
+}
+
+int http1_response_ssl(halmos_conn_t *conn, HTTP1Session *session) {
+    SSL *ssl = conn->ssl;
+    if (!ssl) return -1;
+
+    // 1. Kirim Header via TLS
+    if (!session->is_header_sent) {
+        while (session->header_sent_offset < session->header_len) {
+            size_t remaining = session->header_len - session->header_sent_offset;
+            int n = SSL_write(ssl, session->header_buf + session->header_sent_offset, (int)remaining);
+            
+            if (n > 0) {
+                session->header_sent_offset += n;
+            } else {
+                int err = SSL_get_error(ssl, n);
+                if (err == SSL_ERROR_WANT_WRITE) return 3;
+                if (err == SSL_ERROR_WANT_READ)  return 2;
+                return 0;
+            }
+        }
+        session->is_header_sent = true;
+    }
+
+    // 2. Kirim Body via Chunked SSL_write
+    if (session->file_fd >= 0 && session->file_remaining > 0) {
+        char chunk[16384];
+
+        while (session->file_remaining > 0) {
+            if (lseek(session->file_fd, session->file_offset, SEEK_SET) == (off_t)-1) {
+                return 0;
+            }
+
+            size_t to_read = (session->file_remaining < sizeof(chunk)) ? session->file_remaining : sizeof(chunk);
+            ssize_t n_read = read(session->file_fd, chunk, to_read);
+
+            if (n_read > 0) {
+                int n_sent = SSL_write(ssl, chunk, (int)n_read);
+                if (n_sent > 0) {
+                    session->file_offset += n_sent;
+                    session->file_remaining -= n_sent;
+                } else {
+                    int err = SSL_get_error(ssl, n_sent);
+                    if (err == SSL_ERROR_WANT_WRITE) return 3;
+                    if (err == SSL_ERROR_WANT_READ)  return 2;
+                    return 0;
+                }
+            } else if (n_read < 0) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK) return 3;
+                return 0;
+            } else {
+                break;
+            }
+        }
+    }
+
+    return 1; // Transmisi Selesai
+}
+
+/*
+Private Function (Helper)
+*/
+
+ssize_t halmos_send_mem(int fd, const void *buf, size_t len, bool is_tls) {
+    if (is_tls) {
+        return ssl_send(fd, buf, len);
+    }
+    return send(fd, buf, len, MSG_NOSIGNAL);
 }

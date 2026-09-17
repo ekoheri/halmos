@@ -21,7 +21,6 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/socket.h>
-#include <sys/sendfile.h>
 #include <errno.h>
 #include <stdbool.h>
 #include <openssl/ssl.h>
@@ -51,6 +50,8 @@ static void update_header_pointers(RequestHeader *req, ptrdiff_t diff) {
     if (req->body_data)    req->body_data = (void*)((char*)req->body_data + diff);
     if (req->path_info)    req->path_info += diff;
 }
+
+static int http1_manager_routing_bridge(halmos_conn_t *conn, HTTP1Session *session);
 
 void http1_session_destroy(void *session) {
     HTTP1Session *s = (HTTP1Session *)session;
@@ -204,63 +205,24 @@ int http1_manager_session(halmos_conn_t *conn) {
     // 2. STATE: HANDLE REQUEST & PREPARE RESPONSE
     // =========================================================================
     if (session->state == STATE_HANDLE_REQUEST) {
-        int backend_type = -1;
-        if (has_extension(session->req.uri, session->req.path_info, ".php")) backend_type = 0;
-        else if (has_extension(session->req.uri, session->req.path_info, config.rust.ext)) backend_type = 1;
-        else if (has_extension(session->req.uri, session->req.path_info, config.python.ext)) backend_type = 2;
-
-        if (backend_type != -1) {
-            fcgi_api_request_stream(&session->req, sock_client, backend_type, session->req.body_data, session->req.content_length);
-            http1_parser_free_memory(&session->req);
-            memset(&session->req, 0, sizeof(RequestHeader));
-            session->buf_len = 0;
-            if (session->buffer) session->buffer[0] = '\0';
-            session->state = STATE_READ_HEADERS;
-            return 2; // Rearm EPOLLIN
-        }
-
-        VHostEntry *vh = (VHostEntry *)session->req.vhost_context;
-        const char *active_root = (vh && vh->root[0] != '\0') ? vh->root : config.document_root;
-        char *safe_path = sanitize_path(active_root, session->req.uri);
-        struct stat st;
-
-        if (!safe_path || stat(safe_path, &st) != 0 || !S_ISREG(st.st_mode)) {
-            if (safe_path) free(safe_path);
-            http1_response_send_mem(sock_client, 404, "Not Found", "<h1>404 Not Found</h1>", false, is_tls);
-            return 0;
-        }
-
-        session->file_fd = open(safe_path, O_RDONLY);
-        free(safe_path);
-        if (session->file_fd == -1) return 0;
-
-        session->file_remaining = st.st_size;
-        session->file_offset = 0;
-        
-        session->header_len = snprintf(session->header_buf, sizeof(session->header_buf),
-            "HTTP/1.1 200 OK\r\n"
-            "Content-Type: %s\r\n"
-            "Content-Length: %ld\r\n"
-            "Server: Halmos-Savage/2.1\r\n"
-            "Connection: %s\r\n\r\n",
-            get_mime_type(session->req.uri), (long)st.st_size, session->req.is_keep_alive ? "keep-alive" : "close");
-        
-        session->header_sent_offset = 0;
-        session->is_header_sent = false;
-        
-        // Pindah state ke pengiriman file statis
-        session->state = STATE_SEND_STATIC_FILE;
-        
-        // PENTING: Minta epoll event loop memindah interest socket ke EPOLLOUT!
-        return 3; 
+        return http1_manager_routing_bridge(conn, session);
     }
 
     // =========================================================================
     // 3. STATE: PENGIRIMAN FILE STATIS (EPOLLOUT)
     // =========================================================================
     if (session->state == STATE_SEND_STATIC_FILE) {
-        int res = is_tls ? http1_manager_ssl_response(conn, session) 
-                         : http1_manager_plain_response(sock_client, session);
+        // Ambil ukuran file asli dari file descriptor sebelum dikirim (karena file_remaining akan habis)
+        long total_file_size = 0;
+        if (session->file_fd >= 0) {
+            struct stat file_st;
+            if (fstat(session->file_fd, &file_st) == 0) {
+                total_file_size = file_st.st_size;
+            }
+        }
+
+        int res = is_tls ? http1_response_ssl(conn, session) 
+                         : http1_response_plain(sock_client, session);
 
         // Jika socket belum siap/tersumbat (EAGAIN / EWOULDBLOCK)
         if (res == 3 || res == 2) {
@@ -276,6 +238,8 @@ int http1_manager_session(halmos_conn_t *conn) {
             }
             return 0; 
         }
+        
+        write_log_access("HTTP/1.1", session->req.client_ip, session->req.method, session->req.uri, 200, session->header_len + total_file_size);
         
         // Pengiriman Selesai Sukses (res == 1)
         if (session->file_fd >= 0) {
@@ -299,100 +263,79 @@ int http1_manager_session(halmos_conn_t *conn) {
     return 2;
 }
 
-int http1_manager_plain_response(int sock_client, HTTP1Session *session) {
-    // 1. Kirim HTTP Header
-    if (!session->is_header_sent) {
-        while (session->header_sent_offset < session->header_len) {
-            size_t remaining = session->header_len - session->header_sent_offset;
-            ssize_t n = send(sock_client, session->header_buf + session->header_sent_offset, remaining, MSG_NOSIGNAL);
-            
-            if (n > 0) {
-                session->header_sent_offset += n;
-            } else if (n < 0) {
-                if (errno == EAGAIN || errno == EWOULDBLOCK) return 3;
-                return 0;
-            } else {
-                return 0;
-            }
-        }
-        session->is_header_sent = true;
+// =========================================================================
+// ROUTING BRIDGE MILIK MANAJER (Pengganti delegasi ke response)
+// =========================================================================
+int http1_manager_routing_bridge(halmos_conn_t *conn, HTTP1Session *session) {
+    int sock_client = conn->fd;
+    bool is_tls = (conn->ssl != NULL);
+
+    if (session->req.is_upgrade && strcmp(session->req.uri, "/ws") == 0) {
+        // 1. Jalankan proses tanggapan 101 Switching Protocols
+        ws_upgrade_handshake(sock_client, &session->req);
+
+        // 2. Tandai FD ini menggunakan fungsi yang benar
+        halmos_set_websocket_fd(sock_client, true);
+
+        // 3. Bersihkan memori HTTP/1 session karena kontrol sudah pindah ke modul WebSocket
+        http1_parser_free_memory(&session->req);
+        conn->protocol_session = NULL;
+        
+        return 1; 
     }
 
-    // 2. Kirim Body via sendfile() Zero-Copy
-    if (session->file_fd >= 0 && session->file_remaining > 0) {
-        while (session->file_remaining > 0) {
-            off_t offset = session->file_offset;
-            ssize_t n_sent = sendfile(sock_client, session->file_fd, &offset, session->file_remaining);
+    int backend_type = -1;
+    if (has_extension(session->req.uri, session->req.path_info, ".php")) backend_type = 0;
+    else if (has_extension(session->req.uri, session->req.path_info, config.rust.ext)) backend_type = 1;
+    else if (has_extension(session->req.uri, session->req.path_info, config.python.ext)) backend_type = 2;
 
-            if (n_sent > 0) {
-                session->file_offset = offset;
-                session->file_remaining -= (size_t)n_sent;
-            } else if (n_sent < 0) {
-                if (errno == EAGAIN || errno == EWOULDBLOCK) return 3;
-                return 0;
-            } else { 
-                if (session->file_remaining > 0) return 0;
-                break;
-            }
-        }
+    if (backend_type != -1) {
+        fcgi_api_request_stream(&session->req, sock_client, backend_type, session->req.body_data, session->req.content_length);
+        
+        write_log_access("HTTP/1.1", session->req.client_ip, session->req.method, session->req.uri, 200, session->req.content_length);
+
+        http1_parser_free_memory(&session->req);
+        memset(&session->req, 0, sizeof(RequestHeader));
+        session->buf_len = 0;
+        if (session->buffer) session->buffer[0] = '\0';
+        session->state = STATE_READ_HEADERS;
+        return 2; // Rearm EPOLLIN
     }
 
-    return 1; // Transmisi Selesai
+    VHostEntry *vh = (VHostEntry *)session->req.vhost_context;
+    const char *active_root = (vh && vh->root[0] != '\0') ? vh->root : config.document_root;
+    char *safe_path = sanitize_path(active_root, session->req.uri);
+    struct stat st;
+
+    if (!safe_path || stat(safe_path, &st) != 0 || !S_ISREG(st.st_mode)) {
+        if (safe_path) free(safe_path);
+
+        write_log_access("HTTP/1.1", session->req.client_ip, session->req.method, session->req.uri, 404, 21);
+
+        // Manajer memanggil fungsi murni milik response
+        http1_response_send_mem(sock_client, 404, "Not Found", "<h1>404 Not Found</h1>", false, is_tls);
+        return 0;
+    }
+
+    session->file_fd = open(safe_path, O_RDONLY);
+    free(safe_path);
+    if (session->file_fd == -1) return 0;
+
+    session->file_remaining = st.st_size;
+    session->file_offset = 0;
+    
+    session->header_len = snprintf(session->header_buf, sizeof(session->header_buf),
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: %s\r\n"
+        "Content-Length: %ld\r\n"
+        "Server: Halmos/1.0.0\r\n"
+        "Connection: %s\r\n\r\n",
+        get_mime_type(session->req.uri), (long)st.st_size, session->req.is_keep_alive ? "keep-alive" : "close");
+    
+    session->header_sent_offset = 0;
+    session->is_header_sent = false;
+    
+    session->state = STATE_SEND_STATIC_FILE;
+    return 3; // Pindah ke EPOLLOUT
 }
 
-int http1_manager_ssl_response(halmos_conn_t *conn, HTTP1Session *session) {
-    SSL *ssl = conn->ssl;
-    if (!ssl) return -1;
-
-    // 1. Kirim Header via TLS
-    if (!session->is_header_sent) {
-        while (session->header_sent_offset < session->header_len) {
-            size_t remaining = session->header_len - session->header_sent_offset;
-            int n = SSL_write(ssl, session->header_buf + session->header_sent_offset, (int)remaining);
-            
-            if (n > 0) {
-                session->header_sent_offset += n;
-            } else {
-                int err = SSL_get_error(ssl, n);
-                if (err == SSL_ERROR_WANT_WRITE) return 3;
-                if (err == SSL_ERROR_WANT_READ)  return 2;
-                return 0;
-            }
-        }
-        session->is_header_sent = true;
-    }
-
-    // 2. Kirim Body via Chunked SSL_write
-    if (session->file_fd >= 0 && session->file_remaining > 0) {
-        char chunk[16384];
-
-        while (session->file_remaining > 0) {
-            if (lseek(session->file_fd, session->file_offset, SEEK_SET) == (off_t)-1) {
-                return 0;
-            }
-
-            size_t to_read = (session->file_remaining < sizeof(chunk)) ? session->file_remaining : sizeof(chunk);
-            ssize_t n_read = read(session->file_fd, chunk, to_read);
-
-            if (n_read > 0) {
-                int n_sent = SSL_write(ssl, chunk, (int)n_read);
-                if (n_sent > 0) {
-                    session->file_offset += n_sent;
-                    session->file_remaining -= n_sent;
-                } else {
-                    int err = SSL_get_error(ssl, n_sent);
-                    if (err == SSL_ERROR_WANT_WRITE) return 3;
-                    if (err == SSL_ERROR_WANT_READ)  return 2;
-                    return 0;
-                }
-            } else if (n_read < 0) {
-                if (errno == EAGAIN || errno == EWOULDBLOCK) return 3;
-                return 0;
-            } else {
-                break;
-            }
-        }
-    }
-
-    return 1; // Transmisi Selesai
-}

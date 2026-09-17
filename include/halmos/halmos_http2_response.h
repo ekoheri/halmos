@@ -18,6 +18,6 @@ void http2_response_send_data(HTTP2Session *session, HTTP2Stream *stream, const 
 /**
  * Jembatan antara routing umum Halmos ke pengiriman H2
  */
-void http2_response_routing_bridge(HTTP2Session *session, HTTP2Stream *stream);
 
+void http2_response_send_complex_header(HTTP2Session *session, HTTP2Stream *stream, char *raw_headers, unsigned char flags);
 #endif

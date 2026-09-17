@@ -229,10 +229,10 @@ bool http2_parser_parse_header(HTTP2Session *session, HTTP2Stream *stream, const
 
     req->is_valid = (req->method[0] != '\0' && req->uri != NULL);
     // --- LOGGING HTTP/2 REQUEST ---
-    if (req->is_valid) {
-        const char *ip_to_log = (strlen(req->client_ip) > 0) ? req->client_ip : "unknown_ip";
-        write_log("[HTTP2] %s %s (Client IP: %s)", req->method, req->uri, ip_to_log);
-    }
+    //if (req->is_valid) {
+    //    const char *ip_to_log = (strlen(req->client_ip) > 0) ? req->client_ip : "unknown_ip";
+    //    write_log("[HTTP2] %s %s (Client IP: %s)", req->method, req->uri, ip_to_log);
+    //}
     return req->is_valid;
 }
 
@@ -321,7 +321,7 @@ uint32_t hpack_decode_int(const unsigned char **pos, const unsigned char *end, u
     return res;
 }
 
-static bool hpack_decode_string_buf(const unsigned char **pos, const unsigned char *end, char *out_buf, size_t out_max) {
+bool hpack_decode_string_buf(const unsigned char **pos, const unsigned char *end, char *out_buf, size_t out_max) {
     if (*pos >= end || !out_buf || out_max == 0) return false;
 
     uint8_t first_byte = **pos;
@@ -349,7 +349,7 @@ static bool hpack_decode_string_buf(const unsigned char **pos, const unsigned ch
     return true;
 }
 
-static int process_literal_header_with_name(const char *name, const char *value, RequestHeader *req) {
+int process_literal_header_with_name(const char *name, const char *value, RequestHeader *req) {
     if (!name || !value) return 0;
     size_t val_len = strlen(value);
 
@@ -432,7 +432,7 @@ static int process_literal_header_with_name(const char *name, const char *value,
     return 0;
 }
 
-static int process_indexed_header(HTTP2Session *session, uint32_t index, RequestHeader *req) {
+int process_indexed_header(HTTP2Session *session, uint32_t index, RequestHeader *req) {
     if (index == 0) return 0;
     const char *name = NULL;
     const char *value = NULL;
