@@ -1,20 +1,17 @@
 #include "halmos_http1_response.h"
 #include "halmos_http2_response.h"
-#include "halmos_http2_manager.h"
+#include "halmos_http2_frame.h"
 #include "halmos_http2_parser.h"
 #include "halmos_global.h"
-#include "halmos_http_utils.h"
 #include "halmos_http_multipart.h"
-#include "halmos_fcgi.h"
+#include "halmos_http_utils.h"
+#include "halmos_log.h"
 
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 #include <stdlib.h>
-#include <fcntl.h>      // Untuk open, O_RDONLY
-#include <sys/stat.h>   // Untuk stat, struct stat, S_ISDIR
 #include <limits.h>     // Untuk PATH_MAX
-#include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/un.h>     // Untuk AF_UNIX
 #include <sys/types.h>  // Wajib untuk ssize_t
@@ -22,150 +19,9 @@
 #include <ctype.h>
 #include <time.h>
 
-static void http2_response_send_complex_header(HTTP2Session *session, HTTP2Stream *stream, char *raw_headers, unsigned char flags);
-
 /*
 Public Function
 */
-
-void http2_response_routing_bridge(HTTP2Session *session, HTTP2Stream *stream) {
-    RequestHeader *req = &stream->http1_compat;
-
-    // =================================================================
-    // 1. INTERSEPSI HANDSHAKE WEBSOCKET HTTP/2 (RFC 8441)
-    // =================================================================
-    if (req->is_upgrade == true) {
-        //fprintf(stderr, "[H2-BRIDGE][DEBUG] Stream %u: Intercepting WebSocket upgrade request.\n", stream->stream_id);
-        unsigned char ws_ok_payload[1] = { 0x88 }; // Indexed Header for Status 200
-        
-        pthread_mutex_lock(&session->streams_lock);
-        http2_send_frame(session->fd, session->is_tls, 0x01, 0x04, stream->stream_id, ws_ok_payload, 1);
-        pthread_mutex_unlock(&session->streams_lock);
-        return; 
-    }
-    
-    // =================================================================
-    // 2. IDENTIFIKASI BACKEND (PHP / RUST / PYTHON)
-    // =================================================================
-    int backend_type = -1; 
-    if (has_extension(req->uri, req->path_info, ".php")) { 
-        backend_type = 0; 
-    } 
-    else if (has_extension(req->uri, req->path_info, config.rust.ext)) { 
-        backend_type = 1; 
-    } 
-    else if (has_extension(req->uri, req->path_info, config.python.ext)) { 
-        backend_type = 2; 
-    }
-
-    // MULTIPART PARSER FOR NON-FCGI
-    if (backend_type == -1 && req->method[0] != '\0' && strcasecmp(req->method, "POST") == 0 && 
-        req->content_type && strstr(req->content_type, "multipart/form-data")) {
-        http2_multipart_parse(req);
-    }
-
-    // =================================================================
-    // 3. JALUR FASTCGI BACKEND
-    // =================================================================
-    if (backend_type != -1) {
-        //fprintf(stderr, "[H2-FCGI][DEBUG] Stream %u: Routing to FastCGI backend (type: %d, URI: %s)\n", 
-        //        stream->stream_id, backend_type, req->uri ? req->uri : "NULL");
-        
-        char *backend_data = NULL;
-        ssize_t data_len = fcgi_api_request_http2(req, backend_type, req->body_data, req->content_length, &backend_data);
-        
-        if (data_len > 0 && backend_data) {
-            char *divider = strstr(backend_data, "\r\n\r\n");
-            
-            if (divider) {
-                *divider = '\0'; 
-                char *raw_headers = backend_data;
-                char *body_data = divider + 4;
-                size_t body_len = data_len - (body_data - backend_data);
-
-                //fprintf(stderr, "[H2-FCGI][DEBUG] Stream %u: FastCGI Header & Body Split (Body Len: %zu bytes)\n", 
-                //        stream->stream_id, body_len);
-
-                // 1. Kirim HEADERS Frame (END_HEADERS flag = 0x04)
-                http2_response_send_complex_header(session, stream, raw_headers, 0x04);
-
-                // 2. Kirim DATA Frame (END_STREAM flag = true)
-                http2_response_send_data(session, stream, (unsigned char*)body_data, body_len, true);
-            } else {
-                //fprintf(stderr, "[H2-FCGI][DEBUG] Stream %u: FastCGI Headers-only response.\n", stream->stream_id);
-                http2_response_send_complex_header(session, stream, backend_data, 0x05); // END_STREAM | END_HEADERS
-                http2_response_send_data(session, stream, NULL, 0, true);
-            }
-            
-            free(backend_data);
-
-            stream->state = 4; // State CLOSED
-            //fprintf(stderr, "[H2-BRIDGE][DEBUG] Stream %u (FastCGI) finished successfully.\n", stream->stream_id);
-            return; 
-        } else {
-            //fprintf(stderr, "[H2-FCGI][ERR] Stream %u: FastCGI returned empty response / 502.\n", stream->stream_id);
-            http2_response_send_header(session, stream, 502);
-            http2_response_send_data(session, stream, "Bad Gateway", 11, true);
-            stream->state = 4; 
-            return;
-        }
-    }
-
-    // =================================================================
-    // 4. JALUR FILE STATIS
-    // =================================================================
-    VHostEntry *vh = (VHostEntry *)req->vhost_context;
-    const char *active_root = (vh && vh->root[0] != '\0') ? vh->root : config.document_root;
-    char *safe_path = sanitize_path(active_root, req->uri);
-    struct stat st;
-
-    //fprintf(stderr, "[H2-STATIC][DEBUG] Stream %u Request: URI=%s, Resolved Path=%s\n", 
-    //        stream->stream_id, req->uri ? req->uri : "(null)", safe_path ? safe_path : "(null)");
-
-    if (!safe_path || stat(safe_path, &st) != 0 || S_ISDIR(st.st_mode)) {
-        //fprintf(stderr, "[H2-STATIC][WARN] Stream %u: File not found or path invalid (%s)\n", 
-        //        stream->stream_id, safe_path ? safe_path : "NULL");
-        http2_response_send_header(session, stream, 404);
-        http2_response_send_data(session, stream, "Not Found", 9, true);
-        if (safe_path) free(safe_path);
-        stream->state = 4;
-        return;
-    }
-
-    int fd = open(safe_path, O_RDONLY);
-    if (fd == -1) {
-        //fprintf(stderr, "[H2-STATIC][ERR] Stream %u: Failed to open descriptor for %s\n", stream->stream_id, safe_path);
-        http2_response_send_header(session, stream, 403);
-        http2_response_send_data(session, stream, "Forbidden", 9, true);
-        stream->state = 4;
-    } else {
-        // 1. Kirim HANYA response HEADERS (200 OK)
-        http2_response_send_header(session, stream, 200);
-
-        size_t file_size = (size_t)st.st_size;
-
-        if (file_size == 0) {
-            //fprintf(stderr, "[H2-STATIC][DEBUG] Stream %u: 0-byte static file. Sending END_STREAM.\n", stream->stream_id);
-            http2_response_send_data(session, stream, NULL, 0, true);
-            close(fd);
-            stream->state = 4; // CLOSED
-        } else {
-            // 2. Jika ada isi file, DAFTARKAN FD KE STREAM (JANGAN DIBACA DI SINI!)
-            pthread_mutex_lock(&session->streams_lock);
-            stream->file_fd = fd;
-            stream->file_size = file_size;
-            stream->file_offset = 0;
-            stream->is_sending_file = true;
-            pthread_mutex_unlock(&session->streams_lock);
-
-            //fprintf(stderr, "[H2-STATIC][ASYNC] Stream %u: File FD %d registered for async flushing (%zu bytes).\n", 
-            //        stream->stream_id, fd, file_size);
-        }
-    }
-    
-    if (safe_path) free(safe_path);
-    //fprintf(stderr, "[H2-BRIDGE][DEBUG] Stream %u static file setup complete.\n", stream->stream_id);
-}
 
 void http2_response_send_header(HTTP2Session *session, HTTP2Stream *stream, int status_code) {
     unsigned char hpack_buf[512];
@@ -219,63 +75,7 @@ void http2_response_send_header(HTTP2Session *session, HTTP2Stream *stream, int 
     //        stream->stream_id, status_code, pos, mime_to_use);
 
     pthread_mutex_lock(&session->streams_lock);
-    http2_send_frame(session->fd, session->is_tls, 0x01, 0x04, stream->stream_id, hpack_buf, (uint32_t)pos);
-    pthread_mutex_unlock(&session->streams_lock);
-}
-
-void http2_response_send_header_kompleks(HTTP2Session *session, HTTP2Stream *stream, int status_code) {
-    unsigned char hpack_buf[512];
-    int pos = 0;
-
-    // 1. HPACK Status Mapping (Indexed Header Field - RFC 7541 Sec 6.1)
-    switch(status_code) {
-        case 200: hpack_buf[pos++] = 0x88; break; // Index 8 (:status: 200)
-        case 204: hpack_buf[pos++] = 0x89; break; // Index 9 (:status: 204)
-        case 304: hpack_buf[pos++] = 0x8B; break; // Index 11 (:status: 304)
-        case 400: hpack_buf[pos++] = 0x8C; break; // Index 12 (:status: 400)
-        case 404: hpack_buf[pos++] = 0x8D; break; // Index 13 (:status: 404)
-        case 500: hpack_buf[pos++] = 0x8E; break; // Index 14 (:status: 500)
-        default: {
-            // Literal Header Field without Indexing - Indexed Name (:status = Index 8)
-            hpack_buf[pos++] = 0x08; 
-            char s_str[10];
-            int s_len = snprintf(s_str, sizeof(s_str), "%d", status_code);
-            hpack_buf[pos++] = (unsigned char)(s_len & 0x7F); // Raw string length (bit H=0)
-            memcpy(hpack_buf + pos, s_str, (size_t)s_len);
-            pos += s_len;
-            break;
-        }
-    }
-
-    // 2. MIME Type Detection
-    const char *mime_to_use = NULL;
-    if (stream->http1_compat.uri) {
-        if (strstr(stream->http1_compat.uri, ".php")) {
-            mime_to_use = "text/html";
-        } else {
-            mime_to_use = get_mime_type(stream->http1_compat.uri);
-        }
-    }
-    if (!mime_to_use) mime_to_use = "text/plain"; 
-
-    // 3. HPACK Content-Type 
-    // Menggunakan Literal Header WITHOUT Indexing (Index Name 31 = content-type)
-    // 0x0F berarti: Prefix 0000 (without indexing) + Index 15 (0x0F) -> 31 dalam 4-bit prefix
-    hpack_buf[pos++] = 0x0F; 
-    hpack_buf[pos++] = 0x10; // Value index 31 - 15 = 16 (0x10) di HPACK integer encoding
-
-    size_t mlen = strlen(mime_to_use);
-    if (mlen > 127) mlen = 127;
-    
-    hpack_buf[pos++] = (unsigned char)(mlen & 0x7F); // Bit H = 0 (No Huffman)
-    memcpy(&hpack_buf[pos], mime_to_use, mlen);
-    pos += mlen;
-
-    //fprintf(stderr, "[H2-HEADER][DEBUG] Stream %u: Sending status %d header frame (%d bytes, MIME: %s)\n", 
-    //        stream->stream_id, status_code, pos, mime_to_use);
-
-    pthread_mutex_lock(&session->streams_lock);
-    http2_send_frame(session->fd, session->is_tls, 0x01, 0x04, stream->stream_id, hpack_buf, (uint32_t)pos);
+    http2_frame_send(session->fd, session->is_tls, 0x01, 0x04, stream->stream_id, hpack_buf, (uint32_t)pos);
     pthread_mutex_unlock(&session->streams_lock);
 }
 
@@ -291,7 +91,7 @@ void http2_response_send_data(HTTP2Session *session, HTTP2Stream *stream, const 
     if (len == 0) {
         if (is_end) {
             //fprintf(stderr, "[H2-DATA][DEBUG] Stream %u: Sending empty DATA frame with END_STREAM (0x01)\n", stream->stream_id);
-            http2_send_frame(session->fd, session->is_tls, 0x00, 0x01, stream->stream_id, NULL, 0);
+            http2_frame_send(session->fd, session->is_tls, 0x00, 0x01, stream->stream_id, NULL, 0);
             stream->state = 4; // State Closed
         }
         pthread_mutex_unlock(&session->streams_lock);
@@ -311,7 +111,7 @@ void http2_response_send_data(HTTP2Session *session, HTTP2Stream *stream, const 
         //fprintf(stderr, "[H2-DATA][TRACE] Stream %u: Sending DATA frame | Chunk: %u bytes | Remaining: %zu | Flags: 0x%02X\n", 
         //        stream->stream_id, chunk, remaining - chunk, flags);
 
-        http2_send_frame(session->fd, session->is_tls, 0x00, flags, stream->stream_id, ptr, chunk);
+        http2_frame_send(session->fd, session->is_tls, 0x00, flags, stream->stream_id, ptr, chunk);
 
         ptr += chunk;
         remaining -= chunk;
@@ -320,7 +120,7 @@ void http2_response_send_data(HTTP2Session *session, HTTP2Stream *stream, const 
     // Backup safety check: Hanya kirim empty frame jika loop di atas BELUM mengirimkan flag END_STREAM
     if (is_end && !end_stream_sent) {
         //fprintf(stderr, "[H2-DATA][WARN] Stream %u: Sending fallback empty END_STREAM frame\n", stream->stream_id);
-        http2_send_frame(session->fd, session->is_tls, 0x00, 0x01, stream->stream_id, NULL, 0);
+        http2_frame_send(session->fd, session->is_tls, 0x00, 0x01, stream->stream_id, NULL, 0);
     }
 
     if (is_end) {
@@ -330,10 +130,6 @@ void http2_response_send_data(HTTP2Session *session, HTTP2Stream *stream, const 
 
     pthread_mutex_unlock(&session->streams_lock);
 }
-
-/*
-Private Function Internal Helper
-*/
 
 void http2_response_send_complex_header(HTTP2Session *session, HTTP2Stream *stream, char *raw_headers, unsigned char flags) {
     if (!raw_headers) {
@@ -492,7 +288,7 @@ void http2_response_send_complex_header(HTTP2Session *session, HTTP2Stream *stre
     //        stream->stream_id, pos, flags);
         
     pthread_mutex_lock(&session->streams_lock);
-    http2_send_frame(session->fd, session->is_tls, 0x01, flags, stream->stream_id, hpack_buf, (uint32_t)pos);
+    http2_frame_send(session->fd, session->is_tls, 0x01, flags, stream->stream_id, hpack_buf, (uint32_t)pos);
     pthread_mutex_unlock(&session->streams_lock);
 
     free(hpack_buf);

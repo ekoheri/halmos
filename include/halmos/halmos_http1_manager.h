@@ -43,9 +43,4 @@ void http1_session_destroy(void *session);
 
 int http1_manager_session(halmos_conn_t *conn);
 
-// Fungsi penanganan respons SSL / File Statis terintegrasi
-int http1_manager_ssl_response(halmos_conn_t *conn, HTTP1Session *session);
-
-int http1_manager_plain_response(int sock_client, HTTP1Session *session);
-
 #endif

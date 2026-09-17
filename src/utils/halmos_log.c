@@ -55,6 +55,16 @@ void write_log_error(const char *format, ...) {
     va_end(args);
 }
 
+void write_log_access(const char *protocol, const char *client_ip, const char *method, const char *uri, int status, long bytes_sent) {
+    char access_msg[MAX_LOG_MESSAGE];
+    
+    // Format pesan menggabungkan protokol
+    snprintf(access_msg, sizeof(access_msg), "[%s] %s - \"%s %s\" %d %ld", 
+             protocol, client_ip, method, uri, status, bytes_sent);
+             
+    enqueue_log(LOG_TYPE_ACCESS, access_msg, (va_list){0});
+}
+
 void write_log_telemetry() {
     if (!config.telemetry_enabled) {
         return;
@@ -186,6 +196,8 @@ void* log_thread_routine(void* arg) {
             snprintf(log_filename, sizeof(log_filename), "%s%s_error.log", LOG_DIR, date_str);
         } else if (current_entry.type == LOG_TYPE_METRICS) {
             snprintf(log_filename, sizeof(log_filename), "%s%s_telemetry.log", LOG_DIR, date_str);
+        } else if (current_entry.type == LOG_TYPE_ACCESS) {
+            snprintf(log_filename, sizeof(log_filename), "%s%s_access.log", LOG_DIR, date_str);
         } else {
             snprintf(log_filename, sizeof(log_filename), "%s%s_system.log", LOG_DIR, date_str);
         }
@@ -196,6 +208,10 @@ void* log_thread_routine(void* arg) {
                 // Untuk metrik, kita print mentah-mentah JSON-nya per baris
                 // Kita tambahkan timestamp di dalam JSON agar lebih keren
                 fprintf(f, "%s\n", current_entry.text); 
+            } else if (current_entry.type == LOG_TYPE_ACCESS) {
+                // Untuk access log: [Waktu] [HTTP2] 127.0.0.1 - "GET /index.html" 200 1240
+                // current_entry.text sudah berisi "[HTTP2] 127.0.0.1 ..." atau "[HTTP/1.1] 127.0.0.1 ..."
+                fprintf(f, "[%s] %s\n", time_str, current_entry.text);
             } else {
                 // Untuk log biasa (System/Error), tetap pakai format lama yang manusiawi
                 const char* label = (current_entry.type == LOG_TYPE_ERROR) ? "ERROR" : "INFO";
@@ -224,7 +240,7 @@ void enqueue_log(LogType type, const char *format, va_list args) {
         // Simpan pesan dan tipenya
         // FIX 3: Cek jika args valid (untuk write_log) atau NULL (untuk telemetry)
         if (format) {
-            if (type == LOG_TYPE_METRICS) {
+            if (type == LOG_TYPE_METRICS || type == LOG_TYPE_ACCESS) {
                 // Ganti strncpy dengan snprintf untuk menghilangkan warning
                 // Ini menjamin string selalu diakhiri dengan '\0'
                 snprintf(global_log_queue.entries[tail].text, MAX_LOG_MESSAGE, "%s", format);

@@ -20,7 +20,8 @@ typedef struct {
 typedef enum {
     LOG_TYPE_SYSTEM,
     LOG_TYPE_ERROR,
-    LOG_TYPE_METRICS // Tambahkan tipe baru untuk Telemetry
+    LOG_TYPE_ACCESS,
+    LOG_TYPE_METRICS
 } LogType;
 
 // Struktur pesan yang disimpan di queue
@@ -47,6 +48,11 @@ extern HalmosTelemetry global_telemetry;
 // Deklarasi fungsi-fungsi log
 void write_log(const char *format, ...);
 void write_log_error(const char *format, ...); 
+void write_log_access(const char *protocol, 
+    const char *client_ip, 
+    const char *method, 
+    const char *uri, 
+    int status, long bytes_sent);
 void write_log_telemetry();
 
 void start_thread_logger();

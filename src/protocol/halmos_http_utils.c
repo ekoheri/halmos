@@ -142,7 +142,7 @@ char *sanitize_path(const char *root, const char *uri) {
 
     char resolved_path[PATH_MAX];
     if (realpath(full_path, resolved_path) == NULL) {
-        write_log_error("[ERR] Realpath failed for: %s. Reason: %s", full_path, strerror(errno));
+        //write_log_error("[ERR] Realpath failed for: %s. Reason: %s", full_path, strerror(errno));
         return NULL;
     }
 
