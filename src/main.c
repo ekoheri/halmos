@@ -19,6 +19,14 @@
 #include <stdio.h>
 #include <sys/epoll.h>
 
+#include <string.h>
+#include <unistd.h>
+
+// Definisi Identitas & Konfigurasi Global
+#define HALMOS_NAME       "Halmos Web Server"
+#define HALMOS_VERSION    "1.0.0-RC1"
+#define HALMOS_CONFIG_PATH "/etc/halmos/halmos.conf"
+
 // Handle sinyal dengan aman (Async-Signal Safe)
 static void handle_shutdown_signal(int sig) {
     (void)sig;
@@ -36,7 +44,80 @@ void setup_signals(void) {
     sigaction(SIGINT, &sa, NULL);
 }
 
-int main() {
+int main(int argc, char *argv[]) {
+    // 0. Tangani Argumen CLI (Version, Help, Test Config)
+    if (argc > 1) {
+        if (strcmp(argv[1], "-v") == 0 || strcmp(argv[1], "--version") == 0) {
+            printf("%s v%s\n", HALMOS_NAME, HALMOS_VERSION);
+            return EXIT_SUCCESS;
+        }
+        if (strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "--help") == 0) {
+            printf("%s v%s\n", HALMOS_NAME, HALMOS_VERSION);
+            printf("Usage:\n  halmos [option]\n\n");
+            printf("Options:\n");
+            printf("  -t, --test       Test configuration file syntax and exit\n");
+            printf("  -v, --version    Output version information and exit\n");
+            printf("  -h, --help       Display this help and exit\n\n");
+            printf("Configuration:\n");
+            printf("  Config file is loaded from: %s\n", HALMOS_CONFIG_PATH);
+            return EXIT_SUCCESS;
+        }
+        if (strcmp(argv[1], "-t") == 0 || strcmp(argv[1], "--test") == 0) {
+            // 1. Load konfigurasi utama Halmos
+            if (core_config_load(HALMOS_CONFIG_PATH) != 0) {
+                fprintf(stderr, "[ERROR] Configuration test FAILED: Cannot parse %s\n", HALMOS_CONFIG_PATH);
+                return EXIT_FAILURE;
+            }
+            printf("[OK] Halmos config syntax: %s\n", HALMOS_CONFIG_PATH);
+
+            // 2. Cek Network (Binding IP & Port)
+            printf("[OK] Network binding: %s:%d\n", config.server_name, config.server_port);
+
+            // 3. Cek Document Root (Apakah foldernya ada secara fisik)
+            if (access(config.document_root, F_OK) == 0) {
+                printf("[OK] Document root: %s (Exists)\n", config.document_root);
+            } else {
+                fprintf(stderr, "[WARN] Document root path not found: %s\n", config.document_root);
+            }
+
+            // 4. Cek TLS / SSL Certificates (Jika aktif)
+            if (config.tls_enabled) {
+                int tls_ok = 1;
+                if (access(config.ssl_certificate_file, R_OK) != 0) {
+                    fprintf(stderr, "[ERROR] SSL Certificate missing or unreadable: %s\n", config.ssl_certificate_file);
+                    tls_ok = 0;
+                }
+                if (access(config.ssl_private_key_file, F_OK) != 0) {
+                    fprintf(stderr, "[ERROR] SSL Private Key file not found: %s\n", config.ssl_private_key_file);
+                    tls_ok = 0;
+                }
+                if (tls_ok) {
+                    printf("[OK] TLS Engine: Enabled (Cert & Key valid)\n");
+                } else {
+                    return EXIT_FAILURE;
+                }
+            } else {
+                printf("[INFO] TLS Engine: Disabled (HTTP Mode)\n");
+            }
+
+            // 5. Cek PHP-FPM Config Path (Untuk audit adaptive)
+            if (config.php_fpm_config_path[0] != '\0') {
+                if (access(config.php_fpm_config_path, R_OK) == 0) {
+                    printf("[OK] PHP-FPM config path: %s (Found & Readable)\n", config.php_fpm_config_path);
+                } else {
+                    fprintf(stderr, "[WARN] PHP-FPM config path NOT FOUND or unreadable: %s\n", config.php_fpm_config_path);
+                    fprintf(stderr, "       Hint: Check if PHP-FPM is installed or if the path/permissions are correct.\n");
+                }
+            } else {
+                printf("[WARN] php_fpm_config_path is empty in configuration.\n");
+            }
+
+            printf("\nConfiguration test SUCCESSFUL.\n");
+            printf("Please adjust the %s configuration before running the web server.\n", config.php_fpm_config_path);
+            return EXIT_SUCCESS;
+        }
+    }
+
     setup_signals();
 
     // 1. Load Konfigurasi (Log ke stderr jika gagal sebelum logger aktif)
