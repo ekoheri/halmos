@@ -25,7 +25,7 @@ void *core_thread_pool_worker(void *arg) {
         halmos_event_t event_item;
         
         // 1. Ambil tugas (halmos_event_t) dari antrean
-        int sock_client = queue_pop(&global_queue, &event_item, &arrival);
+        int sock_client = core_queue_pop(&global_queue, &event_item, &arrival);
         
         // Ret -3: Shutdown sequence -> Exit thread secara elegan.
         if (sock_client < 0) {
@@ -46,7 +46,7 @@ void *core_thread_pool_worker(void *arg) {
  
         // --- AKUISISI KUNCI KONEKSI ---
         // Mengunci koneksi agar Event Loop tidak dapat memanggil 
-        // event_loop_cleanup_connection (yang akan membebaskan SSL & close fd)
+        // core_event_loop_cleanup_connection (yang akan membebaskan SSL & close fd)
         // selama worker sedang memproses I/O pada koneksi ini.
         core_conn_t_lock(conn);
  
@@ -85,22 +85,22 @@ void *core_thread_pool_worker(void *arg) {
             // fprintf(stderr, "[DEBUG-WORKER] FD: %d -> Status 1 (Keep-Alive/Selesai). Rearm EPOLLIN\n", sock_client);
 
             //event_loop_rearm_epoll(sock_client);
-            event_loop_rearm_epoll_ex(sock_client, EPOLLIN);
+            core_event_loop_rearm_epoll_ex(sock_client, EPOLLIN);
             core_conn_t_unlock(conn); // Lepaskan kunci setelah selesai mengatur state
         } else if (status == 2) {
             // Status 2: Butuh BACA lagi saja
             // fprintf(stderr, "[DEBUG-WORKER] FD: %d -> Status 2 (WANT_READ). Rearm EPOLLIN\n", sock_client);
-            event_loop_rearm_epoll_ex(sock_client, EPOLLIN);
+            core_event_loop_rearm_epoll_ex(sock_client, EPOLLIN);
             core_conn_t_unlock(conn);
         } else if (status == 3) {
             // fprintf(stderr, "[DEBUG-WORKER] FD: %d -> Status 3 (WANT_WRITE). Rearm EPOLLOUT\n", sock_client);
             // Status 3: Butuh TULIS lagi saja
-            event_loop_rearm_epoll_ex(sock_client, EPOLLOUT);
+            core_event_loop_rearm_epoll_ex(sock_client, EPOLLOUT);
             core_conn_t_unlock(conn);
         } else if (status == 4) {
             // --- TAMBAHAN UNTUK HTTP/2 FILE STREAMING / WRITE BACKLOG ---
             // fprintf(stderr, "[DEBUG-WORKER] FD: %d -> Status 4 (WANT_WRITE). Rearm EPOLLIN | EPOLLOUT\n", sock_client);
-            event_loop_rearm_epoll_ex(sock_client, EPOLLIN | EPOLLOUT);
+            core_event_loop_rearm_epoll_ex(sock_client, EPOLLIN | EPOLLOUT);
             core_conn_t_unlock(conn);
         } else {
             // fprintf(stderr, "[DEBUG-WORKER] FD: %d -> Status %d (Close/Error). Cleaning up...\n", sock_client, status);
@@ -110,7 +110,7 @@ void *core_thread_pool_worker(void *arg) {
             core_conn_t_unlock(conn);
             
             atomic_fetch_sub(&global_telemetry.active_connections, 1);
-            event_loop_cleanup_connection(sock_client);
+            core_event_loop_cleanup_connection(sock_client);
         }
  
         // --- TELEMETRY & LOGGING ---
