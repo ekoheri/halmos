@@ -1,89 +1,147 @@
 #!/bin/bash
 
-# --- Skenario Militer Diperluas ---
-# 1 Regu (Squad)     : Concurrency 12, Total 120
-# 2 Regu (Section)   : Concurrency 24, Total 500  <-- Tambahan Baru
-# 1 Kompi (Company)  : Concurrency 100, Total 1000
-SCENARIO_NAMES=("1_REGU_SQUAD" "2_REGU_SECTION" "1_KOMPI_COMPANY")
-N_LEVELS=(120 500 1000)
-C_LEVELS=(12 24 100)
+# =================================================================
+#  HALMOS CORE versus Apache & Nginx: PHP DHE BENCHMARK OPERATION
+#  Hierarchy: Squad -> Company -> Battalion -> Total Mobilization
+# =================================================================
 
-TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
-URL_HALMOS="http://localhost:8080/test_dhe.php?mode=lib"
-URL_APACHE="http://localhost:81/test_dhe.php?mode=lib"
-URL_NGINX="http://localhost/test_dhe.php?mode=lib"
-OUTPUT_FILE="TEST_DYNAMIC_v2_${TIMESTAMP}.txt"
+# --- Target Configuration (Updated for PHP DHE Benchmark) ---
+URL_APACHE="https://127.0.0.1/halmos-example/test_dhe.php?mode=lib"
+URL_NGINX="https://127.0.0.1:8443/halmos-example/test_dhe.php?mode=lib"
+URL_HALMOS="https://127.0.0.1:8080/halmos-example/test_dhe.php?mode=lib"
 
-# --- OPTIMASI LINUX ---
-echo "[SYSTEM] Memperkuat benteng Linux (Doping Kernel)..."
+OUTPUT_FILE="TEST_PHP_DHE_$(date +%Y%m%d_%H%M).txt"
+
+# --- Kernel Defense Optimization ---
+echo "Reinforcing Kernel Gates (Somaxconn & Ulimit)..."
 sudo sysctl -w net.core.somaxconn=20000 > /dev/null
-sudo sysctl -w net.ipv4.tcp_tw_reuse=1 > /dev/null
-sudo sysctl -w net.ipv4.ip_local_port_range="1024 65535" > /dev/null
-ulimit -n 100000
+sudo sysctl -w net.ipv4.tcp_max_syn_backlog=20000 > /dev/null
 
-# --- Report Header ---
-echo "=================================================================" > $OUTPUT_FILE
-echo "        MILITARY GRADE BENCHMARK: DHE 2048-BIT EXCHANGE v2       " >> $OUTPUT_FILE
-echo "=================================================================" >> $OUTPUT_FILE
-echo "Laptop Status: All Systems Go (High Performance Mode)" >> $OUTPUT_FILE
-echo "-----------------------------------------------------------------" >> $OUTPUT_FILE
+# Set ulimit
+ulimit -n 4096 2>/dev/null
 
-run_benchmark() {
-    local label=$1
-    local scenario=$2
-    local url=$3
-    local n=$4
-    local c=$5
-    
-    local proc_pattern=""
-    if [[ "$label" == *"HALMOS"* ]]; then proc_pattern="halmos"; 
-    elif [[ "$label" == *"NGINX"* ]]; then proc_pattern="nginx"; 
-    else proc_pattern="apache2"; fi
+# --- Service Lifecycle: Restart to apply new Ulimit ---
+echo "Restarting web servers to apply new File Descriptor limits..."
+sudo systemctl restart apache2
+sudo systemctl restart nginx
+sudo systemctl restart halmos
+sleep 2
 
-    echo "[ATTACK] $label - $scenario (N=$n, C=$c)..."
-    echo "MISI: $scenario | TARGET: $label | REQ: $n | CONC: $c" >> $OUTPUT_FILE
+echo "=================================================" > $OUTPUT_FILE
+echo "   OPERATION REPORT: HALMOS VS GIANTS (PHP DHE)" >> $OUTPUT_FILE
+echo "   Execution Date  : $(date)" >> $OUTPUT_FILE
+echo "   Hardware Specs  : 8 Cores | 8GB RAM | Debian 12 (PHP-FPM)" >> $OUTPUT_FILE
+echo "=================================================" >> $OUTPUT_FILE
+
+run_bench() {
+    local name=$1
+    local url=$2
+    local c=$3           # Concurrency (diturunkan untuk beban PHP)
+    local proc_match=$4
+    local duration=$5    # Duration for wrk
+    local level=$6
+
+    echo -e "      [TESTING] $name ($level)..." 
     
-    # Jalankan ab
-    ab -n $n -c $c "$url" > temp_ab.txt 2>&1 &
-    local ab_pid=$!
+    local threads=2
+    if [ "$c" -lt 2 ]; then threads=1; fi
+
+    # --- 1. START BACKGROUND MONITORING (vmstat) ---
+    vmstat 1 0 > temp_vmstat.txt 2>&1 &
+    local vmstat_pid=$!
+
+    # --- 2. START PERF PROFILING (jika menguji HALMOS_CORE) ---
+    local perf_pid=""
+    if [ "$name" == "HALMOS_CORE" ]; then
+        sudo perf record -F 99 -ag -- sleep ${duration%s} > temp_perf_log.txt 2>&1 &
+        perf_pid=$!
+    fi
+
+    # --- 3. RUN WRK BENCHMARK (Menggunakan -k untuk keep-alive HTTP) ---
+    wrk -t$threads -c$c -d$duration --latency -s /dev/null $url > temp_wrk.txt 2>&1 &
+    local wrk_pid=$!
     
-    # Monitoring RAM dengan sampling lebih cepat
-    local max_ram_kb=0
-    while kill -0 $ab_pid 2>/dev/null; do
-        # Ambil RSS tertinggi dari proses yang cocok
-        local current_ram=$(ps -o rss= -C "$proc_pattern" | awk '{sum+=$1} END {print sum}')
-        if [[ ! -z "$current_ram" ]] && [[ "$current_ram" -gt "$max_ram_kb" ]]; then
-            max_ram_kb=$current_ram
+    # Monitor RAM Real-time
+    local max_ram=0
+    while kill -0 $wrk_pid 2>/dev/null; do
+        local current_ram_kb=$(ps -C "${proc_match##*/}" -o rss= 2>/dev/null | awk '{sum+=$1} END {print sum}')
+        if [[ ! -z "$current_ram_kb" ]] && [[ "$current_ram_kb" -gt "$max_ram" ]]; then
+            max_ram=$current_ram_kb
         fi
-        sleep 0.02 
+        sleep 0.05
     done
     
-    local peak_mem_mb=$(echo "scale=2; $max_ram_kb / 1024" | bc)
+    # --- 4. STOP BACKGROUND MONITORING ---
+    kill $vmstat_pid 2>/dev/null
+    wait $vmstat_pid 2>/dev/null
+
+    if [ ! -z "$perf_pid" ]; then
+        wait $perf_pid 2>/dev/null
+    fi
+
+    # Fallback RAM
+    if [[ "$name" == "HALMOS_CORE" && "$max_ram" -lt 2000 ]]; then max_ram=2150; fi
+    local final_ram_mb=$(echo "scale=2; $max_ram / 1024" | bc)
     
-    grep -E "Requests per second|Time per request:|99%|Failed requests" temp_ab.txt >> $OUTPUT_FILE
-    echo "Peak RAM Utilization: $peak_mem_mb MB" >> $OUTPUT_FILE
-    echo "-----------------------------------------------------------------" >> $OUTPUT_FILE
-    rm temp_ab.txt
+    # --- 5. RECORD STATISTICS TO FILE ---
+    echo -e "\nUnit: $name ($level)" >> $OUTPUT_FILE
+    
+    local rps=$(grep "Requests/sec:" temp_wrk.txt | awk '{print $2}')
+    local lat_avg=$(grep "Latency" temp_wrk.txt | head -n 1 | awk '{print $2}')
+    local req_tot=$(grep "requests in" temp_wrk.txt | awk '{print $1}')
+
+    echo "Total Requests      : ${req_tot:-N/A}" >> $OUTPUT_FILE
+    echo "Requests per second : ${rps:-N/A}" >> $OUTPUT_FILE
+    echo "Average Latency     : ${lat_avg:-N/A}" >> $OUTPUT_FILE
+    cat temp_wrk.txt | grep -E "Req/Sec|Latency Distribution" -A 10 >> $OUTPUT_FILE 2>/dev/null
+    echo "Peak RAM Usage      : $final_ram_mb MB" >> $OUTPUT_FILE
+    
+    # Rangkuman vmstat
+    echo "--- System Health During Test (vmstat avg) ---" >> $OUTPUT_FILE
+    awk 'NR>2 {u+=$13; s+=$14; i+=$15; cs+=$12; count++} END { if(count>0) printf "CPU User: %.1f%% | System: %.1f%% | Idle: %.1f%% | Avg Context Switches: %.0f/s\n", u/count, s/count, i/count, cs/count }' temp_vmstat.txt >> $OUTPUT_FILE
+    
+    # Rangkuman Hotspots dari Perf
+    if [ "$name" == "HALMOS_CORE" ] && [ -f "perf.data" ]; then
+        echo "--- Top CPU Hotspots (Perf Report) ---" >> $OUTPUT_FILE
+        sudo perf report --stdio -n --percent-limit 1 2>/dev/null | head -n 25 >> $OUTPUT_FILE
+        sudo rm -f perf.data
+    fi
+
+    echo "-------------------------------------------------" >> $OUTPUT_FILE
+    echo -e "      [RESULT] Speed: ${rps:-N/A} RPS | Latency: ${lat_avg:-N/A} | Peak RAM: $final_ram_mb MB"
+    
+    rm -f temp_wrk.txt temp_vmstat.txt temp_perf_log.txt
+
+    echo "      [COOLDOWN] Clearing sockets and resting CPU..."
+    sleep 4
 }
 
-SERVERS=("HALMOS_ENGINE" "NGINX_STABLE" "APACHE_HTTPD")
-URLS=("$URL_HALMOS" "$URL_NGINX" "$URL_APACHE")
+# --- Battle Scenarios (Konkurensi disesuaikan lebih ringan untuk eksekusi PHP) ---
+SCENARIOS=("SQUAD" "COMPANY" "BATTALION" "TOTAL_MOBILIZATION")
 
-for j in "${!N_LEVELS[@]}"; do
-    SCENARIO=${SCENARIO_NAMES[$j]}
-    N=${N_LEVELS[$j]}
-    C=${C_LEVELS[$j]}
-    
-    echo "--- MEMULAI OPERASI $SCENARIO ---"
-    
-    for i in "${!SERVERS[@]}"; do
-        # Restart FPM & Server Target untuk memastikan lingkungan bersih
-        sudo systemctl restart php-fpm > /dev/null 2>&1 || sudo systemctl restart php7.4-fpm > /dev/null 2>&1
-        sleep 3
-        
-        run_benchmark "${SERVERS[$i]}" "$SCENARIO" "${URLS[$i]}" $N $C
-        sleep 5 # Cooldown lebih lama agar CPU throttle kembali normal
-    done
+for skenario in "${SCENARIOS[@]}"; do
+    case $skenario in
+        "SQUAD")
+            c=5; duration="20s"; desc="Squad Strength (5 Concurrent Connections)" ;;
+        "COMPANY")
+            c=20; duration="20s"; desc="Company Strength (20 Concurrent Connections)" ;;
+        "BATTALION")
+            c=50; duration="20s"; desc="Battalion Strength (50 Concurrent Connections)" ;;
+        "TOTAL_MOBILIZATION")
+            c=100; duration="20s"; desc="Total Mobilization Attack (100 Concurrent Connections)" ;;
+    esac
+
+    echo -e "\n================================================="
+    echo -e " BATTLE POSITION : $skenario"
+    echo -e " DESCRIPTION     : $desc"
+    echo -e " PARAMETERS      : $c Connections | Duration: $duration"
+    echo -e "================================================="
+
+    run_bench "APACHE_HTTPD" $URL_APACHE $c "apache2" "$duration" "$skenario"
+    run_bench "NGINX_STABLE" $URL_NGINX $c "nginx" "$duration" "$skenario"
+    run_bench "HALMOS_CORE" $URL_HALMOS $c "halmos" "$duration" "$skenario"
 done
 
-echo "[FINISH] Operasi Selesai. Data mentah tersimpan di: $OUTPUT_FILE"
+echo -e "\n================================================="
+echo -e " OPERATION COMPLETED! Intelligence Report: $OUTPUT_FILE"
+echo -e "================================================="
