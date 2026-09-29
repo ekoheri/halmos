@@ -3,11 +3,12 @@
 
 #include "halmos_http2_core.h"
 
-// Membaca 9 byte pertama dari socket
-bool http2_parser_frame_header(const unsigned char *buf, HTTP2FrameHeader *out);
+void http2_parser_handle_headers(HTTP2Session *session, HTTP2FrameHeader *head, const unsigned char *payload);
 
-// HPACK: Mendekompres binary header menjadi string yang dimengerti RequestHeader
-bool http2_parser_parse_header(HTTP2Session *session, HTTP2Stream *stream, const unsigned char *payload, size_t len);
+// Membaca 9 byte pertama dari socket
+void http2_parser_handle_data(HTTP2Session *session, HTTP2FrameHeader *head, const unsigned char *payload);
+
+bool http2_parser_frame_header(const unsigned char *buf, HTTP2FrameHeader *out);
 
 void http2_parser_free_memory(HTTP2Stream *stream);
 #endif

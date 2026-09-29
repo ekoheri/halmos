@@ -1,7 +1,24 @@
-#include "halmos_http2_huffman.h"
+#include "halmos_http2_hpack.h"
+#include "halmos_http1_header.h"
+#include "halmos_http2_core.h"
+#include "halmos_global.h"
 
 #include <stdbool.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
+#include <ctype.h>
 
+typedef struct {
+    const char *name;
+    const char *value;
+} HPACKStaticEntry;
+
+/*
+ * Data const nghttp2_huff_decode ini di-copy dari:
+ * https://github.com/nghttp2/nghttp2/blob/master/lib/nghttp2_hd_huffman_data.c
+ * Hak cipta (c) 2013 oleh Tatsuhiro Tsujikawa.
+ */
 const nghttp2_huff_decode huff_decode_table[][16] = {
     /* 0 */
   {
@@ -4888,9 +4905,214 @@ const nghttp2_huff_decode huff_decode_table[][16] = {
   },
 };
 
-/**
- * Huffman Decoder (Trace enabled)
- */
+static const HPACKStaticEntry static_table[] = {
+    {NULL, NULL}, 
+    {":authority", ""}, {":method", "GET"}, {":method", "POST"}, {":path", "/"},
+    {":path", "/index.html"}, {":scheme", "http"}, {":scheme", "https"}, {":status", "200"},
+    {":status", "204"}, {":status", "206"}, {":status", "304"}, {":status", "400"},
+    {":status", "404"}, {":status", "500"}, {"accept-charset", ""}, {"accept-encoding", "gzip, deflate"},
+    {"accept-language", ""}, {"accept-ranges", ""}, {"accept", ""}, {"access-control-allow-origin", ""},
+    {"age", ""}, {"allow", ""}, {"authorization", ""}, {"cache-control", ""},
+    {"content-disposition", ""}, {"content-encoding", ""}, {"content-language", ""}, {"content-length", ""},
+    {"content-location", ""}, {"content-range", ""}, {"content-type", ""}, {"cookie", ""},
+    {"date", ""}, {"etag", ""}, {"expect", ""}, {"expires", ""}, {"from", ""}, {"host", ""},
+    {"if-match", ""}, {"if-modified-since", ""}, {"if-none-match", ""}, {"if-range", ""},
+    {"if-unmodified-since", ""}, {"last-modified", ""}, {"link", ""}, {"location", ""},
+    {"max-forwards", ""}, {"proxy-authenticate", ""}, {"proxy-authorization", ""}, {"range", ""},
+    {"referer", ""}, {"refresh", ""}, {"retry-after", ""}, {"server", ""}, {"set-cookie", ""},
+    {"strict-transport-security", ""}, {"transfer-encoding", ""}, {"user-agent", ""}, {"vary", ""},
+    {"via", ""}, {"www-authenticate", ""}
+};
+
+
+static bool http2_huffman_decode(const unsigned char *src, size_t len, char *dest, size_t dest_size);
+
+uint32_t http2_hpack_decode_int(const unsigned char **pos, const unsigned char *end, uint8_t prefix_mask) {
+    if (*pos >= end) return 0;
+    const unsigned char *p = *pos;
+    uint32_t res = (*p++) & prefix_mask;
+
+    if (res < prefix_mask) {
+        *pos = p;
+        return res;
+    }
+
+    uint32_t shift = 0;
+    while (p < end) {
+        unsigned char b = *p++;
+        res += (uint32_t)(b & 127) << shift;
+        if (!(b & 128)) {
+            *pos = p;
+            return res;
+        }
+        shift += 7;
+        if (shift > 28) break; 
+    }
+    
+    *pos = p;
+    return res;
+}
+
+bool http2_hpack_get_header(HTTP2Session *session, uint32_t index, const char **name, const char **value) {
+    if (index >= 1 && index <= 61) {
+        *name = static_table[index].name;
+        *value = static_table[index].value;
+        return true;
+    }
+
+    if (session && session->dyn_table.count > 0) {
+        uint32_t dyn_idx = index - 62;
+        if (dyn_idx < session->dyn_table.count) {
+            *name = session->dyn_table.entries[dyn_idx].name;
+            *value = session->dyn_table.entries[dyn_idx].value;
+            return true;
+        }
+    }
+    return false;
+}
+
+void http2_hpack_dynamic_table_add(HTTP2Session *session, const char *name, const char *value) {
+    if (!session || !name || !value) return;
+    if (session->dyn_table.entries == NULL) return;
+
+    if (session->dyn_table.count >= 128) {
+        session->dyn_table.count = 127;
+    }
+
+    for (int i = session->dyn_table.count; i > 0; i--) {
+        session->dyn_table.entries[i] = session->dyn_table.entries[i-1];
+    }
+
+    snprintf(session->dyn_table.entries[0].name, sizeof(session->dyn_table.entries[0].name), "%s", name);
+    snprintf(session->dyn_table.entries[0].value, sizeof(session->dyn_table.entries[0].value), "%s", value);
+
+    session->dyn_table.count++;
+}
+
+bool http2_hpack_decode_string_buf(const unsigned char **pos, const unsigned char *end, char *out_buf, size_t out_max) {
+    if (*pos >= end || !out_buf || out_max == 0) return false;
+
+    uint8_t first_byte = **pos;
+    bool is_huffman = (first_byte & 0x80) != 0;
+    uint32_t len = http2_hpack_decode_int(pos, end, 0x7F);
+
+    if (len > 10240 || *pos + len > end) {
+        *pos = end;
+        return false;
+    }
+
+    if (is_huffman) {
+        // Zero-allocation: Langsung dekode ke out_buf yang dialokasikan di stack oleh caller
+        if (!http2_huffman_decode(*pos, len, out_buf, out_max)) {
+            // Jika gagal decode, pastikan buffer bersih tapi TETAP majukan *pos agar stream tidak macet
+            out_buf[0] = '\0';
+        }
+    } else {
+        size_t copy_len = (len < out_max - 1) ? len : (out_max - 1);
+        memcpy(out_buf, *pos, copy_len);
+        out_buf[copy_len] = '\0';
+    }
+
+    *pos += len; // Wajib dipanggil agar *pos selalu maju & mutex hpack_lock dilepas dengan aman
+    return true;
+}
+
+int http2_hpack_literal_header_with_name(const char *name, const char *value, RequestHeader *req) {
+    if (!name || !value) return 0;
+    size_t val_len = strlen(value);
+
+    if (strcmp(name, ":path") == 0) {
+        if (val_len >= sizeof(req->h2_uri_buf)) {
+            return 414; // URI Too Long
+        }
+        snprintf(req->h2_uri_buf, sizeof(req->h2_uri_buf), "%s", value);
+        req->uri = req->h2_uri_buf;
+    } 
+    else if (strcmp(name, ":authority") == 0 || strcmp(name, "host") == 0) {
+        if (val_len >= sizeof(req->h2_host_buf)) {
+            return 431; // Request Header Fields Too Large
+        }
+        snprintf(req->h2_host_buf, sizeof(req->h2_host_buf), "%s", value);
+        req->host = req->h2_host_buf;
+    } 
+    else if (strcmp(name, "content-type") == 0) {
+        if (val_len >= sizeof(req->h2_content_type_buf)) {
+            return 431; 
+        }
+        snprintf(req->h2_content_type_buf, sizeof(req->h2_content_type_buf), "%s", value);
+        req->content_type = req->h2_content_type_buf;
+    } 
+    else if (strcmp(name, "cookie") == 0) {
+        size_t current_len = strlen(req->h2_cookie_buf);
+        
+        if (current_len == 0) {
+            if (val_len >= sizeof(req->h2_cookie_buf)) {
+                return 431; // Request Header Fields Too Large
+            }
+            memcpy(req->h2_cookie_buf, value, val_len + 1);
+        } else {
+            // Cek apakah buffer cukup menampung "; " + value + null terminator
+            if (current_len + 2 + val_len >= sizeof(req->h2_cookie_buf)) {
+                return 431; 
+            }
+            
+            // Menggunakan memcpy/strcat manual menghilangkan warning snprintf truncation
+            char *ptr = req->h2_cookie_buf + current_len;
+            ptr[0] = ';';
+            ptr[1] = ' ';
+            memcpy(ptr + 2, value, val_len + 1); // +1 untuk menyalin null-terminator '\0'
+        }
+        req->cookie_data = req->h2_cookie_buf;
+    } 
+    else if (strcmp(name, "content-length") == 0) {
+        req->content_length = strtol(value, NULL, 10);
+    } 
+    else if (strcmp(name, ":method") == 0) {
+        if (val_len >= sizeof(req->method)) {
+            return 431;
+        }
+        snprintf(req->method, sizeof(req->method), "%s", value);
+    } 
+    else if (strcmp(name, ":scheme") == 0) {
+        req->is_tls = (strcmp(value, "https") == 0);
+    }
+    else if (strcmp(name, "x-forwarded-for") == 0 && config.trust_proxy) {
+        const char *comma = strchr(value, ',');
+        if (comma) {
+            size_t ip_len = comma - value;
+            if (ip_len < sizeof(req->client_ip)) {
+                memcpy(req->client_ip, value, ip_len);
+                req->client_ip[ip_len] = '\0';
+            }
+        } else {
+            if (val_len >= sizeof(req->client_ip)) {
+                return 431;
+            }
+            snprintf(req->client_ip, sizeof(req->client_ip), "%s", value);
+        }
+    } 
+    else if (strcmp(name, ":protocol") == 0) {
+        if (strcmp(value, "websocket") == 0) {
+            req->is_upgrade = true; 
+        }
+    }
+
+    return 0;
+}
+
+int http2_hpack_indexed_header(HTTP2Session *session, uint32_t index, RequestHeader *req) {
+    if (index == 0) return 0;
+    const char *name = NULL;
+    const char *value = NULL;
+
+    if (http2_hpack_get_header(session, index, &name, &value)) {
+        return http2_hpack_literal_header_with_name(name, value, req);
+    } 
+    return 0;
+}
+
+
+/* Private Fuction /Helper*/
 
 bool http2_huffman_decode(const unsigned char *src, size_t len, char *dest, size_t dest_size) {
     if (!src || !dest || len == 0 || dest_size == 0) return false;

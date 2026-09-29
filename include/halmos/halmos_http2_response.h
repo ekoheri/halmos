@@ -20,4 +20,8 @@ void http2_response_send_data(HTTP2Session *session, HTTP2Stream *stream, const 
  */
 
 void http2_response_send_complex_header(HTTP2Session *session, HTTP2Stream *stream, char *raw_headers, unsigned char flags);
+
+void http2_response_flush_active_streams(HTTP2Session *session);
+
+bool http2_response_has_active_streams(HTTP2Session *session);
 #endif

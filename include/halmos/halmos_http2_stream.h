@@ -7,6 +7,6 @@
 
 HTTP2Stream* http2_stream_find_unlocked(HTTP2Session *session, uint32_t id);
 HTTP2Stream* http2_stream_find(HTTP2Session *session, uint32_t id);
-uint32_t http2_stream_get_bucket_fibonacci(uint32_t stream_id);
+HTTP2Stream *http2_stream_get_or_create(HTTP2Session *session, uint32_t stream_id); 
 
 #endif // HALMOS_HTTP2_STREAM_H

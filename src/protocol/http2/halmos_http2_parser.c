@@ -7,43 +7,30 @@
 #include "halmos_http_route.h"
 #include "halmos_http_vhost.h"
 #include "halmos_http_multipart.h"
-#include "halmos_http2_huffman.h"
+#include "halmos_http2_stream.h"
+#include "halmos_http2_hpack.h"
+#include "halmos_http2_router.h"
+#include "halmos_ws_system.h"
+#include "halmos_sec_tls.h"
+#include "halmos_sec_traffic.h"
+
+#include "halmos_http2_frame.h"
 
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 #include <ctype.h>
+#include <arpa/inet.h>
 
-typedef struct {
-    const char *name;
-    const char *value;
-} HPACKStaticEntry;
+/* Helper http2_parser_handle_headers */
+static bool parse_header(HTTP2Session *session, HTTP2Stream *stream, const unsigned char *payload, size_t len);
+static size_t strip_headers_padding(HTTP2FrameHeader *head, const unsigned char **payload_ptr);
+static bool check_rate_limit(HTTP2Session *session, HTTP2Stream *st, HTTP2FrameHeader *head); 
 
-static const HPACKStaticEntry static_table[] = {
-    {NULL, NULL}, 
-    {":authority", ""}, {":method", "GET"}, {":method", "POST"}, {":path", "/"},
-    {":path", "/index.html"}, {":scheme", "http"}, {":scheme", "https"}, {":status", "200"},
-    {":status", "204"}, {":status", "206"}, {":status", "304"}, {":status", "400"},
-    {":status", "404"}, {":status", "500"}, {"accept-charset", ""}, {"accept-encoding", "gzip, deflate"},
-    {"accept-language", ""}, {"accept-ranges", ""}, {"accept", ""}, {"access-control-allow-origin", ""},
-    {"age", ""}, {"allow", ""}, {"authorization", ""}, {"cache-control", ""},
-    {"content-disposition", ""}, {"content-encoding", ""}, {"content-language", ""}, {"content-length", ""},
-    {"content-location", ""}, {"content-range", ""}, {"content-type", ""}, {"cookie", ""},
-    {"date", ""}, {"etag", ""}, {"expect", ""}, {"expires", ""}, {"from", ""}, {"host", ""},
-    {"if-match", ""}, {"if-modified-since", ""}, {"if-none-match", ""}, {"if-range", ""},
-    {"if-unmodified-since", ""}, {"last-modified", ""}, {"link", ""}, {"location", ""},
-    {"max-forwards", ""}, {"proxy-authenticate", ""}, {"proxy-authorization", ""}, {"range", ""},
-    {"referer", ""}, {"refresh", ""}, {"retry-after", ""}, {"server", ""}, {"set-cookie", ""},
-    {"strict-transport-security", ""}, {"transfer-encoding", ""}, {"user-agent", ""}, {"vary", ""},
-    {"via", ""}, {"www-authenticate", ""}
-};
-
-static bool hpack_get_header(HTTP2Session *session, uint32_t index, const char **name, const char **value);
-static void hpack_dynamic_table_add(HTTP2Session *session, const char *name, const char *value);
-static uint32_t hpack_decode_int(const unsigned char **pos, const unsigned char *end, uint8_t prefix_mask);
-static bool hpack_decode_string_buf(const unsigned char **pos, const unsigned char *end, char *out_buf, size_t out_max);
-static int process_literal_header_with_name(const char *name, const char *value, RequestHeader *req);
-static int process_indexed_header(HTTP2Session *session, uint32_t index, RequestHeader *req);
+/* Helper http2_parser_handle_data */
+static void handle_websocket_data_payload(HTTP2Session *session, HTTP2FrameHeader *head, const unsigned char *payload);
+static bool append_stream_body(HTTP2Session *session, HTTP2Stream *st, HTTP2FrameHeader *head, const unsigned char *payload);
+static void handle_stream_end(HTTP2Session *session, HTTP2Stream *st);
 
 /* Public Functions */
 
@@ -56,7 +43,94 @@ bool http2_parser_frame_header(const unsigned char *buf, HTTP2FrameHeader *out) 
     return true;
 }
 
-bool http2_parser_parse_header(HTTP2Session *session, HTTP2Stream *stream, const unsigned char *payload, size_t len) {
+void http2_parser_handle_headers(HTTP2Session *session, HTTP2FrameHeader *head, const unsigned char *payload) {
+    if (!session || head->stream_id == 0) return;
+ 
+    HTTP2Stream *st = http2_stream_get_or_create(session, head->stream_id);
+    if (!st) return;
+ 
+    const unsigned char *hpack_payload = payload;
+    size_t hpack_len = strip_headers_padding(head, &hpack_payload);
+ 
+    // Lempar hpack_payload ke HPACK Parser
+    if (parse_header(session, st, hpack_payload, hpack_len) == true) {
+        if (!check_rate_limit(session, st, head)) {
+            return; 
+        }
+ 
+        // 1. JALUR WEBSOCKET UPGRADE VIA HEADERS
+        if (st->http1_compat.is_upgrade == true) {
+            http2_router_bridge(session, st);
+            return;
+        }
+ 
+        // 2. JALUR REQUEST GET / TANPA BODY DATA (END_STREAM = 0x01)
+        if (head->flags & 0x01) { 
+            pthread_mutex_lock(&session->streams_lock);
+            st->state = 2; // Half Closed Remote
+            pthread_mutex_unlock(&session->streams_lock);
+ 
+            http2_router_bridge(session, st);
+        }
+    } else {
+        // HPACK Parse failed
+    }
+}
+
+void http2_parser_handle_data(HTTP2Session *session, HTTP2FrameHeader *head, const unsigned char *payload) {
+    if (!session) return;
+ 
+    HTTP2Stream *st = http2_stream_find(session, head->stream_id);
+    if (!st) return;
+    
+    if (!payload || head->length == 0) return;
+ 
+    // 1. Intersepsi Jalur WebSocket HTTP/2
+    if (st->http1_compat.is_upgrade == true) {
+        handle_websocket_data_payload(session, head, payload);
+        return; 
+    }
+ 
+    // 2. Jalur Akumulasi Data HTTP/FastCGI Normal
+    if (!append_stream_body(session, st, head, payload)) {
+        return;
+    }
+ 
+    // Kirim window update untuk jalur data HTTP normal
+    http2_frame_send_window_update(session->fd, session->is_tls, head->stream_id, head->length);
+    http2_frame_send_window_update(session->fd, session->is_tls, 0, head->length);
+ 
+    // 3. Cek apakah stream sudah berakhir (END_STREAM flag = 0x01)
+    if (head->flags & 0x01) { 
+        handle_stream_end(session, st);
+    }
+}
+
+void http2_parser_free_memory(HTTP2Stream *stream) {
+    if (!stream) return;
+    RequestHeader *req = &stream->http1_compat;
+
+    req->uri = NULL;
+    req->host = NULL;
+    req->content_type = NULL;
+    req->cookie_data = NULL;
+
+    if (req->parts) {
+        http_multipart_free_parts(req->parts, req->parts_count);
+        req->parts = NULL; 
+        req->parts_count = 0;
+    }
+
+    if (req->body_data) { 
+        free(req->body_data); 
+        req->body_data = NULL; 
+    }
+}
+
+/* Helper Functions Internal */
+
+// Mendekompres binary header menjadi string yang dimengerti RequestHeader
+bool parse_header(HTTP2Session *session, HTTP2Stream *stream, const unsigned char *payload, size_t len) {
     if (!payload || len == 0) return false;
     
     const unsigned char *pos = payload;
@@ -85,23 +159,23 @@ bool http2_parser_parse_header(HTTP2Session *session, HTTP2Stream *stream, const
         int status = 0;
         
         if (b & 0x80) { 
-            uint32_t index = hpack_decode_int(&pos, end, 0x7F);
-            status = process_indexed_header(session, index, req);
+            uint32_t index = http2_hpack_decode_int(&pos, end, 0x7F);
+            status = http2_hpack_indexed_header(session, index, req);
         } 
         else if ((b & 0xC0) == 0x40) { 
-            uint32_t index = hpack_decode_int(&pos, end, 0x3F);
+            uint32_t index = http2_hpack_decode_int(&pos, end, 0x3F);
             char name_buf[HPACK_NAME_MAX] = {0};
             char val_buf[HPACK_VALUE_MAX] = {0};
 
             if (index == 0) {
-                hpack_decode_string_buf(&pos, end, name_buf, sizeof(name_buf));
+                http2_hpack_decode_string_buf(&pos, end, name_buf, sizeof(name_buf));
                 //if (!hpack_decode_string_buf(&pos, end, name_buf, sizeof(name_buf))) {
                 //    status = 400; // HPACK / Compression Error
                 //    break;
                 //}
             } else {
                 const char *s_name, *s_value;
-                if (hpack_get_header(session, index, &s_name, &s_value)) {
+                if (http2_hpack_get_header(session, index, &s_name, &s_value)) {
                     snprintf(name_buf, sizeof(name_buf), "%s", s_name);
                 }
 
@@ -113,37 +187,37 @@ bool http2_parser_parse_header(HTTP2Session *session, HTTP2Stream *stream, const
                 //    break;
                 //}
             }
-            hpack_decode_string_buf(&pos, end, val_buf, sizeof(val_buf));
+            http2_hpack_decode_string_buf(&pos, end, val_buf, sizeof(val_buf));
             //if (!hpack_decode_string_buf(&pos, end, val_buf, sizeof(val_buf))) {
             //    status = 400; // HPACK / Compression Error
             //    break;
             //}
             
             if (name_buf[0] != '\0' && val_buf[0] != '\0') {
-                status = process_literal_header_with_name(name_buf, val_buf, req);
-                hpack_dynamic_table_add(session, name_buf, val_buf);
+                status = http2_hpack_literal_header_with_name(name_buf, val_buf, req);
+                http2_hpack_dynamic_table_add(session, name_buf, val_buf);
             }
         }
         else if ((b & 0xE0) == 0x20) { 
-            hpack_decode_int(&pos, end, 0x1F); 
+            http2_hpack_decode_int(&pos, end, 0x1F); 
         }
         else if ((b & 0xF0) == 0x00 || (b & 0xF0) == 0x10) {
-            uint32_t index = hpack_decode_int(&pos, end, 0x0F);
+            uint32_t index = http2_hpack_decode_int(&pos, end, 0x0F);
             char name_buf[HPACK_NAME_MAX] = {0};
             char val_buf[HPACK_VALUE_MAX] = {0};
 
             if (index == 0) {
-                hpack_decode_string_buf(&pos, end, name_buf, sizeof(name_buf));
+                http2_hpack_decode_string_buf(&pos, end, name_buf, sizeof(name_buf));
             } else {
                 const char *s_name, *s_value;
-                if (hpack_get_header(session, index, &s_name, &s_value)) {
+                if (http2_hpack_get_header(session, index, &s_name, &s_value)) {
                     snprintf(name_buf, sizeof(name_buf), "%s", s_name);
                 }
             }
-            hpack_decode_string_buf(&pos, end, val_buf, sizeof(val_buf));
+            http2_hpack_decode_string_buf(&pos, end, val_buf, sizeof(val_buf));
             
             if (name_buf[0] != '\0' && val_buf[0] != '\0') {
-                status = process_literal_header_with_name(name_buf, val_buf, req);
+                status = http2_hpack_literal_header_with_name(name_buf, val_buf, req);
             }
         }
         else {
@@ -236,209 +310,150 @@ bool http2_parser_parse_header(HTTP2Session *session, HTTP2Stream *stream, const
     return req->is_valid;
 }
 
-void http2_parser_free_memory(HTTP2Stream *stream) {
-    if (!stream) return;
-    RequestHeader *req = &stream->http1_compat;
 
-    req->uri = NULL;
-    req->host = NULL;
-    req->content_type = NULL;
-    req->cookie_data = NULL;
-
-    if (req->parts) {
-        http_multipart_free_parts(req->parts, req->parts_count);
-        req->parts = NULL; 
-        req->parts_count = 0;
-    }
-
-    if (req->body_data) { 
-        free(req->body_data); 
-        req->body_data = NULL; 
-    }
-}
-
-/* Helper Functions Internal */
-
-bool hpack_get_header(HTTP2Session *session, uint32_t index, const char **name, const char **value) {
-    if (index >= 1 && index <= 61) {
-        *name = static_table[index].name;
-        *value = static_table[index].value;
-        return true;
-    }
-
-    if (session && session->dyn_table.count > 0) {
-        uint32_t dyn_idx = index - 62;
-        if (dyn_idx < session->dyn_table.count) {
-            *name = session->dyn_table.entries[dyn_idx].name;
-            *value = session->dyn_table.entries[dyn_idx].value;
-            return true;
+// Membersihkan padding & priority pada payload header
+size_t strip_headers_padding(HTTP2FrameHeader *head, const unsigned char **payload_ptr) {
+    const unsigned char *hpack_payload = *payload_ptr;
+    size_t hpack_len = head->length;
+    uint8_t pad_len = 0;
+ 
+    if (head->flags & 0x08) { // PADDED Flag
+        if (hpack_len > 0) {
+            pad_len = hpack_payload[0];
+            hpack_payload += 1;
+            hpack_len -= 1;
         }
     }
-    return false;
-}
-
-void hpack_dynamic_table_add(HTTP2Session *session, const char *name, const char *value) {
-    if (!session || !name || !value) return;
-    if (session->dyn_table.entries == NULL) return;
-
-    if (session->dyn_table.count >= 128) {
-        session->dyn_table.count = 127;
-    }
-
-    for (int i = session->dyn_table.count; i > 0; i--) {
-        session->dyn_table.entries[i] = session->dyn_table.entries[i-1];
-    }
-
-    snprintf(session->dyn_table.entries[0].name, sizeof(session->dyn_table.entries[0].name), "%s", name);
-    snprintf(session->dyn_table.entries[0].value, sizeof(session->dyn_table.entries[0].value), "%s", value);
-
-    session->dyn_table.count++;
-}
-
-uint32_t hpack_decode_int(const unsigned char **pos, const unsigned char *end, uint8_t prefix_mask) {
-    if (*pos >= end) return 0;
-    const unsigned char *p = *pos;
-    uint32_t res = (*p++) & prefix_mask;
-
-    if (res < prefix_mask) {
-        *pos = p;
-        return res;
-    }
-
-    uint32_t shift = 0;
-    while (p < end) {
-        unsigned char b = *p++;
-        res += (uint32_t)(b & 127) << shift;
-        if (!(b & 128)) {
-            *pos = p;
-            return res;
+ 
+    if (head->flags & 0x20) { // PRIORITY Flag
+        if (hpack_len >= 5) {
+            hpack_payload += 5; 
+            hpack_len -= 5;
         }
-        shift += 7;
-        if (shift > 28) break; 
+    }
+ 
+    if (hpack_len > pad_len) {
+        hpack_len -= pad_len; 
+    } else {
+        hpack_len = 0;
     }
     
-    *pos = p;
-    return res;
+    *payload_ptr = hpack_payload;
+    return hpack_len;
 }
 
-bool hpack_decode_string_buf(const unsigned char **pos, const unsigned char *end, char *out_buf, size_t out_max) {
-    if (*pos >= end || !out_buf || out_max == 0) return false;
-
-    uint8_t first_byte = **pos;
-    bool is_huffman = (first_byte & 0x80) != 0;
-    uint32_t len = hpack_decode_int(pos, end, 0x7F);
-
-    if (len > 10240 || *pos + len > end) {
-        *pos = end;
-        return false;
-    }
-
-    if (is_huffman) {
-        // Zero-allocation: Langsung dekode ke out_buf yang dialokasikan di stack oleh caller
-        if (!http2_huffman_decode(*pos, len, out_buf, out_max)) {
-            // Jika gagal decode, pastikan buffer bersih tapi TETAP majukan *pos agar stream tidak macet
-            out_buf[0] = '\0';
+// Memeriksa rate limit trafik klien
+bool check_rate_limit(HTTP2Session *session, HTTP2Stream *st, HTTP2FrameHeader *head) {
+    if (config.rate_limit_enabled == true) {
+        int limit = (config.max_requests_per_sec > 0) ? config.max_requests_per_sec : 50;
+        if (!sec_traffic_is_request_allowed(st->http1_compat.client_ip, limit)) {
+            write_log("[H2-SECURITY] Rate limit exceeded for IP: %s. Stream %u rejected.", 
+                      st->http1_compat.client_ip, head->stream_id);
+            
+            unsigned char error_payload[4] = {0x00, 0x00, 0x00, 0x07}; 
+            http2_frame_send(session->fd, session->is_tls, 0x03, 0x00, head->stream_id, error_payload, 4);
+            return false; 
         }
-    } else {
-        size_t copy_len = (len < out_max - 1) ? len : (out_max - 1);
-        memcpy(out_buf, *pos, copy_len);
-        out_buf[copy_len] = '\0';
     }
-
-    *pos += len; // Wajib dipanggil agar *pos selalu maju & mutex hpack_lock dilepas dengan aman
     return true;
 }
 
-int process_literal_header_with_name(const char *name, const char *value, RequestHeader *req) {
-    if (!name || !value) return 0;
-    size_t val_len = strlen(value);
+// Menangani pembongkaran frame WebSocket di dalam HTTP/2 DATA frame
+void handle_websocket_data_payload(HTTP2Session *session, HTTP2FrameHeader *head, const unsigned char *payload) {
+    if (head->length < 2) return; 
 
-    if (strcmp(name, ":path") == 0) {
-        if (val_len >= sizeof(req->h2_uri_buf)) {
-            return 414; // URI Too Long
-        }
-        snprintf(req->h2_uri_buf, sizeof(req->h2_uri_buf), "%s", value);
-        req->uri = req->h2_uri_buf;
-    } 
-    else if (strcmp(name, ":authority") == 0 || strcmp(name, "host") == 0) {
-        if (val_len >= sizeof(req->h2_host_buf)) {
-            return 431; // Request Header Fields Too Large
-        }
-        snprintf(req->h2_host_buf, sizeof(req->h2_host_buf), "%s", value);
-        req->host = req->h2_host_buf;
-    } 
-    else if (strcmp(name, "content-type") == 0) {
-        if (val_len >= sizeof(req->h2_content_type_buf)) {
-            return 431; 
-        }
-        snprintf(req->h2_content_type_buf, sizeof(req->h2_content_type_buf), "%s", value);
-        req->content_type = req->h2_content_type_buf;
-    } 
-    else if (strcmp(name, "cookie") == 0) {
-        size_t current_len = strlen(req->h2_cookie_buf);
-        
-        if (current_len == 0) {
-            if (val_len >= sizeof(req->h2_cookie_buf)) {
-                return 431; // Request Header Fields Too Large
-            }
-            memcpy(req->h2_cookie_buf, value, val_len + 1);
-        } else {
-            // Cek apakah buffer cukup menampung "; " + value + null terminator
-            if (current_len + 2 + val_len >= sizeof(req->h2_cookie_buf)) {
-                return 431; 
-            }
-            
-            // Menggunakan memcpy/strcat manual menghilangkan warning snprintf truncation
-            char *ptr = req->h2_cookie_buf + current_len;
-            ptr[0] = ';';
-            ptr[1] = ' ';
-            memcpy(ptr + 2, value, val_len + 1); // +1 untuk menyalin null-terminator '\0'
-        }
-        req->cookie_data = req->h2_cookie_buf;
-    } 
-    else if (strcmp(name, "content-length") == 0) {
-        req->content_length = strtol(value, NULL, 10);
-    } 
-    else if (strcmp(name, ":method") == 0) {
-        if (val_len >= sizeof(req->method)) {
-            return 431;
-        }
-        snprintf(req->method, sizeof(req->method), "%s", value);
-    } 
-    else if (strcmp(name, ":scheme") == 0) {
-        req->is_tls = (strcmp(value, "https") == 0);
+    uint8_t opcode = payload[0] & 0x0F;
+    bool masked = (payload[1] & 0x80) != 0;
+    uint64_t payload_len = payload[1] & 0x7F;
+    size_t header_offset = 2; 
+
+    if (payload_len == 126) {
+        if (head->length < 4) return;
+        uint16_t ext_len;
+        memcpy(&ext_len, payload + header_offset, 2);
+        payload_len = ntohs(ext_len);
+        header_offset += 2;
+    } else if (payload_len == 127) {
+        if (head->length < 10) return;
+        uint64_t ext_len;
+        memcpy(&ext_len, payload + header_offset, 8);
+        payload_len = be64toh(ext_len);
+        header_offset += 8;
     }
-    else if (strcmp(name, "x-forwarded-for") == 0 && config.trust_proxy) {
-        const char *comma = strchr(value, ',');
-        if (comma) {
-            size_t ip_len = comma - value;
-            if (ip_len < sizeof(req->client_ip)) {
-                memcpy(req->client_ip, value, ip_len);
-                req->client_ip[ip_len] = '\0';
-            }
-        } else {
-            if (val_len >= sizeof(req->client_ip)) {
-                return 431;
-            }
-            snprintf(req->client_ip, sizeof(req->client_ip), "%s", value);
-        }
-    } 
-    else if (strcmp(name, ":protocol") == 0) {
-        if (strcmp(value, "websocket") == 0) {
-            req->is_upgrade = true; 
+
+    uint8_t mask[4] = {0};
+    if (masked) {
+        if (head->length < header_offset + 4) return;
+        memcpy(mask, payload + header_offset, 4);
+        header_offset += 4;
+    }
+
+    if (header_offset + payload_len > head->length || payload_len == __UINT64_MAX__) {
+        return;
+    }
+
+    unsigned char *clear_payload = malloc(payload_len + 1);
+    if (!clear_payload) return;
+
+    memcpy(clear_payload, payload + header_offset, payload_len);
+    clear_payload[payload_len] = '\0';
+
+    if (masked) {
+        for (size_t i = 0; i < payload_len; i++) {
+            clear_payload[i] ^= mask[i % 4];
         }
     }
 
-    return 0;
+    if (opcode == 0x01) { // WS_OP_TEXT
+        ws_system_on_message(session->fd, head->stream_id, (unsigned char *)clear_payload, payload_len);
+    } else if (opcode == 0x08) { // WS_OP_CLOSE
+        // Handle close stream jika diperlukan
+    }
+
+    free(clear_payload);
+
+    http2_frame_send_window_update(session->fd, session->is_tls, head->stream_id, head->length);
+    http2_frame_send_window_update(session->fd, session->is_tls, 0, head->length);
 }
 
-int process_indexed_header(HTTP2Session *session, uint32_t index, RequestHeader *req) {
-    if (index == 0) return 0;
-    const char *name = NULL;
-    const char *value = NULL;
+// Mengakumulasi payload data HTTP normal ke dalam buffer stream
+bool append_stream_body(HTTP2Session *session, HTTP2Stream *st, HTTP2FrameHeader *head, const unsigned char *payload) {
+    pthread_mutex_lock(&session->streams_lock);
 
-    if (hpack_get_header(session, index, &name, &value)) {
-        return process_literal_header_with_name(name, value, req);
-    } 
-    return 0;
+    RequestHeader *req = &st->http1_compat;
+    size_t new_size = req->body_length + head->length;
+    
+    if (new_size < req->body_length) {
+        pthread_mutex_unlock(&session->streams_lock);
+        return false; // Integer overflow guard
+    }
+
+    unsigned char *temp_body = realloc(req->body_data, new_size + 1);
+    if (!temp_body) {
+        pthread_mutex_unlock(&session->streams_lock); 
+        write_log_error("[H2-ERROR] Realloc failed for Stream ID %d", head->stream_id);
+        return false; 
+    }
+    req->body_data = temp_body;
+
+    memcpy((char*)req->body_data + req->body_length, payload, head->length);
+    req->body_length = new_size;
+    ((char*)req->body_data)[req->body_length] = '\0';
+
+    pthread_mutex_unlock(&session->streams_lock);
+    return true;
+}
+
+// Menangani penyelesaian stream saat flag END_STREAM diterima
+void handle_stream_end(HTTP2Session *session, HTTP2Stream *st) {
+    pthread_mutex_lock(&session->streams_lock);
+    st->http1_compat.content_length = (int)st->http1_compat.body_length; 
+    pthread_mutex_unlock(&session->streams_lock);
+
+    // Menyeberang ke Backend / Routing Bridge
+    http2_router_bridge(session, st);
+
+    pthread_mutex_lock(&session->streams_lock);
+    st->state = 4; // Closed state
+    pthread_mutex_unlock(&session->streams_lock);
 }
