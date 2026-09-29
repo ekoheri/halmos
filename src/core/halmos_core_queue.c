@@ -12,62 +12,35 @@
 #include <sys/time.h>
 #include <sys/resource.h>
 #include <sys/sysinfo.h> 
-#include <signal.h>
 
 // Pemilik variabel global global_queue
 TaskQueue global_queue;
 
-// Pointer ke array pthread_t (dinamis)
-static pthread_t *worker_threads = NULL; 
-static int active_worker_count = 0;
-
-// === PERBAIKAN: Lock khusus untuk worker_threads[] & active_worker_count ===
-// Dipisah dari q->lock supaya penulisan bookkeeping array thread (yang sekarang
-// terjadi DI LUAR q->lock, lihat queue_push) tidak balapan antar pemanggil,
-// tanpa ikut menahan lock hot-path yang dipakai tiap push/pop task.
-static pthread_mutex_t worker_registry_lock = PTHREAD_MUTEX_INITIALIZER;
-
 static void init_queue(TaskQueue *q, int min_limit, int max_limit, int max_queue_size);
+static int spawn_detached_worker(pthread_t *out_tid, void *(*routine)(void *), void *arg);
 static int get_adaptive_timeout(TaskQueue *q);
 
-static void sigusr1_handler(int sig) {
-    (void)sig; // Mencegah warning unused parameter
-}
-
-void queue_thread_worker_start(void) {
-    struct sigaction sa;
-    sa.sa_handler = sigusr1_handler;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = 0; // Tanpa SA_RESTART agar blocking syscall return EINTR
-    sigaction(SIGUSR1, &sa, NULL);
-    
+void core_queue_thread_worker_start(void) {
     // Inisialisasi struct antrean global
     init_queue(&global_queue, g_worker_min, g_worker_max, g_queue_capacity);
 
-    // Alokasikan memori sebesar g_worker_min dari modul adaptive
-    active_worker_count = g_worker_min;
+    int initial_workers = g_worker_min;
     
-    worker_threads = calloc(g_worker_max, sizeof(pthread_t)); 
-    if (!worker_threads) {
-        write_log_error("[FATAL] Failed to allocate memory for worker threads array.");
-        exit(EXIT_FAILURE);
-    }
-
-    // Buat worker thread sebanyak g_worker_max
-    for (int i = 0; i < active_worker_count; i++) {
-        if (pthread_create(&worker_threads[i], NULL, core_thread_pool_worker, &global_queue) != 0) {
-            write_log_error("[ERR] Failed to create worker thread %d", i);
+    // Buat worker thread sejumlah g_worker_min dengan status DETACHED
+    for (int i = 0; i < initial_workers; i++) {
+        pthread_t tid;
+        if (spawn_detached_worker(&tid, core_thread_pool_worker, &global_queue) != 0) {
+            write_log_error("[ERR] Failed to create initial worker thread %d", i);
         }
     }
     
-    write_log("[QUEUE] Thread pool started dynamically with %d workers.", active_worker_count);
+    write_log("[QUEUE] Thread pool started dynamically with %d workers (DETACHED mode).", initial_workers);
 }
 
 /********************************************************************
  * queue_push()
- * === MODIFIKASI: Menerima halmos_event_t sebagai input ===
  ********************************************************************/
-int queue_push(TaskQueue *q, halmos_event_t event_item) { 
+int core_queue_push(TaskQueue *q, halmos_event_t event_item) { 
     pthread_mutex_lock(&q->lock);
     
     // 1. Safety Check: Kapasitas Parkir
@@ -78,14 +51,13 @@ int queue_push(TaskQueue *q, halmos_event_t event_item) {
         return -1; 
     }
 
-    // 2. Alokasi Task (Siapkan Nota Pesanan)
+    // 2. Alokasi Task
     Task *new_task = malloc(sizeof(Task));
     if (!new_task) {
         pthread_mutex_unlock(&q->lock);
         return -2; 
     }
 
-    // === MODIFIKASI: Assign struct halmos_event_t ===
     new_task->event = event_item;
     gettimeofday(&new_task->arrival_time, NULL);
     new_task->next = NULL;
@@ -99,18 +71,16 @@ int queue_push(TaskQueue *q, halmos_event_t event_item) {
     }
     q->count++;
 
-    // 4. LOGIKA UPSCALING "SMART & ANTISIPATIF"
-    // === PERBAIKAN: pthread_create() TIDAK LAGI dipanggil di dalam q->lock ===
-    // Sebelumnya, syscall mahal ini dijalankan sambil memegang lock yang sama
-    // dipakai oleh queue_push() & queue_pop() di semua thread -> jadi bottleneck
-    // tunggal saat concurrency tinggi (event loop & semua worker ikut ter-block).
-    //
-    // Strategi: "reserve" slot total_workers DI DALAM lock (murah, atomic secara
-    // logis terhadap thread lain), lalu pthread_create() dipanggil SETELAH lock
-    // dilepas. scaling_in_progress mencegah beberapa push berturut-turut memicu
-    // spawn ganda untuk lonjakan beban yang sama.
+    // 4. LOGIKA UPSCALING
+    /*
+    Untuk uji coba misalkan menggunakan :
+      wrk -t8 -c1500 -d30s https://localhost:8080/index.html
+      queue_threshold = gunakan 5% saja (0.05)
+      tetapi kalau di server production,queue_threshold buat saja 50% (0.5) ya
+    */
+    //int queue_threshold = q->max_queue_limit * 0.05;//ini untuk uji saja
+    int queue_threshold = q->max_queue_limit * 0.5; // ini di server production
 
-    int queue_threshold = q->max_queue_limit * 0.3; // Ambang batas 30%
     int spawn_count = 0;
 
     if (q->count > queue_threshold 
@@ -120,13 +90,11 @@ int queue_push(TaskQueue *q, halmos_event_t event_item) {
         int available_slots = q->max_threads_limit - q->total_workers;
         spawn_count = (available_slots < 4) ? available_slots : 4;
 
-        // Reserve dulu slotnya supaya push lain yang datang bersamaan
-        // tidak ikut memicu spawn untuk beban yang sama.
         q->total_workers += spawn_count;
         q->scaling_in_progress = 1;
     }
 
-    // 5. Bangunkan koki yang lagi tidur
+    // 5. Bangunkan thread
     pthread_cond_signal(&q->cond);
     pthread_mutex_unlock(&q->lock);
 
@@ -136,24 +104,14 @@ int queue_push(TaskQueue *q, halmos_event_t event_item) {
 
         for (int i = 0; i < spawn_count; i++) {
             pthread_t tid;
-            if (pthread_create(&tid, NULL, core_thread_pool_worker, q) == 0) {
+            if (spawn_detached_worker(&tid, core_thread_pool_worker, q) == 0) {
                 actually_spawned++;
-
-                // PERBAIKAN: worker_threads[] diakses dari banyak thread pemanggil
-                // queue_push() secara paralel -> perlu lock terpisah (ringan,
-                // bukan q->lock) supaya penulisan index tidak saling tabrakan.
-                pthread_mutex_lock(&worker_registry_lock);
-                if (worker_threads && active_worker_count < g_worker_max) {
-                    worker_threads[active_worker_count++] = tid;
-                }
-                pthread_mutex_unlock(&worker_registry_lock);
             } else {
                 write_log_error("[SCALING] pthread_create failed while upscaling");
             }
         }
 
-        // Jika ada yang gagal dibuat, kembalikan reservasi yang tidak terpakai
-        // supaya total_workers tetap merepresentasikan jumlah thread yang benar-benar hidup.
+        // Jika ada pthread_create yang gagal, kembalikan reservasi slotnya
         if (actually_spawned < spawn_count) {
             pthread_mutex_lock(&q->lock);
             q->total_workers -= (spawn_count - actually_spawned);
@@ -173,9 +131,8 @@ int queue_push(TaskQueue *q, halmos_event_t event_item) {
 
 /********************************************************************
  * queue_pop()
- * === MODIFIKASI: Mengekstrak halmos_event_t ke out_event ===
  ********************************************************************/
-int queue_pop(TaskQueue *q, halmos_event_t *out_event, struct timeval *arrival) {
+int core_queue_pop(TaskQueue *q, halmos_event_t *out_event, struct timeval *arrival) {
     pthread_mutex_lock(&q->lock);
     
     struct timespec ts;
@@ -184,6 +141,7 @@ int queue_pop(TaskQueue *q, halmos_event_t *out_event, struct timeval *arrival) 
     while (q->head == NULL) {
         if (!q->is_running) {
             q->total_workers--;
+            pthread_cond_signal(&q->exit_cond); // Beritahu bahwa thread ini keluar
             pthread_mutex_unlock(&q->lock);
             return -3;
         }
@@ -202,28 +160,31 @@ int queue_pop(TaskQueue *q, halmos_event_t *out_event, struct timeval *arrival) 
         
         if (!q->is_running) {
             q->total_workers--;
+            pthread_cond_signal(&q->exit_cond);
             pthread_mutex_unlock(&q->lock);
             return -3;
         }
 
-        // Logika Downscaling
+        // === LOGIKA DOWNSCALING (DETACHED WORKER) ===
         if (rc == ETIMEDOUT && q->head == NULL && q->total_workers > q->min_threads_limit) {
             q->total_workers--;
             write_log("[SCALING] Load subsided. Downscaling pool to %d workers", q->total_workers);
+            pthread_cond_signal(&q->exit_cond); // Beritahu bahwa thread ini keluar
             pthread_mutex_unlock(&q->lock);
-            return -3; 
+            
+            return -3; // Thread langsung exit secara mandiri, OS mendaur ulang memorinya karena detached
         }
     }
 
     if (!q->is_running) {
         q->total_workers--;
+        pthread_cond_signal(&q->exit_cond);
         pthread_mutex_unlock(&q->lock);
         return -3;
     }
 
     Task *tmp = q->head;
     
-    // === MODIFIKASI: Salin struct halmos_event_t ke out_event dan return FD ===
     if (out_event) {
         *out_event = tmp->event;
     }
@@ -234,7 +195,6 @@ int queue_pop(TaskQueue *q, halmos_event_t *out_event, struct timeval *arrival) 
     if (q->head == NULL) q->tail = NULL;
     q->count--;
 
-    //q->active_workers++;
     atomic_fetch_add(&q->active_workers, 1); 
     
     pthread_mutex_unlock(&q->lock);
@@ -245,34 +205,20 @@ int queue_pop(TaskQueue *q, halmos_event_t *out_event, struct timeval *arrival) 
 
 /********************************************************************
  * queue_thread_worker_stop()
- * Cleanup sisa task dan matikan worker threads
+ * Shutdown bersih menggunakan exit_cond tanpa pthread_join/SIGUSR1
  ********************************************************************/
-void queue_thread_worker_stop(void) {
+void core_queue_thread_worker_stop(void) {
     pthread_mutex_lock(&global_queue.lock);
     global_queue.is_running = 0; 
-    pthread_cond_broadcast(&global_queue.cond); 
+    pthread_cond_broadcast(&global_queue.cond); // Bangunkan semua thread yang tidur
+
+    // Tunggu sampai seluruh worker thread benar-benar keluar (total_workers == 0)
+    while (global_queue.total_workers > 0) {
+        pthread_cond_wait(&global_queue.exit_cond, &global_queue.lock);
+    }
     pthread_mutex_unlock(&global_queue.lock);
 
-    // Kunci registry saat shutdown untuk memastikan tidak ada penulisan
-    // worker_threads[] yang masih berlangsung dari queue_push() sisa upscaling.
-    pthread_mutex_lock(&worker_registry_lock);
-    pthread_t *threads_snapshot = worker_threads;
-    int count_snapshot = active_worker_count;
-    worker_threads = NULL; // Cegah penulisan baru setelah ini
-    pthread_mutex_unlock(&worker_registry_lock);
-
-    if (threads_snapshot != NULL) {
-        for (int i = 0; i < count_snapshot; i++) {
-            pthread_kill(threads_snapshot[i], SIGUSR1);
-        }
-
-        for (int i = 0; i < count_snapshot; i++) {
-            pthread_join(threads_snapshot[i], NULL);
-        }
-
-        free(threads_snapshot);
-    }
-
+    // Bersihkan sisa task di dalam antrean
     pthread_mutex_lock(&global_queue.lock);
     Task *curr = global_queue.head;
     global_queue.head = global_queue.tail = NULL;
@@ -282,9 +228,8 @@ void queue_thread_worker_stop(void) {
     while (curr) {
         Task *tmp = curr;
         curr = curr->next;
-        // === MODIFIKASI: Akses client_sock lewat tmp->event.fd ===
         if (tmp->event.fd >= 0) {
-            // === MODIFIKASI: Deaktivasi connection state sebelum close ===
+            // Menggunakan core_conn_deactivate sesuai nama asli modul connection
             core_conn_t_deactivate(tmp->event.fd);
             close(tmp->event.fd);
         }
@@ -293,10 +238,12 @@ void queue_thread_worker_stop(void) {
 
     pthread_mutex_destroy(&global_queue.lock);
     pthread_cond_destroy(&global_queue.cond);
+    pthread_cond_destroy(&global_queue.exit_cond);
 
     write_log("[QUEUE] Worker thread pool shutdown instantly & cleanly.");
 }
 
+/* Helper / Private Function*/
 void init_queue(TaskQueue *q, int min_limit, int max_limit, int max_queue_size) {
     q->head = q->tail = NULL;
     q->count = 0;
@@ -306,11 +253,22 @@ void init_queue(TaskQueue *q, int min_limit, int max_limit, int max_queue_size) 
     q->min_threads_limit = min_limit;
     q->max_threads_limit = max_limit;
     q->scaling_in_progress = 0;
-
     q->is_running = 1; 
     
     pthread_mutex_init(&q->lock, NULL);
     pthread_cond_init(&q->cond, NULL);
+    pthread_cond_init(&q->exit_cond, NULL);
+}
+
+// Helper internal untuk membuat thread dengan atribut DETACHED secara aman
+int spawn_detached_worker(pthread_t *out_tid, void *(*routine)(void *), void *arg) {
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    
+    int ret = pthread_create(out_tid, &attr, routine, arg);
+    pthread_attr_destroy(&attr);
+    return ret;
 }
 
 int get_adaptive_timeout(TaskQueue *q) {

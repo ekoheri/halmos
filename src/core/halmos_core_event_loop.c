@@ -41,7 +41,7 @@ int sock_server;
 volatile sig_atomic_t server_running = 1;
  
 // PERBAIKAN: Mengubah void menjadi int
-int event_loop_start(void) {
+int core_event_loop_start(void) {
     server_running = 1;
  
     events = malloc(sizeof(struct epoll_event) * g_event_batch_size);
@@ -94,7 +94,7 @@ int event_loop_start(void) {
     return 0; // PERBAIKAN: Return 0 jika sukses
 }
  
-void event_loop_run() {
+void core_event_loop_run() {
     while (server_running) {
         int num_fds = epoll_wait(epoll_fd, events, g_event_batch_size, 100); // awalnya -1
         if (num_fds < 0) {
@@ -175,7 +175,7 @@ void event_loop_run() {
                         }
                         // Kurangi counter & jalankan cleanup terisolasi agar slot connection kembali reset
                         atomic_fetch_sub(&global_telemetry.active_connections, 1);
-                        event_loop_cleanup_connection(sock_client);
+                        core_event_loop_cleanup_connection(sock_client);
                     }
                 }
             } else if(current_fd == bridge_fd) {
@@ -187,14 +187,14 @@ void event_loop_run() {
                 // 1. CEK ERROR / DISCONNECT DULU
                 if (ev & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) {
                     atomic_fetch_sub(&global_telemetry.active_connections, 1);
-                    event_loop_cleanup_connection(client_fd);
+                    core_event_loop_cleanup_connection(client_fd);
                     continue;
                 }
  
                 // 2. CEK I/O EVENT (BACA ATAU TULIS)
                 if (ev & (EPOLLIN | EPOLLOUT)) {
                     if (!server_running) {
-                        event_loop_cleanup_connection(client_fd);
+                        core_event_loop_cleanup_connection(client_fd);
                         continue;
                     }
  
@@ -210,7 +210,7 @@ void event_loop_run() {
                         .events = ev // Pastikan halmos_event_t memiliki field ini, atau tangani di worker
                     };
  
-                    int status = queue_push(&global_queue, event_item);
+                    int status = core_queue_push(&global_queue, event_item);
  
                     if (status < 0) {
                         if (status == -1) {
@@ -218,7 +218,7 @@ void event_loop_run() {
                             send(client_fd, res, strlen(res), 0);
                         }
                         atomic_fetch_sub(&global_telemetry.active_connections, 1);
-                        event_loop_cleanup_connection(client_fd);
+                        core_event_loop_cleanup_connection(client_fd);
                     }
                 }
             }
@@ -250,7 +250,7 @@ void event_loop_run() {
     write_log("[CORE] Server stopped. Resource cleanup complete."); 
 }
  
-void event_loop_stop(void) {
+void core_event_loop_stop(void) {
     //(void)sig;
     server_running = 0;
  
@@ -261,7 +261,7 @@ void event_loop_stop(void) {
     }
  
     // 2. Bangunkan thread pool worker secara paksa 
-    // agar mereka tidak menunggu timeout timedwait di queue_pop
+    // agar mereka tidak menunggu timeout timedwait di core_queue_pop
     pthread_mutex_lock(&global_queue.lock);
     global_queue.is_running = 0;
     pthread_cond_broadcast(&global_queue.cond);
@@ -274,7 +274,7 @@ void event_loop_stop(void) {
  * bahwa meja ini sudah selesai dibersihkan dan siap menerima pesanan lagi.
  */
  
-void event_loop_rearm_epoll_ex(int fd, uint32_t events_mask) {
+void core_event_loop_rearm_epoll_ex(int fd, uint32_t events_mask) {
     struct epoll_event ev;
     // Selalu sertakan EPOLLET (Edge Triggered) dan EPOLLONESHOT
     ev.events = events_mask | EPOLLET | EPOLLONESHOT;
@@ -288,11 +288,11 @@ void event_loop_rearm_epoll_ex(int fd, uint32_t events_mask) {
 } 
 
 // Rearm standar untuk membaca request HTTP berikutnya
-void event_loop_rearm_epoll(int fd) {
-    event_loop_rearm_epoll_ex(fd, EPOLLIN); // PERBAIKAN: Hanya EPOLLIN saat idle/reading!
+void core_event_loop_rearm_epoll(int fd) {
+    core_event_loop_rearm_epoll_ex(fd, EPOLLIN); // PERBAIKAN: Hanya EPOLLIN saat idle/reading!
 }
 
-void event_loop_cleanup_connection(int sock_client) {
+void core_event_loop_cleanup_connection(int sock_client) {
     halmos_conn_t *conn = core_conn_t_get(sock_client);
     
     // Hapus dari epoll lebih awal

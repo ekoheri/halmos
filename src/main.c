@@ -30,7 +30,7 @@
 // Handle sinyal dengan aman (Async-Signal Safe)
 static void handle_shutdown_signal(int sig) {
     (void)sig;
-    event_loop_stop(); // Hentikan loop epoll_wait agar keluar dari event_loop_run()
+    core_event_loop_stop(); // Hentikan loop epoll_wait agar keluar dari core_event_loop_run()
 }
 
 void setup_signals(void) {
@@ -159,7 +159,7 @@ int main(int argc, char *argv[]) {
 
     // 4. Inisialisasi Antrean (Dapur) & Thread Pool Dinamis
     // Menggunakan batas antrean dari config
-    queue_thread_worker_start();
+    core_queue_thread_worker_start();
 
     if(config.rate_limit_enabled == true) {
         sec_traffic_start_janitor();    
@@ -168,14 +168,14 @@ int main(int argc, char *argv[]) {
     fcgi_pool_init();
 
     // 5. Inisialisasi Server (Network & Epoll)
-    if (event_loop_start() != 0) {
+    if (core_event_loop_start() != 0) {
         fprintf(stderr, "[FATAL] Failed to start event loop.\n");
         stop_thread_logger();
         return EXIT_FAILURE;
     }
 
     // === TAMBAHKAN INI DI SINI ===
-    // Karena epoll_fd sudah tercipta di dalam event_loop_start(), 
+    // Karena epoll_fd sudah tercipta di dalam core_event_loop_start(), 
     // kita bisa langsung mendaftarkan inotify vhost ke epoll utama.
     // (Asumsikan epoll_fd bisa diakses secara global atau diekspos via getter)
     extern int epoll_fd; // Jika epoll_fd dideklarasikan global di core event loop
@@ -190,7 +190,7 @@ int main(int argc, char *argv[]) {
     */
    
     // 6. RUN! Resepsionis Epoll Utama
-    event_loop_run();
+    core_event_loop_run();
 
     // =======================================================
     // --- GRACEFUL SHUTDOWN CLEANUP SEQUENCE ---
@@ -199,7 +199,7 @@ int main(int argc, char *argv[]) {
     write_log("[CORE] Shutdown signal caught. Cleaning up resources...");
     
     // 2. Stop Worker Thread Pool & Join semua thread
-    queue_thread_worker_stop();
+    core_queue_thread_worker_stop();
     write_log("[CORE] Worker thread pool joined & stopped.");
 
     // Stop Janitor Security Thread
