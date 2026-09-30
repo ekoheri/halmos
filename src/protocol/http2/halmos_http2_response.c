@@ -7,7 +7,9 @@
 #include "halmos_http_multipart.h"
 #include "halmos_http_utils.h"
 #include "halmos_log.h"
+#include "halmos_fcgi.h"           // Untuk fungsi fcgi_pool_conn_release
 
+#include <poll.h>                  // Wajib ada untuk POLLIN dan POLLOUT
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -304,127 +306,159 @@ void http2_response_flush_active_streams(HTTP2Session *session) {
  
     uint32_t active_ids[256];
     int active_count = 0;
+    
+    // Array untuk menandai jenis aktivitas stream (0 = File, 1 = FastCGI)
+    int stream_types[256]; 
  
-    // 1. Kumpulkan stream aktif under lock
+    // 1. Kumpulkan stream aktif under lock (File statis ATAU FastCGI aktif)
     pthread_mutex_lock(&session->streams_lock);
     for (int i = 0; i < HTTP2_STREAM_BUCKETS; i++) {
         HTTP2Stream *curr = session->streams_hash[i];
         while (curr != NULL) {
-            if (curr->is_sending_file && curr->file_fd >= 0 && curr->state != HTTP2_STATE_CLOSED) {
-                if (active_count < 256) {
-                    active_ids[active_count++] = curr->stream_id;
-                }
+            bool has_file = (curr->is_sending_file && curr->file_fd >= 0 && curr->state != HTTP2_STATE_CLOSED);
+            bool has_fcgi = curr->is_fcgi_active;
+
+            if ((has_file || has_fcgi) && active_count < 256) {
+                active_ids[active_count] = curr->stream_id;
+                stream_types[active_count] = has_fcgi ? 1 : 0;
+                active_count++;
             }
             curr = curr->node_next;
         }
     }
     pthread_mutex_unlock(&session->streams_lock);
  
-    // 2. Iterasi stream dan periksa Flow Control Credit
+    // 2. Iterasi stream aktif
     for (int k = 0; k < active_count; k++) {
         uint32_t target_sid = active_ids[k];
-        
-        int file_fd = -1;
-        off_t offset = 0;
-        off_t total_size = 0;
-        int32_t conn_win = 0;
-        int32_t stream_win = 0;
-        bool valid = false;
- 
-        // Ambil snapshot metadata & window credit
-        pthread_mutex_lock(&session->streams_lock);
-        HTTP2Stream *st = http2_stream_find_unlocked(session, target_sid);
-        if (st && st->is_sending_file && st->file_fd >= 0 && st->state != HTTP2_STATE_CLOSED) {
-            file_fd = st->file_fd;
-            offset = st->file_offset;
-            total_size = st->file_size;
-            conn_win = session->out_window_size;
-            stream_win = st->out_window_size;
-            valid = true;
-        }
-        pthread_mutex_unlock(&session->streams_lock);
- 
-        if (!valid || file_fd < 0 || offset >= total_size) continue;
- 
-        // CHECK 1: Apabila connection window atau stream window habis (<= 0), tunda pengiriman!
-        if (conn_win <= 0 || stream_win <= 0) {
-            //fprintf(stderr, "[H2-FLOW-CONTROL] Stalled Stream %u | Conn Window: %d, Stream Window: %d\n", 
-            //        target_sid, conn_win, stream_win);
-            continue; // Skip stream ini sampai client mengirim WINDOW_UPDATE
-        }
- 
-        // Hitung sisa bytes di disk
-        off_t bytes_remaining = total_size - offset;
- 
-        // CHECK 2: Cari nilai terkecil antara MAX_FRAME_SIZE, Conn Window, Stream Window, dan sisa File
-        uint32_t max_allowed = HTTP2_MAX_FRAME_SIZE; 
-        if ((int32_t)max_allowed > conn_win) max_allowed = (uint32_t)conn_win;
-        if ((int32_t)max_allowed > stream_win) max_allowed = (uint32_t)stream_win;
-        if ((off_t)max_allowed > bytes_remaining) max_allowed = (uint32_t)bytes_remaining;
- 
-        if (max_allowed == 0) continue;
- 
-        // Baca disk secara Non-blocking via pread
-        unsigned char buf[HTTP2_MAX_FRAME_SIZE];
-        ssize_t n_read = pread(file_fd, buf, max_allowed, offset);
- 
-        if (n_read <= 0) {
+        int s_type = stream_types[k];
+
+        if (s_type == 1) {
+            // --- PENANGANAN STREAM FASTCGI ---
             pthread_mutex_lock(&session->streams_lock);
-            st = http2_stream_find_unlocked(session, target_sid);
-            if (st) {
-                if (st->file_fd >= 0) close(st->file_fd);
-                st->file_fd = -1;
-                st->is_sending_file = false;
-                st->state = HTTP2_STATE_CLOSED;
+            HTTP2Stream *st = http2_stream_find_unlocked(session, target_sid);
+            if (st && st->is_fcgi_active) {
+                int fpm_fd = st->fpm_fd;
+                int fcgi_state = st->fcgi_state;
+                pthread_mutex_unlock(&session->streams_lock);
+
+                // Gunakan poll lokal dengan timeout 0 untuk mengecek event nyata pada fpm_fd
+                struct pollfd pfd;
+                pfd.fd = fpm_fd;
+                pfd.events = POLLIN;
+                if (fcgi_state == 0 || fcgi_state == 1 || fcgi_state == 2) {
+                    pfd.events |= POLLOUT;
+                }
+                pfd.revents = 0;
+
+                // Cek status socket secara non-blocking (timeout = 0 ms)
+                int ret = poll(&pfd, 1, 0);
+                if (ret > 0 && pfd.revents != 0) {
+                    // Jalankan FSM step hanya jika benar-benar ada event I/O pada socket FPM
+                    int status = fcgi_session_http2_step(session, st, pfd.revents);
+
+                    if (status == FCGI_SES_STATUS_COMPLETED || status == FCGI_SES_STATUS_ERROR) {
+                        pthread_mutex_lock(&session->streams_lock);
+                        if (st->fpm_fd >= 0) {
+                            fcgi_pool_conn_release(st->fpm_fd);
+                            st->fpm_fd = -1;
+                        }
+                        st->is_fcgi_active = false;
+                        pthread_mutex_unlock(&session->streams_lock);
+                    }
+                }
+            } else {
+                pthread_mutex_unlock(&session->streams_lock);
+            }
+        } else {
+            // --- PENANGANAN STREAM FILE STATIS ---
+            int file_fd = -1;
+            off_t offset = 0;
+            off_t total_size = 0;
+            int32_t conn_win = 0;
+            int32_t stream_win = 0;
+            bool valid = false;
+     
+            pthread_mutex_lock(&session->streams_lock);
+            HTTP2Stream *st = http2_stream_find_unlocked(session, target_sid);
+            if (st && st->is_sending_file && st->file_fd >= 0 && st->state != HTTP2_STATE_CLOSED) {
+                file_fd = st->file_fd;
+                offset = st->file_offset;
+                total_size = st->file_size;
+                conn_win = session->out_window_size;
+                stream_win = st->out_window_size;
+                valid = true;
             }
             pthread_mutex_unlock(&session->streams_lock);
-            continue;
-        }
- 
-        uint8_t flags = 0x00;
-        if ((offset + n_read) >= total_size) {
-            flags = 0x01; // END_STREAM
-        }
- 
-        // Kirim frame DATA ke socket
-        http2_frame_send(session->fd, session->is_tls, 0x00, flags, target_sid, buf, (uint32_t)n_read);
- 
-        // CHECK 3: Potong (deduct) kredit window sejumlah byte payload yang dikirim (n_read)
-        pthread_mutex_lock(&session->streams_lock);
-        session->out_window_size -= (int32_t)n_read;
-        
-        st = http2_stream_find_unlocked(session, target_sid);
-        if (st) {
-            st->out_window_size -= (int32_t)n_read;
-            st->file_offset += n_read;
-            if (st->file_offset >= st->file_size) {
-                if (st->file_fd >= 0) close(st->file_fd);
-                st->file_fd = -1;
-                st->is_sending_file = false;
-                st->state = HTTP2_STATE_CLOSED;
+     
+            if (!valid || file_fd < 0 || offset >= total_size) continue;
+            if (conn_win <= 0 || stream_win <= 0) continue;
+     
+            off_t bytes_remaining = total_size - offset;
+            uint32_t max_allowed = HTTP2_MAX_FRAME_SIZE; 
+            if ((int32_t)max_allowed > conn_win) max_allowed = (uint32_t)conn_win;
+            if ((int32_t)max_allowed > stream_win) max_allowed = (uint32_t)stream_win;
+            if ((off_t)max_allowed > bytes_remaining) max_allowed = (uint32_t)bytes_remaining;
+     
+            if (max_allowed == 0) continue;
+     
+            unsigned char buf[HTTP2_MAX_FRAME_SIZE];
+            ssize_t n_read = pread(file_fd, buf, max_allowed, offset);
+     
+            if (n_read <= 0) {
+                pthread_mutex_lock(&session->streams_lock);
+                st = http2_stream_find_unlocked(session, target_sid);
+                if (st) {
+                    if (st->file_fd >= 0) close(st->file_fd);
+                    st->file_fd = -1;
+                    st->is_sending_file = false;
+                    st->state = HTTP2_STATE_CLOSED;
+                }
+                pthread_mutex_unlock(&session->streams_lock);
+                continue;
             }
+     
+            uint8_t flags = (offset + n_read >= total_size) ? 0x01 : 0x00;
+            http2_frame_send(session->fd, session->is_tls, 0x00, flags, target_sid, buf, (uint32_t)n_read);
+     
+            pthread_mutex_lock(&session->streams_lock);
+            session->out_window_size -= (int32_t)n_read;
+            st = http2_stream_find_unlocked(session, target_sid);
+            if (st) {
+                st->out_window_size -= (int32_t)n_read;
+                st->file_offset += n_read;
+                if (st->file_offset >= st->file_size) {
+                    if (st->file_fd >= 0) close(st->file_fd);
+                    st->file_fd = -1;
+                    st->is_sending_file = false;
+                    st->state = HTTP2_STATE_CLOSED;
+                }
+            }
+            pthread_mutex_unlock(&session->streams_lock);
         }
-        pthread_mutex_unlock(&session->streams_lock);
     }
 }
 
 bool http2_response_has_active_streams(HTTP2Session *session) {
     if (!session) return false;
-    bool has_file = false;
+    bool has_active = false;
  
     pthread_mutex_lock(&session->streams_lock);
     for (int i = 0; i < HTTP2_STREAM_BUCKETS; i++) {
         HTTP2Stream *curr = session->streams_hash[i];
         while (curr != NULL) {
-            if (curr->is_sending_file && curr->file_fd >= 0 && curr->state != HTTP2_STATE_CLOSED) {
-                has_file = true;
+            bool has_file = (curr->is_sending_file && curr->file_fd >= 0 && curr->state != HTTP2_STATE_CLOSED);
+            bool has_fcgi = curr->is_fcgi_active;
+
+            if (has_file || has_fcgi) {
+                has_active = true;
                 break;
             }
             curr = curr->node_next;
         }
-        if (has_file) break;
+        if (has_active) break;
     }
     pthread_mutex_unlock(&session->streams_lock);
     
-    return has_file;
+    return has_active;
 }

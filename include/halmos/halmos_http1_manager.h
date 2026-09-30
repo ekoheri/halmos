@@ -5,6 +5,7 @@
 #include <sys/types.h>
 #include "halmos_core_conn_table.h"
 #include "halmos_http1_header.h"
+#include "halmos_fcgi_session.h"
 
 // Enumerasi state sesi HTTP/1 untuk mendukung arsitektur non-blocking / event-driven
 typedef enum {
@@ -13,6 +14,7 @@ typedef enum {
     STATE_HANDLE_REQUEST,
     STATE_SEND_STATIC_FILE,
     STATE_HANDLE_FASTCGI,
+    STATE_FCGI_PROCESSING,
     STATE_DONE
 } HTTP1State;
 
@@ -37,6 +39,8 @@ typedef struct {
     bool is_header_sent;        // Flag apakah header sudah 100% terkirim
 
     int fcgi_sock;
+
+    HalmosFCGISession *fcgi_sess;
 } HTTP1Session;
 
 void http1_session_destroy(void *session);
