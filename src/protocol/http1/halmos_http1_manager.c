@@ -290,7 +290,7 @@ int http1_manager_routing_bridge(halmos_conn_t *conn, HTTP1Session *session) {
     else if (has_extension(session->req.uri, session->req.path_info, config.python.ext)) backend_type = 2;
 
     if (backend_type != -1) {
-        fcgi_api_request_stream(&session->req, sock_client, backend_type, session->req.body_data, session->req.content_length);
+        fcgi_api_request_http1(&session->req, sock_client, backend_type, session->req.body_data, session->req.content_length);
         
         write_log_access("HTTP/1.1", session->req.client_ip, session->req.method, session->req.uri, 200, session->req.content_length);
 

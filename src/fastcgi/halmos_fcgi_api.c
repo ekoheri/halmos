@@ -15,6 +15,8 @@
 #define GATHER_BUF_SIZE 65536
 #endif
 
+static ssize_t recv_exact(int fd, void *buf, size_t len);
+
 // Fungsi bantu untuk mengubah string IP menjadi angka unik
 // untuk keperluan ip_hash load balancing
 static unsigned int hash_ip(const char *ip);
@@ -29,7 +31,7 @@ static unsigned int hash_ip(const char *ip);
  * Fungsi fasad utama yang mengatur koordinasi antar modul FCGI.
  * Sekarang mendukung Hierarchical Backend (VHost Override).
  */
-int fcgi_api_request_stream(RequestHeader *req, int sock_client, int backend_type, void *post_data, size_t content_length) {
+int fcgi_api_request_http1(RequestHeader *req, int sock_client, int backend_type, void *post_data, size_t content_length) {
     // 1. Siapkan pointer
     UpstreamGroup *live_group;   // Data dinamis (next_idx) di fcgi_pool
     BackendGroup  *cfg_group;    // Data statis (ips, ports) dari config/vhost
@@ -87,27 +89,6 @@ int fcgi_api_request_stream(RequestHeader *req, int sock_client, int backend_typ
 
     // 3. SEND & RECEIVE
     return fcgi_proto_send_and_receive(fpm_sock, sock_client, req, request_id, gather_buf, g_ptr, post_data, content_length);
-}
-
-// =========================================================================
-// HELPER: Membaca pas N byte dari socket TCP sampai tuntas.
-// Mencegah data terpotong (truncated) akibat perilaku paket TCP.
-// =========================================================================
-static ssize_t recv_exact(int fd, void *buf, size_t len) {
-    size_t total_read = 0;
-    char *ptr = (char *)buf;
-
-    while (total_read < len) {
-        ssize_t n = recv(fd, ptr + total_read, len - total_read, 0);
-        if (n < 0) {
-            return -1; // Socket error
-        }
-        if (n == 0) {
-            break; // Socket ditutup oleh backend
-        }
-        total_read += n;
-    }
-    return (ssize_t)total_read;
 }
 
 /**
@@ -248,6 +229,27 @@ ssize_t fcgi_api_request_http2(RequestHeader *req, int backend_type, void *post_
     close(fpm_sock);
     *out_buf = res;
     return (ssize_t)total_payload;
+}
+
+// =========================================================================
+// HELPER: Membaca pas N byte dari socket TCP sampai tuntas.
+// Mencegah data terpotong (truncated) akibat perilaku paket TCP.
+// =========================================================================
+ssize_t recv_exact(int fd, void *buf, size_t len) {
+    size_t total_read = 0;
+    char *ptr = (char *)buf;
+
+    while (total_read < len) {
+        ssize_t n = recv(fd, ptr + total_read, len - total_read, 0);
+        if (n < 0) {
+            return -1; // Socket error
+        }
+        if (n == 0) {
+            break; // Socket ditutup oleh backend
+        }
+        total_read += n;
+    }
+    return (ssize_t)total_read;
 }
 
 unsigned int hash_ip(const char *ip) {

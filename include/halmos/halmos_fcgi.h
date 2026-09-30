@@ -130,24 +130,17 @@ int fcgi_proto_begin_request(const char *target, int port, unsigned char *gather
 
 void fcgi_proto_build_params(RequestHeader *req, int sock_client, size_t content_length, unsigned char *gather_buf, int *g_ptr, int request_id);
 
-int fcgi_proto_send_and_receive(int fpm_sock, int sock_client, RequestHeader *req, int request_id, unsigned char *gather_buf, int g_ptr, void *post_data, size_t content_length);
-
 // Mengirim data STDIN (Body POST)
 void fcgi_proto_send_stdin(int sockfd, int request_id, const void *data, int data_len);
 
-/* * ==========================================
- * 3. I/O & STREAMING (halmos_fcgi_io.c)
- * ==========================================
- */
-// Fungsi berat yang melakukan Zero-Copy Splice
-int  fcgi_io_splice_response(int fpm_fd, int sock_client, RequestHeader *req);
+int fcgi_proto_send_and_receive(int fpm_sock, int sock_client, RequestHeader *req, int request_id, unsigned char *gather_buf, int g_ptr, void *post_data, size_t content_length);
 
 /* * ==========================================
- * 4. PUBLIC API (halmos_fcgi.c)
+ * 3. PUBLIC API (halmos_fcgi.c)
  * ==========================================
  */
 // Fungsi fasad yang dipanggil oleh manager http
-int fcgi_api_request_stream(RequestHeader *req, int sock_client, int backend_type, void *post_data, size_t content_length);
+int fcgi_api_request_http1(RequestHeader *req, int sock_client, int backend_type, void *post_data, size_t content_length);
 
 ssize_t fcgi_api_request_http2(RequestHeader *req, int backend_type, void *post_data, size_t content_length, char **out_buf);
 #endif
