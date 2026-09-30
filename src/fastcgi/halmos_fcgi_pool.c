@@ -17,6 +17,7 @@
 #include <errno.h>
 #include <poll.h> // Header untuk fungsi poll()
 #include <stdatomic.h> // untuk operasi lock-free atomic_int
+#include <fcntl.h> // Diperlukan untuk fcntl, O_NONBLOCK
 
 // Instance global pool
 HalmosFCGI_Pool fcgi_pool;
@@ -197,27 +198,51 @@ FUNGSI HELPER
 
 int create_backend_socket(const char *target, int port, bool is_unix) {
     int sock = -1;
+    
     if (is_unix) {
         sock = socket(AF_UNIX, SOCK_STREAM, 0);
         if (sock >= 0) {
+            // 1. Ubah socket Unix Domain menjadi non-blocking
+            int flags = fcntl(sock, F_GETFL, 0);
+            if (flags < 0 || fcntl(sock, F_SETFL, flags | O_NONBLOCK) < 0) {
+                close(sock);
+                return -1;
+            }
+
             struct sockaddr_un addr = { .sun_family = AF_UNIX };
             strncpy(addr.sun_path, target, sizeof(addr.sun_path) - 1);
-            if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-                close(sock); sock = -1;
+            
+            // 2. Panggil connect() non-blocking
+            int res = connect(sock, (struct sockaddr *)&addr, sizeof(addr));
+            if (res < 0 && errno != EINPROGRESS) {
+                close(sock); 
+                sock = -1;
             }
         }
     } else {
         sock = socket(AF_INET, SOCK_STREAM, 0);
         if (sock >= 0) {
-            struct timeval timeout = {2, 0};
-            setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+            // Hapus SO_SNDTIMEO karena operasi connect sekarang ditangani oleh FSM/Epoll timeout
+            
+            // 1. Ubah socket TCP menjadi non-blocking
+            int flags = fcntl(sock, F_GETFL, 0);
+            if (flags < 0 || fcntl(sock, F_SETFL, flags | O_NONBLOCK) < 0) {
+                close(sock);
+                return -1;
+            }
+
             struct sockaddr_in addr = { .sin_family = AF_INET, .sin_port = htons(port) };
             inet_pton(AF_INET, target, &addr.sin_addr);
-            if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-                close(sock); sock = -1;
+            
+            // 2. Panggil connect() non-blocking
+            int res = connect(sock, (struct sockaddr *)&addr, sizeof(addr));
+            if (res < 0 && errno != EINPROGRESS) {
+                close(sock); 
+                sock = -1;
             }
         }
     }
+    
     return sock;
 }
 
@@ -252,4 +277,18 @@ int get_backend_index(const char *target, int port) {
     }
 
     return 0; // Fallback ke PHP
+}
+
+// Fungsi bantu untuk mengubah string IP menjadi angka unik
+// untuk keperluan ip_hash load balancing
+
+unsigned int hash_ip(const char *ip) {
+    unsigned int hash = 5381;
+    int c;
+
+    // Geser dan tambah (shift and add)
+    while ((c = *ip++)) {
+        hash = ((hash << 5) + hash) + c; /* hash * 33 + c */
+    }
+    return hash;
 }

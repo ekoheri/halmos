@@ -7,6 +7,7 @@
 #include "halmos_ws_system.h"
 #include "halmos_http_utils.h"
 #include "halmos_fcgi.h"
+#include "halmos_fcgi_session.h"
 #include "halmos_http_multipart.h"
 
 // Pustaka Standar C
@@ -76,32 +77,48 @@ void route_websocket_upgrade(HTTP2Session *session, HTTP2Stream *stream, Request
 }
 
 void route_fastcgi_backend(HTTP2Session *session, HTTP2Stream *stream, RequestHeader *req, int backend_type) {
-    char *backend_data = NULL;
-    ssize_t data_len = fcgi_api_request_http2(req, backend_type, req->body_data, req->content_length, &backend_data);
-    size_t body_len = 0;
-
-    if (data_len > 0 && backend_data) {
-        char *divider = strstr(backend_data, "\r\n\r\n");
-        if (divider) {
-            *divider = '\0';
-            char *raw_headers = backend_data;
-            char *body_data = divider + 4;
-            body_len = data_len - (body_data - backend_data);
-
-            http2_response_send_complex_header(session, stream, raw_headers, 0x04);
-            http2_response_send_data(session, stream, (unsigned char*)body_data, body_len, true);
-        } else {
-            http2_response_send_complex_header(session, stream, backend_data, 0x05);
-            http2_response_send_data(session, stream, NULL, 0, true);
-        }
-        write_log_access("HTTP/2", req->client_ip, req->method, req->uri, 200, body_len);
-        free(backend_data);
-    } else {
+    int fpm_sock = fcgi_session_http2_create(req, backend_type);
+    if (fpm_sock < 0) {
+        write_log_error("[FCGI-H2] Gagal mengambil koneksi FPM / No nodes configured untuk URI: %s", req->uri ? req->uri : "/");
         http2_response_send_header(session, stream, 502);
         http2_response_send_data(session, stream, "Bad Gateway", 11, true);
-        write_log_access("HTTP/2", req->client_ip, req->method, req->uri, 502, 11);
+        stream->state = 4;
+        return;
     }
-    stream->state = 4;
+
+    if (fpm_sock < 0) {
+        write_log_error("[FCGI-H2] Gagal mengambil koneksi dari FPM pool untuk URI: %s", req->uri ? req->uri : "/");
+        http2_response_send_header(session, stream, 502);
+        http2_response_send_data(session, stream, "Bad Gateway", 11, true);
+        stream->state = 4;
+        return;
+    }
+
+    // Ubah socket backend menjadi non-blocking
+    int flags = fcntl(fpm_sock, F_GETFL, 0);
+    if (flags != -1) fcntl(fpm_sock, F_SETFL, flags | O_NONBLOCK);
+
+    // 2. Inisialisasi State FSM FastCGI di Stream HTTP/2
+    pthread_mutex_lock(&session->streams_lock);
+    stream->fpm_fd = fpm_sock;
+    stream->fcgi_state = 0; // State 0: Kirim Params
+    stream->fcgi_params_sent = 0;
+    stream->fcgi_stdin_sent = 0;
+    stream->fcgi_header_bytes_read = 0;
+    stream->fcgi_content_length = req->content_length;
+    stream->fcgi_header_sent = false;
+    stream->is_fcgi_active = true;
+
+    // Ganti malloc dengan mengarahkannya langsung ke gather_buf milik stream (65535 bytes)
+    stream->fcgi_header_buffer = (char *)stream->fcgi_gather_buf;
+    memset(stream->fcgi_gather_buf, 0, GATHER_BUF_SIZE); // Bersihkan buffer awal
+
+    // Alokasi gather_buf jika belum ada untuk meracik Begin Request & Params per stream
+    // (Atau Anda bisa sediakan buffer khusus di HTTP2Stream secukupnya)
+    // Di sini kita racik langsung header FCGI ke buffer lokal stream atau buffer sementara
+    pthread_mutex_unlock(&session->streams_lock);
+
+    write_log_access("HTTP/2", req->client_ip, req->method, req->uri, 200, 0);
 }
 
 void route_static_file(HTTP2Session *session, HTTP2Stream *stream, RequestHeader *req) {

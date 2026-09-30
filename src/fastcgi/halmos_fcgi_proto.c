@@ -23,11 +23,13 @@
 #endif
 
 // Helper internal untuk pasangan key-value
+static int safe_send_all(int sockfd, const void *buf, size_t len);
+
 static int  fcgi_proto_add_pair(unsigned char* dest, const char *name, const char *value, int offset, int max_len);
 
 static ssize_t fcgi_smart_response(int fd, const void *buf, size_t len, bool is_tls);
 
-static int fcgi_io_splice_response(int fpm_fd, int sock_client, RequestHeader *req);
+//static int fcgi_io_splice_response(int fpm_fd, int sock_client, RequestHeader *req);
 
 /* --- CORE FUNCTIONS --- */
 
@@ -176,34 +178,6 @@ void fcgi_proto_build_params(RequestHeader *req, int sock_client, size_t content
     *g_ptr += sizeof(HalmosFCGI_Header);
 }
 
-int fcgi_proto_send_and_receive(int fpm_sock, int sock_client, RequestHeader *req, int request_id, unsigned char *gather_buf, int g_ptr, void *post_data, size_t content_length) {
-    int status = 0;
-
-    /*
-    fprintf(stderr, "\n[DEBUG-FLOW] === START FCGI SEND AND RECEIVE ===\n");
-    fprintf(stderr, "[DEBUG-FLOW] Request ID: %d, Content-Len: %zu\n", request_id, content_length);
-    fprintf(stderr, "[DEBUG-FLOW] Post Data Pointer: %p\n", post_data);
-    fprintf(stderr, "[DEBUG-FLOW] Gather Buffer (Header) Size: %d\n", g_ptr);
-    */
-
-    if (safe_send_all(fpm_sock, gather_buf, g_ptr) < 0) {
-        //fprintf(stderr, "[DEBUG-FLOW] Gagal kirim Header PARAMS\n");
-        status = -1;
-        goto cleanup;
-    }
-
-    // Panggil kirim STDIN
-    fcgi_proto_send_stdin(fpm_sock, request_id, post_data, (int)content_length);
-
-    //fprintf(stderr, "[DEBUG-FLOW] Menunggu respon dari PHP-FPM...\n");
-    status = fcgi_io_splice_response(fpm_sock, sock_client, req);
-    //fprintf(stderr, "[DEBUG-FLOW] === END FCGI SEND AND RECEIVE (Status: %d) ===\n\n", status);
-    
-cleanup:
-    fcgi_pool_conn_release(fpm_sock);
-    return status;    
-}
-
 void fcgi_proto_send_stdin(int sockfd, int request_id, const void *data, int data_len) {
     //fprintf(stderr, "[TRACE-STDIN] Masuk ke fcgi_proto_send_stdin\n");
     //fprintf(stderr, "[TRACE-STDIN] ReqID: %d | DataAddr: %p | Len: %d\n", request_id, data, data_len);
@@ -255,110 +229,6 @@ void fcgi_proto_send_stdin(int sockfd, int request_id, const void *data, int dat
     if (safe_send_all(sockfd, &empty_h, sizeof(empty_h)) >= 0) {
         //fprintf(stderr, "[TRACE-STDIN] EOF (Empty STDIN) Sent for ReqID: %d\n", request_id);
     }
-}
-
-int safe_send_all(int sockfd, const void *buf, size_t len) {
-    size_t total_sent = 0;
-    const unsigned char *ptr = (const unsigned char *)buf;
-
-    while (total_sent < len) {
-        ssize_t n = send(sockfd, ptr + total_sent, len - total_sent, MSG_NOSIGNAL);
-        if (n <= 0) {
-            if (errno == EINTR) continue; // Terganggu sinyal, coba lagi
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                // Di sini biasanya kita pakai poll/select, 
-                // tapi untuk FCGI kita asumsikan blocking mode yang aman.
-                continue; 
-            }
-            return -1; // Error beneran (koneksi putus/SIGPIPE)
-        }
-        total_sent += n;
-    }
-    return 0;
-}
-
-/* --- INTERNAL HELPER --- */
-
-/**
- * Menambahkan pasangan Key-Value ke buffer FastCGI sesuai spesifikasi.
- * Mendukung format 1-byte length (< 128) dan 4-byte length (>= 128).
- */
-int fcgi_proto_add_pair(unsigned char* dest, const char *name, const char *value, int offset, int max_len) {
-    if (!name) return offset;
-
-    size_t name_len = strlen(name);
-    const char* val_ptr = value ? value : "";
-    size_t value_len = strlen(val_ptr);
-
-    // 1. Hitung berapa byte yang dibutuhkan untuk menyimpan informasi panjang (length)
-    // Spesifikasi FastCGI: Jika length > 127, gunakan 4 byte (bit paling kiri diset 1)
-    int h_name = (name_len > 127) ? 4 : 1;
-    int h_val  = (value_len > 127) ? 4 : 1;
-    
-    // 2. Cek apakah buffer cukup sebelum menulis
-    if (offset + h_name + h_val + (int)name_len + (int)value_len > max_len) {
-        //fprintf(stderr, "[FCGI-ERR] Buffer overflow saat menambah param: %s\n", name);
-        return offset; 
-    }
-
-    // 3. Tulis Panjang Nama (Name Length)
-    if (name_len > 127) {
-        dest[offset++] = (unsigned char)((name_len >> 24) | 0x80);
-        dest[offset++] = (unsigned char)((name_len >> 16) & 0xFF);
-        dest[offset++] = (unsigned char)((name_len >> 8) & 0xFF);
-        dest[offset++] = (unsigned char)(name_len & 0xFF);
-    } else {
-        dest[offset++] = (unsigned char)name_len;
-    }
-
-    // 4. Tulis Panjang Nilai (Value Length)
-    if (value_len > 127) {
-        dest[offset++] = (unsigned char)((value_len >> 24) | 0x80);
-        dest[offset++] = (unsigned char)((value_len >> 16) & 0xFF);
-        dest[offset++] = (unsigned char)((value_len >> 8) & 0xFF);
-        dest[offset++] = (unsigned char)(value_len & 0xFF);
-    } else {
-        dest[offset++] = (unsigned char)value_len;
-    }
-
-    // 5. Tulis Data Nama
-    memcpy(dest + offset, name, name_len);
-    offset += name_len;
-
-    // 6. Tulis Data Nilai
-    memcpy(dest + offset, val_ptr, value_len);
-    offset += value_len;
-    
-    return offset;
-}
-
-/**
- * fcgi_smart_response: Wrapper internal untuk memastikan data terkirim
- * baik lewat SSL atau socket biasa.
- */
-
-ssize_t fcgi_smart_response(int fd, const void *buf, size_t len, bool is_tls) {
-    if (is_tls) {
-        // Panggil fungsi pusat yang sudah pinter handle WANT_WRITE (code 3)
-        // Kita loop di sini biar semua chunk datanya beneran keluar
-        size_t total_sent = 0;
-        while (total_sent < len) {
-            ssize_t n = ssl_send(fd, (const char*)buf + total_sent, len - total_sent);
-            if (n > 0) {
-                total_sent += n;
-            } else if (n == 0) {
-                // Pakai wait_for_write yang kita buat di manager tadi
-                // Kalau fungsi wait_for_write juga static, terpaksa bikin poll lokal di sini
-                struct pollfd pfd = {.fd = fd, .events = POLLOUT};
-                poll(&pfd, 1, 10); 
-            } else {
-                return -1; // Fatal error
-            }
-        }
-        return total_sent;
-    }
-    // Jalur Plaintext (Non-TLS)
-    return send(fd, buf, len, MSG_NOSIGNAL);
 }
 
 /**
@@ -428,28 +298,52 @@ int fcgi_io_splice_response(int fpm_fd, int sock_client, RequestHeader *req) {
                         else if (strcasestr(header_buffer, "Location:")) status_code = 302;
                         is_redirect = (status_code >= 300 && status_code < 400);
 
-                        char res_start[512];
-                        int s_len = snprintf(res_start, sizeof(res_start),
-                            "HTTP/1.1 %d %s\r\nServer: Halmos\r\n%sConnection: %s\r\n",
-                            status_code, get_status_text(status_code),
-                            is_redirect ? "" : "Transfer-Encoding: chunked\r\n",
-                            req->is_keep_alive ? "keep-alive" : "close");
+                        // Cek apakah PHP sudah mengirimkan Content-Length
+                        bool has_content_length = (strcasestr(header_buffer, "Content-Length:") != NULL);
+
+                        // Susun Respon HTTP/1.1 ke Klien
+                        char res_start[1024];
+                        int s_len;
+
+                        if (is_redirect) {
+                            // Untuk redirect (302), paksa Content-Length: 0 di header utama jika belum ada
+                            s_len = snprintf(res_start, sizeof(res_start),
+                                "HTTP/1.1 %d %s\r\nServer: Halmos\r\n%s%sConnection: %s\r\n",
+                                status_code, get_status_text(status_code),
+                                has_content_length ? "" : "Content-Length: 0\r\n",
+                                "", // Tempat tambahan jika diperlukan
+                                req->is_keep_alive ? "keep-alive" : "close");
+                        } else {
+                            s_len = snprintf(res_start, sizeof(res_start),
+                                "HTTP/1.1 %d %s\r\nServer: Halmos\r\nTransfer-Encoding: chunked\r\nConnection: %s\r\n",
+                                status_code, get_status_text(status_code),
+                                req->is_keep_alive ? "keep-alive" : "close");
+                        }
                         
                         if (fcgi_smart_response(sock_client, res_start, s_len, is_tls) < 0) break;
+                        
+                        // Kirim header asli dari PHP-FPM (termasuk \r\n\r\n penutupnya)
                         int h_only_len = (delim - header_buffer) + 4; 
                         if (fcgi_smart_response(sock_client, header_buffer, h_only_len, is_tls) < 0) break;
                         
-                        // KHUSUS REDIRECT: Pastikan stream benar-benar tutup di sini
-                        if (is_redirect) {
-                            // Jika ternyata di header_buffer belum ada Content-Length, paksa kirim
-                            if (strcasestr(header_buffer, "Content-Length:") == NULL) {
-                                fcgi_smart_response(sock_client, "Content-Length: 0\r\n\r\n", 21, is_tls);
-                            }
-                        }
                         header_sent = true;
 
+                        // Jika redirect, kita tidak perlu memproses body sama sekali
+                        if (is_redirect) {
+                            // Kuras sisa buffer record FPM jika ada lalu keluar
+                            int remain = clen - (header_pos);
+                            while (remain > 0) {
+                                int pull = (remain > (int)sizeof(body_temp)) ? (int)sizeof(body_temp) : remain;
+                                if (recv(fpm_fd, body_temp, pull, MSG_WAITALL) != pull) break;
+                                remain -= pull;
+                            }
+                            final_status = 0;
+                            break; 
+                        }
+
+                        // Handle sisa body normal (selain redirect)
                         int body_in_buf = header_pos - h_only_len;
-                        if (!is_redirect && body_in_buf > 0) {
+                        if (body_in_buf > 0) {
                             char sz[16];
                             int sz_l = snprintf(sz, sizeof(sz), "%X\r\n", body_in_buf);
                             fcgi_smart_response(sock_client, sz, sz_l, is_tls);
@@ -457,27 +351,16 @@ int fcgi_io_splice_response(int fpm_fd, int sock_client, RequestHeader *req) {
                             fcgi_smart_response(sock_client, "\r\n", 2, is_tls);
                         }
 
-                        // Kuras sisa clen di record pertama
-                        /*
-                        int remain = clen - to_read;
-                        while (remain > 0) {
-                            int pull = (remain > (int)sizeof(body_temp)) ? (int)sizeof(body_temp) : remain;
-                            if (recv(fpm_fd, body_temp, pull, MSG_WAITALL) != pull) goto cleanup_error;
-                            remain -= pull;
-                        }*/
                         int remain = clen - to_read;
                         while (remain > 0) {
                             int pull = (remain > (int)sizeof(body_temp)) ? (int)sizeof(body_temp) : remain;
                             if (recv(fpm_fd, body_temp, pull, MSG_WAITALL) != pull) goto cleanup_error;
                             
-                            // JANGAN CUMA DIKURAS, TAPI KIRIM!
-                            if (!is_redirect) {
-                                char sz[16];
-                                int sz_l = snprintf(sz, sizeof(sz), "%X\r\n", pull);
-                                fcgi_smart_response(sock_client, sz, sz_l, is_tls);
-                                fcgi_smart_response(sock_client, body_temp, pull, is_tls);
-                                fcgi_smart_response(sock_client, "\r\n", 2, is_tls);
-                            }
+                            char sz[16];
+                            int sz_l = snprintf(sz, sizeof(sz), "%X\r\n", pull);
+                            fcgi_smart_response(sock_client, sz, sz_l, is_tls);
+                            fcgi_smart_response(sock_client, body_temp, pull, is_tls);
+                            fcgi_smart_response(sock_client, "\r\n", 2, is_tls);
                             remain -= pull;
                         }
                     }
@@ -573,4 +456,110 @@ cleanup_error:
 
     return 0;
 }
+
+
+/* --- INTERNAL HELPER --- */
+
+int safe_send_all(int sockfd, const void *buf, size_t len) {
+    size_t total_sent = 0;
+    const unsigned char *ptr = (const unsigned char *)buf;
+
+    while (total_sent < len) {
+        ssize_t n = send(sockfd, ptr + total_sent, len - total_sent, MSG_NOSIGNAL);
+        if (n <= 0) {
+            if (errno == EINTR) continue; // Terganggu sinyal, coba lagi
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                // Di sini biasanya kita pakai poll/select, 
+                // tapi untuk FCGI kita asumsikan blocking mode yang aman.
+                continue; 
+            }
+            return -1; // Error beneran (koneksi putus/SIGPIPE)
+        }
+        total_sent += n;
+    }
+    return 0;
+}
+
+/**
+ * Menambahkan pasangan Key-Value ke buffer FastCGI sesuai spesifikasi.
+ * Mendukung format 1-byte length (< 128) dan 4-byte length (>= 128).
+ */
+int fcgi_proto_add_pair(unsigned char* dest, const char *name, const char *value, int offset, int max_len) {
+    if (!name) return offset;
+
+    size_t name_len = strlen(name);
+    const char* val_ptr = value ? value : "";
+    size_t value_len = strlen(val_ptr);
+
+    // 1. Hitung berapa byte yang dibutuhkan untuk menyimpan informasi panjang (length)
+    // Spesifikasi FastCGI: Jika length > 127, gunakan 4 byte (bit paling kiri diset 1)
+    int h_name = (name_len > 127) ? 4 : 1;
+    int h_val  = (value_len > 127) ? 4 : 1;
+    
+    // 2. Cek apakah buffer cukup sebelum menulis
+    if (offset + h_name + h_val + (int)name_len + (int)value_len > max_len) {
+        //fprintf(stderr, "[FCGI-ERR] Buffer overflow saat menambah param: %s\n", name);
+        return offset; 
+    }
+
+    // 3. Tulis Panjang Nama (Name Length)
+    if (name_len > 127) {
+        dest[offset++] = (unsigned char)((name_len >> 24) | 0x80);
+        dest[offset++] = (unsigned char)((name_len >> 16) & 0xFF);
+        dest[offset++] = (unsigned char)((name_len >> 8) & 0xFF);
+        dest[offset++] = (unsigned char)(name_len & 0xFF);
+    } else {
+        dest[offset++] = (unsigned char)name_len;
+    }
+
+    // 4. Tulis Panjang Nilai (Value Length)
+    if (value_len > 127) {
+        dest[offset++] = (unsigned char)((value_len >> 24) | 0x80);
+        dest[offset++] = (unsigned char)((value_len >> 16) & 0xFF);
+        dest[offset++] = (unsigned char)((value_len >> 8) & 0xFF);
+        dest[offset++] = (unsigned char)(value_len & 0xFF);
+    } else {
+        dest[offset++] = (unsigned char)value_len;
+    }
+
+    // 5. Tulis Data Nama
+    memcpy(dest + offset, name, name_len);
+    offset += name_len;
+
+    // 6. Tulis Data Nilai
+    memcpy(dest + offset, val_ptr, value_len);
+    offset += value_len;
+    
+    return offset;
+}
+
+/**
+ * fcgi_smart_response: Wrapper internal untuk memastikan data terkirim
+ * baik lewat SSL atau socket biasa.
+ */
+
+ssize_t fcgi_smart_response(int fd, const void *buf, size_t len, bool is_tls) {
+    if (is_tls) {
+        // Panggil fungsi pusat yang sudah pinter handle WANT_WRITE (code 3)
+        // Kita loop di sini biar semua chunk datanya beneran keluar
+        size_t total_sent = 0;
+        while (total_sent < len) {
+            ssize_t n = ssl_send(fd, (const char*)buf + total_sent, len - total_sent);
+            if (n > 0) {
+                total_sent += n;
+            } else if (n == 0) {
+                // Pakai wait_for_write yang kita buat di manager tadi
+                // Kalau fungsi wait_for_write juga static, terpaksa bikin poll lokal di sini
+                struct pollfd pfd = {.fd = fd, .events = POLLOUT};
+                poll(&pfd, 1, 10); 
+            } else {
+                return -1; // Fatal error
+            }
+        }
+        return total_sent;
+    }
+    // Jalur Plaintext (Non-TLS)
+    return send(fd, buf, len, MSG_NOSIGNAL);
+}
+
 

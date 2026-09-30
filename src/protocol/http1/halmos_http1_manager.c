@@ -15,6 +15,7 @@
 #include "halmos_log.h"
 #include "halmos_ws_system.h"
 #include "halmos_fcgi.h"
+#include "halmos_fcgi_session.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -58,6 +59,13 @@ void http1_session_destroy(void *session) {
     if (!s) return;
     if (s->buffer) free(s->buffer);
     if (s->file_fd >= 0) close(s->file_fd);
+
+    // Tambahkan ini: Bersihkan sesi FCGI jika masih aktif
+    if (s->fcgi_sess) {
+        fcgi_session_destroy(s->fcgi_sess);
+        s->fcgi_sess = NULL;
+    }
+
     http1_parser_free_memory(&s->req);
     free(s);
 }
@@ -209,7 +217,106 @@ int http1_manager_session(halmos_conn_t *conn) {
     }
 
     // =========================================================================
-    // 3. STATE: PENGIRIMAN FILE STATIS (EPOLLOUT)
+    // 3. STATE: PEMROSESAN FASTCGI BERBASIS FSM
+    // =========================================================================
+    // =========================================================================
+    // 3. STATE: PEMROSESAN FASTCGI BERBASIS FSM (Non-blocking loop di worker)
+    // =========================================================================
+    if (session->state == STATE_FCGI_PROCESSING) {
+        if (!session->fcgi_sess) {
+            ////fprintf(stderr, "[DEBUG-MGR] ERROR: fcgi_sess NULL pada state PROCESSING!\n");
+            return -1;
+        }
+
+        //fprintf(stderr, "[DEBUG-MGR] Memulai FSM FastCGI loop untuk fpm_sock=%d\n", session->fcgi_sess->fpm_sock);
+
+        // Jalankan FSM step secara iteratif atau menggunakan poll singkat 
+        // agar proses kirim params/stdin dan terima respons dari FPM selesai dalam satu siklus worker.
+        int max_attempts = 100; // Mencegah infinite loop
+        int attempt = 0;
+        int status = FCGI_SES_STATUS_CONTINUE;
+
+        while (attempt < max_attempts) {
+            attempt++;
+
+            // Tentukan event I/O yang sedang dibutuhkan oleh FSM saat ini
+            uint32_t revents = POLLOUT;
+            if (session->fcgi_sess->state == FCGI_SES_STATE_RECEIVING) {
+                revents = POLLIN;
+            }
+
+            // Gunakan poll singkat (misal timeout 1000ms) pada fpm_sock untuk memastikan socket siap
+            struct pollfd pfd;
+            pfd.fd = session->fcgi_sess->fpm_sock;
+            pfd.events = (revents == POLLIN) ? POLLIN : POLLOUT;
+            pfd.revents = 0;
+
+            int ret = poll(&pfd, 1, 1000); // Tunggu maksimal 1 detik
+            if (ret < 0) {
+                if (errno == EINTR) continue;
+                //fprintf(stderr, "[DEBUG-MGR] ERROR: poll() pada fpm_sock gagal: %s\n", strerror(errno));
+                status = FCGI_SES_STATUS_ERROR;
+                break;
+            } else if (ret == 0) {
+                // Timeout menunggu FPM, lanjut atau beri kesempatan
+                continue;
+            }
+
+            // Eksekusi satu langkah FSM berdasarkan kesiapan poll
+            uint32_t active_revents = 0;
+            if (pfd.revents & POLLIN)  active_revents |= POLLIN;
+            if (pfd.revents & POLLOUT) active_revents |= POLLOUT;
+            if (pfd.revents & (POLLERR | POLLHUP)) {
+                status = FCGI_SES_STATUS_ERROR;
+                break;
+            }
+
+            status = fcgi_session_http1_step(session->fcgi_sess, active_revents);
+
+            //fprintf(stderr, "[DEBUG-MGR] FSM Step result: status=%d, FCGI State baru=%d\n", 
+            //        status, session->fcgi_sess->state);
+
+            if (status == FCGI_SES_STATUS_COMPLETED || status == FCGI_SES_STATUS_ERROR) {
+                break;
+            }
+            
+            // Jika state sudah kembali ke FINISHED atau selesai mengirim/menerima
+            if (session->fcgi_sess->state == FCGI_SES_STATE_FINISHED) {
+                status = FCGI_SES_STATUS_COMPLETED;
+                break;
+            }
+        }
+
+        if (status == FCGI_SES_STATUS_COMPLETED) {
+            //fprintf(stderr, "[DEBUG-MGR] Sesi FastCGI SELESAI dengan sukses.\n");
+            write_log_access("HTTP/1.1", session->req.client_ip, session->req.method, session->req.uri, 200, session->req.content_length);
+        } else {
+            //fprintf(stderr, "[DEBUG-MGR] ERROR: Sesi FastCGI gagal, timeout, atau error.\n");
+            write_log_error("[HTTP1-Mgr] Sesi FastCGI gagal atau error.");
+            // Kirim respons 502 Bad Gateway jika gagal di tengah jalan
+            if (!session->is_header_sent) {
+                http1_response_send_mem(sock_client, 502, "Bad Gateway", "502 Bad Gateway", false, is_tls);
+            }
+        }
+
+        // Cleanup sesi FastCGI & kembalikan koneksi FPM ke pool
+        fcgi_session_destroy(session->fcgi_sess);
+        session->fcgi_sess = NULL;
+
+        bool keep_alive = session->req.is_keep_alive;
+        http1_parser_free_memory(&session->req);
+        memset(&session->req, 0, sizeof(RequestHeader));
+        
+        session->buf_len = 0;
+        if (session->buffer) session->buffer[0] = '\0';
+        session->state = STATE_READ_HEADERS;
+        
+        // Selesai sepenuhnya, kembalikan ke epoll untuk membaca request berikutnya (jika keep-alive) atau tutup
+        return keep_alive ? 2 : 0;
+    }
+
+    // =========================================================================
+    // 4. STATE: PENGIRIMAN FILE STATIS (EPOLLOUT)
     // =========================================================================
     if (session->state == STATE_SEND_STATIC_FILE) {
         // Ambil ukuran file asli dari file descriptor sebelum dikirim (karena file_remaining akan habis)
@@ -290,16 +397,35 @@ int http1_manager_routing_bridge(halmos_conn_t *conn, HTTP1Session *session) {
     else if (has_extension(session->req.uri, session->req.path_info, config.python.ext)) backend_type = 2;
 
     if (backend_type != -1) {
-        fcgi_api_request_http1(&session->req, sock_client, backend_type, session->req.body_data, session->req.content_length);
-        
-        write_log_access("HTTP/1.1", session->req.client_ip, session->req.method, session->req.uri, 200, session->req.content_length);
+        //fprintf(stderr, "[DEBUG-MGR] Mendeteksi file PHP: URI=%s\n", session->req.uri);
 
-        http1_parser_free_memory(&session->req);
-        memset(&session->req, 0, sizeof(RequestHeader));
-        session->buf_len = 0;
-        if (session->buffer) session->buffer[0] = '\0';
-        session->state = STATE_READ_HEADERS;
-        return 2; // Rearm EPOLLIN
+        // 1. Buat Sesi FastCGI non-blocking (Otomatis acquire koneksi FPM)
+        int request_id = 1; // Sesuaikan generator ID Anda jika mendukung multiplexing
+        session->fcgi_sess = fcgi_session_http1_create(
+            sock_client, 
+            backend_type,
+            &session->req, 
+            session->req.body_data, 
+            session->req.content_length, 
+            request_id
+        );
+
+        if (!session->fcgi_sess) {
+            //fprintf(stderr, "[DEBUG-MGR] ERROR: Gagal membuat sesi FSM FastCGI!\n");
+            write_log_error("[HTTP1-Mgr] Gagal membuat sesi FSM FastCGI.");
+            http1_response_send_mem(sock_client, 502, "Bad Gateway", "502 Bad Gateway", false, is_tls);
+            return 0;
+        }
+
+        //fprintf(stderr, "[DEBUG-MGR] Sesi FCGI sukses dibuat. fpm_sock=%d. Pindah ke STATE_FCGI_PROCESSING\n", 
+        //        session->fcgi_sess->fpm_sock);
+
+        // 2. Pindahkan state ke proses FSM FastCGI
+        session->state = STATE_FCGI_PROCESSING;
+        
+        // 3. Kembalikan 3 (artinya EPOLLOUT karena tahap pertama FSM adalah mengirim header/params ke FPM)
+        // Catatan: Event loop utama Anda harus memantau fpm_sock milik session->fcgi_sess->fpm_sock.
+        return 3; 
     }
 
     VHostEntry *vh = (VHostEntry *)session->req.vhost_context;

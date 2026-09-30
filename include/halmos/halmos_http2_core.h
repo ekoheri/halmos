@@ -93,6 +93,9 @@ typedef struct {
 /**
  * RequestHeader versi H2 (Satu stream = Satu request)
  */
+
+#define GATHER_BUF_SIZE 65536
+ 
 typedef struct HTTP2Stream {
     uint32_t stream_id;
     int32_t out_window_size; // Default RFC 7540: 65535
@@ -108,6 +111,22 @@ typedef struct HTTP2Stream {
     off_t file_offset;     // Posisi byte terakhir yang berhasil terkirim
     off_t file_size;      // Total ukuran file dalam byte
     bool is_sending_file;  // Status apakah stream sedang aktif memompa chunk file
+    
+    /* --- TAMBAHAN BARU: STATE FASTCGI NON-BLOCKING PER-STREAM --- */
+    int fpm_fd;                    // Soket koneksi ke backend PHP-FPM (-1 jika tidak aktif)
+    int fcgi_state;                // State FSM FastCGI (misal: 0=Init, 1=Sending Params, 2=Sending Stdin, 3=Receiving)
+    size_t fcgi_params_sent;       // Progres byte parameter FCGI yang sudah terkirim
+    size_t fcgi_stdin_sent;        // Progres byte body/stdin yang sudah terkirim
+    char *fcgi_header_buffer;      // Buffer penampung header respons dari PHP-FPM
+    size_t fcgi_header_bytes_read; // Jumlah byte header FPM yang sudah terbaca
+    size_t fcgi_content_length;    // Panjang konten (Content-Length) dari backend
+    bool fcgi_header_sent;         // Penanda apakah header HTTP/2 sudah dikirim ke client
+    bool is_fcgi_active;           // Status apakah stream sedang dalam proses I/O non-blocking dengan FPM
+    
+    // Buffer pendukung per-stream (menggunakan ukuran yang selaras dengan GATHER_BUF_SIZE)
+    unsigned char fcgi_gather_buf[GATHER_BUF_SIZE];
+    size_t fcgi_g_ptr;
+    size_t fcgi_g_sent;
     
     struct HTTP2Stream *node_next; // Point ke stream aktif lainnya
 } HTTP2Stream;

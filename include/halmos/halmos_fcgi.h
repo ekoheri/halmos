@@ -117,14 +117,13 @@ void fcgi_pool_init(void);
 void fcgi_pool_destroy(void);
 int  fcgi_pool_conn_acquire(const char *target, int port);
 void fcgi_pool_conn_release(int sockfd);
+unsigned int hash_ip(const char *ip);
 
 /* * ==========================================
  * 2. PROTOCOL & MARSHALLING (halmos_fcgi_proto.c)
  * ==========================================
  */
 // Merakit semua Params menjadi satu buffer besar
-
-int safe_send_all(int sockfd, const void *buf, size_t len);
 
 int fcgi_proto_begin_request(const char *target, int port, unsigned char *gather_buf, int *g_ptr, int request_id);
 
@@ -133,14 +132,7 @@ void fcgi_proto_build_params(RequestHeader *req, int sock_client, size_t content
 // Mengirim data STDIN (Body POST)
 void fcgi_proto_send_stdin(int sockfd, int request_id, const void *data, int data_len);
 
-int fcgi_proto_send_and_receive(int fpm_sock, int sock_client, RequestHeader *req, int request_id, unsigned char *gather_buf, int g_ptr, void *post_data, size_t content_length);
 
-/* * ==========================================
- * 3. PUBLIC API (halmos_fcgi.c)
- * ==========================================
- */
-// Fungsi fasad yang dipanggil oleh manager http
-int fcgi_api_request_http1(RequestHeader *req, int sock_client, int backend_type, void *post_data, size_t content_length);
+int fcgi_io_splice_response(int fpm_fd, int sock_client, RequestHeader *req);
 
-ssize_t fcgi_api_request_http2(RequestHeader *req, int backend_type, void *post_data, size_t content_length, char **out_buf);
 #endif
