@@ -86,7 +86,12 @@ int core_config_load(const char *filename) {
                 snprintf(config.document_root, sizeof(config.document_root), "%s", value);
             } else if (strcmp(key, "default_page") == 0) {
                 snprintf(config.default_page, sizeof(config.default_page), "%s", value);
+            // Performance
+            } else if (strcmp(key, "request_buffer_size") == 0) {
+                config.request_buffer_size = atoi(value);
             } else if (strcmp(key, "max_body_size") == 0) {
+
+            //Security
                 config.max_body_size = (size_t)parse_size(value);
             } else if (strcmp(key, "tls_enabled") == 0) {
                 config.tls_enabled = (strcasecmp(value, "true") == 0);
@@ -106,6 +111,7 @@ int core_config_load(const char *filename) {
                 config.keep_alive_timeout = atoi(value);
             } else if (strcmp(key, "trust_proxy") == 0) {
                 config.trust_proxy = (strcasecmp(value, "true") == 0);
+
             // Backend PHP    
             } else if (strcmp(key, "php_server") == 0) {
                 parse_csv_to_group(value, &config.php, false);
@@ -115,8 +121,10 @@ int core_config_load(const char *filename) {
                 snprintf(config.php_fpm_config_path, sizeof(config.php_fpm_config_path), "%s", value);
             } else if(strcmp(key, "php_lb_strategy") == 0) {
                 snprintf(config.php.lb_strategy, sizeof(config.php.lb_strategy), "%s", value);
+            } else if (strcmp(key, "php_memory_budget") == 0) {
+                 config.php.memory_budget = (int)(parse_size(value) / (1024 * 1024)); // Konversi otomatis ke MB integer
             
-            // Backend Rust
+                // Backend Rust
             } else if (strcmp(key, "rust_ext") == 0) {
                 snprintf(config.rust.ext, sizeof(config.rust.ext), "%s", value);
             } else if (strcmp(key, "rust_server") == 0) {
@@ -125,6 +133,8 @@ int core_config_load(const char *filename) {
                 parse_csv_to_group(value, &config.rust, true);
             } else if(strcmp(key, "rust_lb_strategy") == 0) {
                 snprintf(config.rust.lb_strategy, sizeof(config.rust.lb_strategy), "%s", value);
+            } else if (strcmp(key, "rust_memory_budget") == 0) {
+                config.rust.memory_budget = (int)(parse_size(value) / (1024 * 1024));
 
             // Backend Python    
             } else if (strcmp(key, "python_ext") == 0) {
@@ -135,8 +145,10 @@ int core_config_load(const char *filename) {
                 parse_csv_to_group(value, &config.python, true);
             } else if(strcmp(key, "python_lb_strategy") == 0) {
                 snprintf(config.python.lb_strategy, sizeof(config.python.lb_strategy), "%s", value);
-            } else if (strcmp(key, "request_buffer_size") == 0) {
-                config.request_buffer_size = atoi(value);
+            } else if (strcmp(key, "python_memory_budget") == 0) {
+                config.python.memory_budget = (int)(parse_size(value) / (1024 * 1024));
+
+            // Telemetry
             } else if (strcmp(key, "telemetry_enabled") == 0) {
                 config.telemetry_enabled = (strcasecmp(value, "true") == 0);
             }

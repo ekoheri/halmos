@@ -39,7 +39,7 @@ void fcgi_pool_init(void) {
     fcgi_pool.connections = malloc(sizeof(HalmosFCGI_Conn) * fcgi_pool.pool_size);
     
     if (!fcgi_pool.connections) {
-        write_log_error("[POOL] FATAL: Memory allocation failed");
+        write_log_error("[FCGI-POOL] FATAL: Memory allocation failed");
         exit(EXIT_FAILURE);
     }
 
@@ -124,7 +124,7 @@ int fcgi_pool_conn_acquire(const char *target, int port) {
     if (final_sock == -1) {
         final_sock = create_backend_socket(target, port, is_unix);
         if (final_sock != -1) {
-            bool stored = false;
+            //bool stored = false;
             pthread_mutex_lock(&fcgi_pool.lock);
             
             // Double check quota backend ini
@@ -141,13 +141,13 @@ int fcgi_pool_conn_acquire(const char *target, int port) {
                         }
                         
                         atomic_fetch_add(&fcgi_pool.active_counts[idx], 1);
-                        stored = true;
+                        //stored = true;
                         break;
                     }
                 }
             }
             pthread_mutex_unlock(&fcgi_pool.lock);
-            write_log(stored ? "[POOL] Pooled new connection for port %d" : "[POOL] Bypass pool (Full) for port %d", port);
+            //write_log(stored ? "[POOL] Pooled new connection for port %d" : "[POOL] Bypass pool (Full) for port %d", port);
         }
     }
     return final_sock;

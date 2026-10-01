@@ -24,7 +24,7 @@
 
 // Definisi Identitas & Konfigurasi Global
 #define HALMOS_NAME       "Halmos Web Server"
-#define HALMOS_VERSION    "1.0.0-RC1"
+#define HALMOS_VERSION    "1.1.0-RC1"
 #define HALMOS_CONFIG_PATH "/etc/halmos/halmos.conf"
 
 // Handle sinyal dengan aman (Async-Signal Safe)
@@ -50,19 +50,32 @@ int main(int argc, char *argv[]) {
         if (strcmp(argv[1], "-v") == 0 || strcmp(argv[1], "--version") == 0) {
             printf("%s v%s\n", HALMOS_NAME, HALMOS_VERSION);
             return EXIT_SUCCESS;
-        }
-        if (strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "--help") == 0) {
+        } else if (strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "--help") == 0) {
             printf("%s v%s\n", HALMOS_NAME, HALMOS_VERSION);
             printf("Usage:\n  halmos [option]\n\n");
             printf("Options:\n");
+            printf("  -p, --profile    Analyze hardware resources and exit\n");
             printf("  -t, --test       Test configuration file syntax and exit\n");
             printf("  -v, --version    Output version information and exit\n");
-            printf("  -h, --help       Display this help and exit\n\n");
             printf("Configuration:\n");
             printf("  Config file is loaded from: %s\n", HALMOS_CONFIG_PATH);
             return EXIT_SUCCESS;
-        }
-        if (strcmp(argv[1], "-t") == 0 || strcmp(argv[1], "--test") == 0) {
+        } else if (strcmp(argv[1], "-p") == 0 || strcmp(argv[1], "--profile") == 0) {
+            if (core_config_load(HALMOS_CONFIG_PATH) != 0) {
+                fprintf(stderr, "[ERROR] Configuration test FAILED: Cannot parse %s\n", HALMOS_CONFIG_PATH);
+                return EXIT_FAILURE;
+            }
+            if (config.php_fpm_config_path[0] != '\0') {
+                if (access(config.php_fpm_config_path, R_OK) != 0) {
+                    fprintf(stderr, "[WARN] PHP-FPM config path NOT FOUND or unreadable: %s\n", config.php_fpm_config_path);
+                    fprintf(stderr, "       Hint: Check if PHP-FPM is installed or if the path/permissions are correct.\n");
+                }
+            } else {
+                printf("[WARN] php_fpm_config_path is empty in configuration.\n");
+            }
+            core_adaptive_init(1);
+            return EXIT_SUCCESS;
+        } else if (strcmp(argv[1], "-t") == 0 || strcmp(argv[1], "--test") == 0) {
             // 1. Load konfigurasi utama Halmos
             if (core_config_load(HALMOS_CONFIG_PATH) != 0) {
                 fprintf(stderr, "[ERROR] Configuration test FAILED: Cannot parse %s\n", HALMOS_CONFIG_PATH);
@@ -115,18 +128,24 @@ int main(int argc, char *argv[]) {
             printf("\nConfiguration test SUCCESSFUL.\n");
             printf("Please adjust the %s configuration before running the web server.\n", config.php_fpm_config_path);
             return EXIT_SUCCESS;
+        } else if (strcmp(argv[1], "-v") == 0 || strcmp(argv[1], "--version") == 0) {
+            printf("%s v%s\n", HALMOS_NAME, HALMOS_VERSION);
+            return EXIT_SUCCESS;
+        } else {
+            printf("Unknown command. Use '-h' or '--help' for available options.\n");
+            return EXIT_SUCCESS;
         }
     }
 
     setup_signals();
 
     // 1. Load Konfigurasi (Log ke stderr jika gagal sebelum logger aktif)
-    if(core_config_load("/etc/halmos/halmos.conf") != 0){
+    if(core_config_load(HALMOS_CONFIG_PATH) != 0){
         return EXIT_FAILURE;
     }
 
     // 2. Hitung Parameter Hardware & OS Limit
-    core_adaptive_init();
+    core_adaptive_init(0);
 
     // 3. INIALISASI KONEKSI (Menggunakan g_max_fd hasil kalkulasi adaptive)
     if (core_conn_t_init() != 0) {

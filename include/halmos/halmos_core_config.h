@@ -16,6 +16,7 @@ typedef struct {
     int node_count;                  // Jumlah node yang terdeteksi
     char ext[16];                    // Ekstensi (untuk Rust/Python)
     char lb_strategy[32];            // round_robin, dll
+    int memory_budget;               // Estimasi RAM per proses untuk grup backend ini (dalam MB)
 } BackendGroup;
 
 struct VHostEntry{
