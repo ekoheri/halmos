@@ -292,7 +292,6 @@ int http1_manager_session(halmos_conn_t *conn) {
             write_log_access("HTTP/1.1", session->req.client_ip, session->req.method, session->req.uri, 200, session->req.content_length);
         } else {
             //fprintf(stderr, "[DEBUG-MGR] ERROR: Sesi FastCGI gagal, timeout, atau error.\n");
-            write_log_error("[HTTP1-Mgr] Sesi FastCGI gagal atau error.");
             // Kirim respons 502 Bad Gateway jika gagal di tengah jalan
             if (!session->is_header_sent) {
                 http1_response_send_mem(sock_client, 502, "Bad Gateway", "502 Bad Gateway", false, is_tls);
@@ -412,7 +411,7 @@ int http1_manager_routing_bridge(halmos_conn_t *conn, HTTP1Session *session) {
 
         if (!session->fcgi_sess) {
             //fprintf(stderr, "[DEBUG-MGR] ERROR: Gagal membuat sesi FSM FastCGI!\n");
-            write_log_error("[HTTP1-Mgr] Gagal membuat sesi FSM FastCGI.");
+            write_log_error("[HTTP1-Manager] Failed to create FastCGI FSM session (Out of memory or resource limit reached).");
             http1_response_send_mem(sock_client, 502, "Bad Gateway", "502 Bad Gateway", false, is_tls);
             return 0;
         }
