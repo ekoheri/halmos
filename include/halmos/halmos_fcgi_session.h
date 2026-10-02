@@ -48,7 +48,7 @@ typedef struct {
 
     // Referensi Header HTTP Klien
     RequestHeader *req;
-} HalmosFCGISession;
+} FCGISession;
 
 /* --- DEKLARASI FUNGSI PUBLIK MODUL SESSION --- */
 
@@ -56,19 +56,19 @@ typedef struct {
  * Membuat dan menginisialisasi sesi baru.
  * Di dalamnya otomatis mengambil koneksi FPM dari pool (Opsi 1) dan meracik parameter awal.
  */
-HalmosFCGISession *fcgi_session_http1_create(int client_sock, int backend_type, RequestHeader *req, void *post_data, size_t content_length, int request_id);
+FCGISession *fcgi_session_http1_create(int client_sock, int backend_type, RequestHeader *req, void *post_data, size_t content_length, int request_id);
 
 int fcgi_session_http2_create(RequestHeader *req, int backend_type);
 /**
  * Menghancurkan objek sesi dan mengembalikan koneksi FPM ke pool (atau menutupnya jika error/poisoned).
  */
-void fcgi_session_destroy(HalmosFCGISession *session);
+void fcgi_session_destroy(FCGISession *session);
 
 /**
  * Menjalankan satu langkah State Machine (FSM Step) berdasarkan event I/O (epoll/poll).
  * Mengembalikan FCGISessionStatus (CONTINUE, COMPLETED, atau ERROR).
  */
-int fcgi_session_http1_step(HalmosFCGISession *session, uint32_t revents);
+int fcgi_session_http1_step(FCGISession *session, uint32_t revents);
 
 int fcgi_session_http2_step(HTTP2Session *session, HTTP2Stream *stream, uint32_t revents);
 #endif /* HALMOS_FCGI_SESSION_H */
