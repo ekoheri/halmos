@@ -6,7 +6,7 @@
 #include "halmos_log.h"
 #include "halmos_ws_system.h"
 #include "halmos_http_utils.h"
-#include "halmos_fcgi.h"
+#include "halmos_fcgi_pool.h"
 #include "halmos_fcgi_session.h"
 #include "halmos_http_multipart.h"
 
@@ -79,24 +79,12 @@ void route_websocket_upgrade(HTTP2Session *session, HTTP2Stream *stream, Request
 void route_fastcgi_backend(HTTP2Session *session, HTTP2Stream *stream, RequestHeader *req, int backend_type) {
     int fpm_sock = fcgi_session_http2_create(req, backend_type);
     if (fpm_sock < 0) {
-        write_log_error("[FCGI-H2] Gagal mengambil koneksi FPM / No nodes configured untuk URI: %s", req->uri ? req->uri : "/");
+        write_log_error("[FCGI-H2] Failed to acquire FPM connection / No nodes configured for URI: %s", req->uri ? req->uri : "/");
         http2_response_send_header(session, stream, 502);
         http2_response_send_data(session, stream, "Bad Gateway", 11, true);
         stream->state = 4;
         return;
     }
-
-    if (fpm_sock < 0) {
-        write_log_error("[FCGI-H2] Gagal mengambil koneksi dari FPM pool untuk URI: %s", req->uri ? req->uri : "/");
-        http2_response_send_header(session, stream, 502);
-        http2_response_send_data(session, stream, "Bad Gateway", 11, true);
-        stream->state = 4;
-        return;
-    }
-
-    // Ubah socket backend menjadi non-blocking
-    int flags = fcntl(fpm_sock, F_GETFL, 0);
-    if (flags != -1) fcntl(fpm_sock, F_SETFL, flags | O_NONBLOCK);
 
     // 2. Inisialisasi State FSM FastCGI di Stream HTTP/2
     pthread_mutex_lock(&session->streams_lock);

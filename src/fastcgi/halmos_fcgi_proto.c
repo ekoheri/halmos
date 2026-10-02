@@ -1,4 +1,5 @@
-#include "halmos_fcgi.h"
+#include "halmos_fcgi_proto.h"
+#include "halmos_fcgi_pool.h"
 #include "halmos_log.h"
 #include "halmos_global.h"
 #include "halmos_http_utils.h"

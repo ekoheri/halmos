@@ -7,7 +7,7 @@
 #include "halmos_http_multipart.h"
 #include "halmos_http_utils.h"
 #include "halmos_log.h"
-#include "halmos_fcgi.h"           // Untuk fungsi fcgi_pool_conn_release
+#include "halmos_fcgi_pool.h"           // Untuk fungsi fcgi_pool_conn_release
 
 #include <poll.h>                  // Wajib ada untuk POLLIN dan POLLOUT
 #include <stdio.h>

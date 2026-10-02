@@ -8,7 +8,7 @@
 #include "halmos_log.h"
 #include "halmos_sec_traffic.h"
 #include "halmos_sec_tls.h"
-#include "halmos_fcgi.h"
+#include "halmos_fcgi_pool.h"
 #include "halmos_http_route.h"
 #include "halmos_http_vhost.h"
 #include "halmos_ws_system.h"

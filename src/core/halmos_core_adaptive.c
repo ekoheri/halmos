@@ -2,7 +2,7 @@
 #include "halmos_global.h"
 #include "halmos_core_config.h"
 #include "halmos_log.h"
-#include "halmos_fcgi.h"
+#include "halmos_fcgi_pool.h"
 
 #include <stdio.h>
 #include <stdlib.h>

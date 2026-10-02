@@ -1,5 +1,6 @@
-#include "halmos_fcgi.h"
 #include "halmos_fcgi_session.h" // Header definisikan struktur FCGISession & State
+#include "halmos_fcgi_pool.h"
+#include "halmos_fcgi_proto.h"
 #include "halmos_log.h"
 #include "halmos_global.h"
 #include "halmos_http2_core.h"
@@ -30,11 +31,11 @@ static int fcgi_set_socket_nonblocking(int fd);
 /**
  * Connection Acquire dipanggil di dalam Fungsi Create
  */
-HalmosFCGISession *fcgi_session_http1_create(int client_sock, int backend_type, RequestHeader *req, void *post_data, size_t content_length, int request_id) {
-    HalmosFCGISession *session = (HalmosFCGISession *)malloc(sizeof(HalmosFCGISession));
+FCGISession *fcgi_session_http1_create(int client_sock, int backend_type, RequestHeader *req, void *post_data, size_t content_length, int request_id) {
+    FCGISession *session = (FCGISession *)malloc(sizeof(FCGISession));
     if (!session) return NULL;
 
-    memset(session, 0, sizeof(HalmosFCGISession));
+    memset(session, 0, sizeof(FCGISession));
     
     session->client_sock = client_sock;
     session->req = req;
@@ -150,11 +151,23 @@ int fcgi_session_http2_create(RequestHeader *req, int backend_type){
         idx = atomic_fetch_add(&live_group->next_idx, 1) % cfg_group->node_count;
     }
 
-    return fcgi_pool_conn_acquire(cfg_group->ips[idx], cfg_group->ports[idx]);
+    int fpm_sock = fcgi_pool_conn_acquire(cfg_group->ips[idx], cfg_group->ports[idx]);
+    if (fpm_sock < 0) {
+        return -1;
+    }
+
+    // Set non blocking
+    if (fcgi_set_socket_nonblocking(fpm_sock) == -1) {
+        // Tutup socket atau kembalikan ke pool jika gagal set non-blocking
+        close(fpm_sock); 
+        return -1;
+    }
+
+    return fpm_sock;
 }
 
 // Menghancurkan Sesi dan Mengembalikan/Membuang Koneksi FPM
-void fcgi_session_destroy(HalmosFCGISession *session) {
+void fcgi_session_destroy(FCGISession *session) {
     if (!session) return;
 
     if (session->fpm_sock != -1) {
@@ -172,7 +185,7 @@ void fcgi_session_destroy(HalmosFCGISession *session) {
 }
 
 // Eksekusi Langkah State Machine (FSM Step) per I/O Event
-int fcgi_session_http1_step(HalmosFCGISession *session, uint32_t revents) {
+int fcgi_session_http1_step(FCGISession *session, uint32_t revents) {
     if (!session) {
         //fprintf(stderr, "[DEBUG-FCGI] ERROR: session NULL\n");
         return FCGI_SES_STATUS_ERROR;

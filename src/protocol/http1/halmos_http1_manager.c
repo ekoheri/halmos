@@ -14,7 +14,7 @@
 #include "halmos_sec_tls.h"
 #include "halmos_log.h"
 #include "halmos_ws_system.h"
-#include "halmos_fcgi.h"
+#include "halmos_fcgi_proto.h"
 #include "halmos_fcgi_session.h"
 
 #include <stdio.h>

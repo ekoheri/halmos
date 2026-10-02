@@ -40,7 +40,7 @@ typedef struct {
 
     int fcgi_sock;
 
-    HalmosFCGISession *fcgi_sess;
+    FCGISession *fcgi_sess;
 } HTTP1Session;
 
 void http1_session_destroy(void *session);

@@ -3,7 +3,7 @@
 #endif
 // Penting untuk POLLRDHUP
 
-#include "halmos_fcgi.h"
+#include "halmos_fcgi_pool.h"
 #include "halmos_log.h"
 #include "halmos_global.h"
 
@@ -20,7 +20,7 @@
 #include <fcntl.h> // Diperlukan untuk fcntl, O_NONBLOCK
 
 // Instance global pool
-HalmosFCGI_Pool fcgi_pool;
+FCGI_Pool fcgi_pool;
 
 static int create_backend_socket(const char *target, int port, bool is_unix);
 
@@ -36,7 +36,7 @@ static int get_backend_index(const char *target, int port);
  */
 void fcgi_pool_init(void) {
     fcgi_pool.pool_size = g_fcgi_pool_size;
-    fcgi_pool.connections = malloc(sizeof(HalmosFCGI_Conn) * fcgi_pool.pool_size);
+    fcgi_pool.connections = malloc(sizeof(FCGI_Conn) * fcgi_pool.pool_size);
     
     if (!fcgi_pool.connections) {
         write_log_error("[FCGI-POOL] FATAL: Memory allocation failed");
