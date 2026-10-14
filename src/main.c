@@ -1,3 +1,53 @@
+/* ==========================================================================
+ * HALMOS WEB SERVER - MAIN ENTRY POINT & ARCHITECTURAL OVERVIEW
+ * --------------------------------------------------------------------------
+ * TENTANG TEKNOLOGI HALMOS:
+ * 
+ * Halmos adalah web server dan reverse proxy konkurensi tinggi berbasis C dengan 
+ * arsitektur asinkron event-driven (non-blocking I/O). Dirancang untuk mendobrak 
+ * batasan konfigurasi statis tradisional, Halmos mengintegrasikan sistem kesadaran 
+ * mandiri (hardware-aware adaptive engine) yang secara otonom mengkalibrasi kapasitas 
+ * operasionalnya berdasarkan realitas telemetri mesin saat startup.
+ * 
+ * PILAR ARSITEKTUR UTAMA:
+ * 
+ * 1. LAPISAN PROTOKOL JARINGAN (HTTP/1.1, HTTP/2, & WEBSOCKET):
+ *    - Menyediakan parser dan penangan protokol web modern secara asinkron.
+ *    - Mendukung manajemen koneksi persisten HTTP/1.1, multiplexing aliran data 
+ *      untuk HTTP/2, serta channel komunikasi real time full-duplex melalui WebSocket.
+ * 
+ * 2. HARDWARE-AWARE ADAPTIVE INITIALIZATION (halmos_core_adaptive):
+ *    - Halmos tidak mengandalkan konfigurasi manual yang kaku, tetapi sistem membaca kondisi 
+ *      nyata perangkat keras (Jumlah Core CPU, Total RAM, dan Batasan File Descriptor).
+ *    - Secara otomatis menghitung batasan jumlah worker, mengamankan cadangan memori untuk OS/database 
+ *      (sebesar 25% dari total RAM), serta menyelaraskan ukuran batch event jaringan.
+ * 
+ * 3. MULTI-RUNTIME BACKEND POOL & FASTCGI DISPATCHER (halmos_fcgi_pool):
+ *    - Bertindak sebagai gateway cerdas yang menjembatani permintaan client ke dalam 
+ *      arsitektur hybrid 3 bahasa (PHP, Rust, Python) melalui protokol FastCGI/FPM.
+ *    - Melakukan parsing konfigurasi backend secara dinamis (misal membaca pm.max_children 
+ *      milik PHP-FPM) serta mendistribusikan sisa kuota worker secara proporsional 
+ *      berdasarkan anggaran memori masing-masing proses.
+ * 
+ * 4. EVENT LOOP, TASK QUEUE, & ADAPTIVE MULTI-THREAD:
+ *    - Menerapkan arsitektur multi-thread adaptif di mana jumlah thread dan worker 
+ *      diskalakan secara dinamis mengikuti ketersediaan inti prosesor (CPU cores).
+ *    - Menggunakan mekanisme polling berbasis event (epoll) untuk menangani 
+ *      ribuan deskriptor koneksi konkuren secara asinkron dengan overhead minimal.
+ *    - Dilengkapi antrean tugas (Task Queue) berkapasitas adaptif dengan pengaman 
+ *      mutlak (MAX_QUEUE_CAPACITY) guna menangkis lonjakan trafik ekstrem atau serangan DoS.
+ * 
+ * 5. DIAGNOSTICS, LOGGING & ADVISORY SYSTEM (halmos_log & halmos_core_config):
+ *    - Menyediakan laporan audit kapasitas sistem saat pertama kali menyala (halmos -p).
+ *    - Memberikan saran taktis (advisory) bagi administrator apabila batas kernel sistem 
+ *      seperti ulimit atau konfigurasi pool backend kurang optimal untuk perangkat keras.
+ * 
+ * TANGGUNG JAWAB BERKAS (MAIN.C):
+ * Program main.c ini bertindak sebagai pusat kendali utama (entry point) yang menginisialisasi 
+ * argumen terminal, memuat konfigurasi global, mengeksekusi mesin adaptif, memvalidasi 
+ * alokasi pool backend lintas runtime, dan menjalankan siklus utama server (main event loop).
+ * ========================================================================== */
+
 #include "halmos_global.h"
 #include "halmos_core_config.h"
 #include "halmos_core_adaptive.h"
@@ -5,14 +55,13 @@
 #include "halmos_core_event_loop.h"
 #include "halmos_core_queue.h"
 #include "halmos_core_thread_pool.h"
-#include "halmos_log.h"
 #include "halmos_sec_traffic.h"
 #include "halmos_sec_tls.h"
 #include "halmos_fcgi_pool.h"
 #include "halmos_http_route.h"
 #include "halmos_http_vhost.h"
 #include "halmos_ws_system.h"
-
+#include "halmos_log.h"
 
 #include <signal.h>
 #include <stdlib.h>
@@ -24,7 +73,7 @@
 
 // Definisi Identitas & Konfigurasi Global
 #define HALMOS_NAME       "Halmos Web Server"
-#define HALMOS_VERSION    "1.1.0-RC1"
+#define HALMOS_VERSION    "1.1.1-RC1"
 #define HALMOS_CONFIG_PATH "/etc/halmos/halmos.conf"
 
 // Handle sinyal dengan aman (Async-Signal Safe)
@@ -130,6 +179,19 @@ int main(int argc, char *argv[]) {
             return EXIT_SUCCESS;
         } else if (strcmp(argv[1], "-v") == 0 || strcmp(argv[1], "--version") == 0) {
             printf("%s v%s\n", HALMOS_NAME, HALMOS_VERSION);
+            return EXIT_SUCCESS;
+        } else if (strcmp(argv[1], "-a") == 0 || strcmp(argv[1], "--advisor") == 0) {
+            if (core_config_load(HALMOS_CONFIG_PATH) != 0) {
+                fprintf(stderr, "[ERROR] Configuration test FAILED: Cannot parse %s\n", HALMOS_CONFIG_PATH);
+                return EXIT_FAILURE;
+            }
+            // Cek apakah ada argumen path file tambahan setelah -a (yaitu di argv[2])
+            const char *custom_file = NULL;
+            if (argc > 2 && argv[2][0] != '-') {
+                custom_file = argv[2];
+            }
+            
+            core_adaptive_advisor(custom_file); // Sesuaikan dengan nama fungsi Anda (run_halmos_advisor atau utils_run_advisor)
             return EXIT_SUCCESS;
         } else {
             printf("Unknown command. Use '-h' or '--help' for available options.\n");

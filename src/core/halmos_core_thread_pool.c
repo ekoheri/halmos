@@ -11,6 +11,8 @@
 #include <unistd.h>
 #include <string.h>
 #include <errno.h>
+#include <sys/resource.h>
+#include <time.h>
  
 void mark_worker_idle(TaskQueue *q);
  
@@ -20,6 +22,7 @@ void mark_worker_idle(TaskQueue *q);
  ********************************************************************/
 void *core_thread_pool_worker(void *arg) {
     (void)arg;
+    
     while (1) {
         struct timeval arrival;
         halmos_event_t event_item;
@@ -62,8 +65,15 @@ void *core_thread_pool_worker(void *arg) {
         atomic_fetch_add(&global_telemetry.total_requests, 1);
  
         struct timespec start, end;
-        clock_gettime(CLOCK_MONOTONIC, &start);
+        struct rusage usage_start, usage_end; 
  
+        clock_gettime(CLOCK_MONOTONIC, &start);
+        
+        // Ambil rusage awal HANYA jika metrics diaktifkan
+        if (config.metrics_enabled) {
+            getrusage(RUSAGE_THREAD, &usage_start);
+        }
+
         // 2. PROSES REQUEST (Dispatcher Utama)
         // Sepanjang fungsi ini, I/O terproteksi oleh conn->io_lock
         int status = http_bridge_dispatch(sock_client, event_item.events);
@@ -117,6 +127,35 @@ void *core_thread_pool_worker(void *arg) {
         clock_gettime(CLOCK_MONOTONIC, &end);
         atomic_store(&global_telemetry.last_latency_ms, hitung_durasi(start, end));
         
+        // Proses metrik disertasi HANYA jika diaktifkan di konfigurasi
+        if (config.metrics_enabled) {
+            getrusage(RUSAGE_THREAD, &usage_end);
+ 
+            uint64_t exec_time_us = (uint64_t)(end.tv_sec - start.tv_sec) * 1000000ULL + 
+                                    (uint64_t)(end.tv_nsec - start.tv_nsec) / 1000ULL;
+
+            long cpu_time_us = 0;
+            if (usage_end.ru_utime.tv_sec >= usage_start.ru_utime.tv_sec) {
+                cpu_time_us = (usage_end.ru_utime.tv_sec - usage_start.ru_utime.tv_sec) * 1000000L +
+                            (usage_end.ru_utime.tv_usec - usage_start.ru_utime.tv_usec) +
+                            (usage_end.ru_stime.tv_sec - usage_start.ru_stime.tv_sec) * 1000000L +
+                            (usage_end.ru_stime.tv_usec - usage_start.ru_stime.tv_usec);
+            }
+            int bound_type = 0;
+            if (exec_time_us > 0) {
+                double cpu_ratio = (double)cpu_time_us / (double)exec_time_us;
+                bound_type = (cpu_ratio > 0.70) ? 1 : 0;
+            }
+
+            metrics_log_task_execution(
+                global_queue.count, 
+                global_queue.total_workers, 
+                atomic_load(&global_queue.active_workers), 
+                exec_time_us, 
+                bound_type
+            );
+        }
+
         // 4. Tandai koki (thread) kembali IDLE
         mark_worker_idle(&global_queue);
     }

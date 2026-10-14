@@ -43,7 +43,7 @@ void core_queue_thread_worker_start(void) {
 int core_queue_push(TaskQueue *q, halmos_event_t event_item) { 
     pthread_mutex_lock(&q->lock);
     
-    // 1. Safety Check: Kapasitas Parkir
+    // 1. Safety Check: Kapasitas Antrian
     if (q->count >= q->max_queue_limit) {
         pthread_mutex_unlock(&q->lock);
         write_log_error("[QUEUE] Capacity reached! Rejecting client FD %d (Gen: %u)", 
@@ -78,8 +78,7 @@ int core_queue_push(TaskQueue *q, halmos_event_t event_item) {
       queue_threshold = gunakan 5% saja (0.05)
       tetapi kalau di server production,queue_threshold buat saja 50% (0.5) ya
     */
-    //int queue_threshold = q->max_queue_limit * 0.05;//ini untuk uji saja
-    int queue_threshold = q->max_queue_limit * 0.5; // ini di server production
+    int queue_threshold = q->max_queue_limit * config.queue_threshold_ratio;
 
     int spawn_count = 0;
 
@@ -88,10 +87,21 @@ int core_queue_push(TaskQueue *q, halmos_event_t event_item) {
         && !q->scaling_in_progress) {
 
         int available_slots = q->max_threads_limit - q->total_workers;
-        spawn_count = (available_slots < 4) ? available_slots : 4;
+        int spawn_step = config.spawn_worker_step; // Mengambil dari file konfigurasi
+
+        spawn_count = (available_slots < spawn_step) ? available_slots : spawn_step;
 
         q->total_workers += spawn_count;
         q->scaling_in_progress = 1;
+
+        // --- PANGGIL METRIK UPSCALE ---
+        metrics_log_event(
+            METRIC_EVENT_UPSCALE, 
+            spawn_count, 
+            q->count, 
+            q->total_workers, 
+            atomic_load(&q->active_workers)
+        );
     }
 
     // 5. Bangunkan thread
@@ -118,8 +128,8 @@ int core_queue_push(TaskQueue *q, halmos_event_t event_item) {
             pthread_mutex_unlock(&q->lock);
         }
 
-        write_log("[SCALING] Load spike detected. Upscaling pool to %d workers (%d spawned)", 
-                  q->total_workers, actually_spawned);
+        //write_log("[SCALING] Load spike detected. Upscaling pool to %d workers (%d spawned)", 
+        //          q->total_workers, actually_spawned);
 
         pthread_mutex_lock(&q->lock);
         q->scaling_in_progress = 0;
@@ -168,7 +178,17 @@ int core_queue_pop(TaskQueue *q, halmos_event_t *out_event, struct timeval *arri
         // === LOGIKA DOWNSCALING (DETACHED WORKER) ===
         if (rc == ETIMEDOUT && q->head == NULL && q->total_workers > q->min_threads_limit) {
             q->total_workers--;
-            write_log("[SCALING] Load subsided. Downscaling pool to %d workers", q->total_workers);
+
+            // --- PANGGIL METRIK DOWNSCALE DI SINI ---
+            metrics_log_event(
+                METRIC_EVENT_DOWNSCALE, 
+                -1, // Delta negatif karena worker berkurang 1
+                q->count, 
+                q->total_workers, 
+                atomic_load(&q->active_workers)
+            );
+
+            //write_log("[SCALING] Load subsided. Downscaling pool to %d workers", q->total_workers);
             pthread_cond_signal(&q->exit_cond); // Beritahu bahwa thread ini keluar
             pthread_mutex_unlock(&q->lock);
             
@@ -190,6 +210,22 @@ int core_queue_pop(TaskQueue *q, halmos_event_t *out_event, struct timeval *arri
     }
     int sock = tmp->event.fd;
     *arrival = tmp->arrival_time;
+
+    // --- HITUNG QUEUE WAIT TIME ($T_{queue}$) DI SINI ---
+    gettimeofday(&now, NULL);
+    uint64_t arrival_us = (uint64_t)tmp->arrival_time.tv_sec * 1000000ULL + tmp->arrival_time.tv_usec;
+    uint64_t pop_us = (uint64_t)now.tv_sec * 1000000ULL + now.tv_usec;
+    uint64_t queue_wait_us = (pop_us > arrival_us) ? (pop_us - arrival_us) : 0;
+
+    // Anda bisa mencatat periodic snapshot secara opsional di sini atau via thread terpisah, 
+    // contoh pencatatan periodik langsung ringan:
+    metrics_log_periodic(
+        q->count, 
+        q->max_queue_limit, 
+        q->total_workers, 
+        atomic_load(&q->active_workers), 
+        queue_wait_us
+    );
     
     q->head = q->head->next;
     if (q->head == NULL) q->tail = NULL;
@@ -278,13 +314,13 @@ int get_adaptive_timeout(TaskQueue *q) {
     int high_load_threshold = (int)(n_cores * 2);
     float load_factor = (q->max_queue_limit > 0) ? (float)q->count / q->max_queue_limit : 0;
 
-    if (load_factor > 0.5 || q->count > high_load_threshold) {
-        return 300; 
-    } 
+    if (load_factor > config.queue_threshold_ratio || q->count > high_load_threshold) {
+        return config.timeout_worker_high_load; // Membaca dari konfigurasi (default: 300)
+    }
     else if (q->count > 0) {
-        return 60; 
+        return config.timeout_worker_light_load; 
     } 
     else {
-        return 30; 
+        return config.timeout_worker_idle; 
     }
 }
