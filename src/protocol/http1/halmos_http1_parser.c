@@ -43,11 +43,17 @@ bool http1_parser_parse_header(char *raw_data, size_t total_received, RequestHea
 
     // 1. CARI BATAS HEADER (\r\n\r\n)
     char *header_end = strstr(raw_data, "\r\n\r\n");
-    if (!header_end) return false;
+    if (!header_end) {
+        write_log_warn_code(WARN_PROTO_H1_MALFORMED);
+        return false;
+    }    
 
     char *line_start = raw_data;
     char *line_end = strstr(line_start, "\r\n");
-    if (!line_end || line_end > header_end) return false;
+    if (!line_end || line_end > header_end) {
+        write_log_warn_code(WARN_PROTO_H1_MALFORMED);
+        return false;
+    }
 
     // --- PARSE REQUEST LINE (METHOD URI VERSION) ---
     char *m_end = strchr(line_start, ' ');

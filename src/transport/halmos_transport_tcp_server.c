@@ -2,6 +2,7 @@
 #include "halmos_global.h"
 #include "halmos_core_config.h"
 #include "halmos_log.h"
+#include "halmos_errors.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -22,11 +23,13 @@ int qlen = 5;
 void tcp_set_nonblocking(int sock) {
     int flags = fcntl(sock, F_GETFL, 0);
     if (flags == -1) {
-        write_log_error("[NET] Failed to get socket flags for FD %d", sock);
+        //write_log_error("[NET] Failed to get socket flags for FD %d", sock);
+        write_log_error_code(ERR_TR_SOCKET_FLAGS, sock);
         return;
     }
     if (fcntl(sock, F_SETFL, flags | O_NONBLOCK) == -1) {
-        write_log_error("[NET] Failed to set O_NONBLOCK for FD %d", sock);
+        //write_log_error("[NET] Failed to set O_NONBLOCK for FD %d", sock);
+        write_log_error_code(ERR_TR_NONBLOCK, sock);
     }
 }
 
@@ -38,7 +41,8 @@ int tcp_create_server(const char* ip, int port) {
 
     sock_server = socket(AF_INET, SOCK_STREAM, 0);
     if (sock_server < 0) {
-        write_log_error("[ERR] Failed to create master socket: %s", strerror(errno));
+        //write_log_error("[ERR] Failed to create master socket: %s", strerror(errno));
+        write_log_error_code(ERR_TR_CREATE_MASTER, strerror(errno));
         return -1;
     }
 
@@ -50,12 +54,14 @@ int tcp_create_server(const char* ip, int port) {
     serv_addr.sin_port = htons(port);
 
     if (bind(sock_server, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
-        write_log_error("[CRIT] Bind failed on %s:%d. Address already in use?", ip, port);
+        //write_log_error("[CRIT] Bind failed on %s:%d. Address already in use?", ip, port);
+        write_log_error_code(ERR_TR_BIND, ip, port);
         return -1;
     }
 
     if (listen(sock_server, 4096) < 0) {
-        write_log_error("[CRIT] Listen failed on %s:%d: %s", ip, port, strerror(errno));
+        //write_log_error("[CRIT] Listen failed on %s:%d: %s", ip, port, strerror(errno));
+        write_log_error_code(ERR_TR_LISTEN, ip, port, strerror(errno));
         return -1;
     }
 

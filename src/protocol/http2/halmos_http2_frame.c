@@ -44,7 +44,8 @@ void http2_frame_send(int fd, bool is_tls, uint8_t type, uint8_t flags, uint32_t
         // ada sebelum http2_frame_send dipanggil), tapi jaga-jaga saja.
         ssize_t total_sent = http2_socket_write(fd, is_tls, total_buf, len + 9);
         if (total_sent < (ssize_t)(len + 9)) {
-            write_log_error("[H2-SOCKET] Partial write (no session context) on frame type 0x%02X", type);
+            //write_log_error("[H2-SOCKET] Partial write (no session context) on frame type 0x%02X", type);
+            write_log_error_code(ERR_PROTO_H2_PARTIAL_W, type);
         }
         return;
     }
@@ -99,7 +100,8 @@ void http2_frame_handle_window_update(HTTP2Session *session, HTTP2FrameHeader *h
  
     if (increment == 0) {
         // RFC 7540 Section 6.9: Increment 0 adalah PROTOCOL_ERROR
-        write_log_error("[H2-WINDOW] Error: Window update increment of 0 on stream %u", head->stream_id);
+        //write_log_error("[H2-WINDOW] Error: Window update increment of 0 on stream %u", head->stream_id);
+        write_log_error_code(ERR_PROTO_H2_WIN_INC, head->stream_id);
         return;
     }
  

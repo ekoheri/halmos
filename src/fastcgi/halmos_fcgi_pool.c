@@ -39,7 +39,8 @@ void fcgi_pool_init(void) {
     fcgi_pool.connections = malloc(sizeof(FCGI_Conn) * fcgi_pool.pool_size);
     
     if (!fcgi_pool.connections) {
-        write_log_error("[FCGI-POOL] FATAL: Memory allocation failed");
+        //write_log_error("[FCGI-POOL] FATAL: Memory allocation failed");
+        write_log_error_code(ERR_FCGI_MEM_ALLOC);
         exit(EXIT_FAILURE);
     }
 

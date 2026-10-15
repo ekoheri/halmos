@@ -212,8 +212,9 @@ int read_frame_header(HTTP2Session *session, int sock_client, bool is_tls, halmo
                 if (session->current_frame_head.length > 0) {
                     size_t max_allowed_payload = (config.max_body_size > 0) ? config.max_body_size : 1048576;
                     if (session->current_frame_head.length > max_allowed_payload) {
-                        write_log_error("[H2-ERROR] Frame payload length %u exceeds limit (%zu) on FD %d", 
-                                        session->current_frame_head.length, max_allowed_payload, sock_client);
+                        //write_log_error("[H2-ERROR] Frame payload length %u exceeds limit (%zu) on FD %d", 
+                        //                session->current_frame_head.length, max_allowed_payload, sock_client);
+                        write_log_error_code(ERR_PROTO_H2_PAYLOAD_L, session->current_frame_head.length, max_allowed_payload, sock_client);
                         return 0; 
                     }
                     session->payload_buf = malloc(session->current_frame_head.length);

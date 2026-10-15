@@ -73,8 +73,9 @@ int ssl_init(void) {
     halmos_tls_ctx = SSL_CTX_new(method);
  
     if (!halmos_tls_ctx) {
-        write_log_error("[SEC] Failed to create SSL context: %s", 
-                        ERR_error_string(ERR_get_error(), NULL));
+        //write_log_error("[SEC] Failed to create SSL context: %s", 
+        //                ERR_error_string(ERR_get_error(), NULL));
+        write_log_error_code(ERR_SEC_SSL_CTX, ERR_error_string(ERR_get_error(), NULL));
         return -1;
     }
  
@@ -103,14 +104,16 @@ int ssl_init(void) {
     SSL_CTX_set_mode(halmos_tls_ctx, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER | SSL_MODE_ENABLE_PARTIAL_WRITE);
  
     if (SSL_CTX_use_certificate_chain_file(halmos_tls_ctx, config.ssl_certificate_file) <= 0) {
-        write_log_error("[SEC] Failed to load certificate file: %s", 
-                        ERR_error_string(ERR_get_error(), NULL));
+        //write_log_error("[SEC] Failed to load certificate file: %s", 
+        //                ERR_error_string(ERR_get_error(), NULL));
+        write_log_error_code(ERR_SEC_LOAD_CERT, ERR_error_string(ERR_get_error(), NULL));
         return -1;
     }
  
     if (SSL_CTX_use_PrivateKey_file(halmos_tls_ctx, config.ssl_private_key_file, SSL_FILETYPE_PEM) <= 0) {
-        write_log_error("[SEC] Failed to load private key file: %s", 
-                        ERR_error_string(ERR_get_error(), NULL));
+        //write_log_error("[SEC] Failed to load private key file: %s", 
+        //                ERR_error_string(ERR_get_error(), NULL));
+        write_log_error_code(ERR_SEC_LOAD_KEY, ERR_error_string(ERR_get_error(), NULL));
         return -1;
     }
  
@@ -151,7 +154,8 @@ void ssl_init_mapping(int max_fds) {
 void ssl_set_for_fd(int fd, SSL *ssl) {
     halmos_conn_t *conn = core_conn_t_get(fd);
     if (!conn) {
-        write_log_error("[SEC] Mapping failed: FD %d has no connection slot", fd);
+        //write_log_error("[SEC] Mapping failed: FD %d has no connection slot", fd);
+        write_log_error_code(ERR_SEC_SLOT_MAP, fd);
         return;
     }
     conn->ssl = ssl;

@@ -66,8 +66,8 @@ void http_route_auto_reload() {
             route_load(path_route);
         } else {
             // Jika bukan ENOENT, maka ini adalah masalah Izin atau Path Rusak
-            write_log_error("[ROUTER] SYSTEM ERROR on path: [%s]", path_route);
-            write_log_error("[ROUTER] REASON: %s (errno: %d)", strerror(err_code), err_code);
+            //write_log_error("[ROUTER] SYSTEM ERROR on path: [%s]", path_route);
+            write_log_error_code(ERR_PROTO_ROUTE_FAIL, path_route);
         }
     }
 }
@@ -173,7 +173,8 @@ void route_load(const char *path_route) {
             g_total_routes = 0;
             return;
         } else {
-            write_log_error("[ROUTER] Cannot access config file: %s", path_route);
+            //write_log_error("[ROUTER] Cannot access config file: %s", path_route);
+            write_log_error_code(ERR_PROTO_ROUTE_ACCESS, path_route);
             return;
         }
     }

@@ -1,6 +1,8 @@
 #ifndef HALMOS_LOG_H
 #define HALMOS_LOG_H
 
+#include "halmos_errors.h"
+
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdint.h>
@@ -31,6 +33,7 @@ typedef enum {
 typedef enum {
     LOG_TYPE_SYSTEM,
     LOG_TYPE_ERROR,
+    LOG_TYPE_WARNING,
     LOG_TYPE_ACCESS,
     LOG_TYPE_TELEMETRY,
     LOG_TYPE_METRICS // BARU: Untuk format CSV khusus metrik Halmos
@@ -59,6 +62,8 @@ extern LogTelemetry global_telemetry;
 // Deklarasi fungsi-fungsi log utama
 void write_log(const char *format, ...);
 void write_log_error(const char *format, ...); 
+void write_log_error_code(HalmosErrorCode code, ...);
+void write_log_warn_code(HalmosErrorCode code, ...);
 void write_log_access(const char *protocol, 
     const char *client_ip, 
     const char *method, 

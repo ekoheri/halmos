@@ -46,14 +46,13 @@ int core_event_loop_start(void) {
  
     events = malloc(sizeof(struct epoll_event) * g_event_batch_size);
     if (!events) {
-        write_log_error("[FATAL] Failed to allocate memory for epoll events");
+        //write_log_error("[FATAL] Failed to allocate memory for epoll events");
+        write_log_error_code(ERR_CORE_EPOLL_MEM);
         return -1;
     }
  
     sock_server = tcp_create_server(config.server_name, config.server_port);
     if (sock_server < 0) {
-        write_log_error("[FATAL] Failed to bind TCP listener on %s:%d", 
-                config.server_name, config.server_port);
         free(events);
         events = NULL;
         return -1; // PERBAIKAN: Return -1, bukan exit(EXIT_FAILURE)
@@ -61,7 +60,8 @@ int core_event_loop_start(void) {
  
     epoll_fd = epoll_create1(0);
     if (epoll_fd < 0) { // PERBAIKAN: Cek kegagalan epoll_create1
-        write_log_error("[FATAL] epoll_create1 failed: %s", strerror(errno));
+        //write_log_error("[FATAL] epoll_create1 failed: %s", strerror(errno));
+        write_log_error_code(ERR_CORE_EPOLL_CREATE, strerror(errno));
         close(sock_server);
         free(events);
         events = NULL;
@@ -72,7 +72,8 @@ int core_event_loop_start(void) {
     ev.data.fd = sock_server;
     ev.events = EPOLLIN;
     if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, sock_server, &ev) < 0) {
-        write_log_error("[FATAL] Failed to add sock_server to epoll: %s", strerror(errno));
+        //write_log_error("[FATAL] Failed to add sock_server to epoll: %s", strerror(errno));
+        write_log_error_code(ERR_CORE_EPOLL_ADD_SOCK, strerror(errno));
         close(sock_server);
         close(epoll_fd);
         free(events);
@@ -87,7 +88,8 @@ int core_event_loop_start(void) {
         ev_bridge.events = EPOLLIN;
         epoll_ctl(epoll_fd, EPOLL_CTL_ADD, bridge_fd, &ev_bridge);
     } else {
-        write_log_error("[WARN] IPC UDS Bridge initialization failed.");
+        //write_log_error("[WARN] IPC UDS Bridge initialization failed.");
+        write_log_error_code(ERR_CORE_UDS_INIT);
     }
  
     write_log("[CORE] Server listening on %s:%d", config.server_name, config.server_port);
@@ -99,7 +101,8 @@ void core_event_loop_run() {
         int num_fds = epoll_wait(epoll_fd, events, g_event_batch_size, 100); // awalnya -1
         if (num_fds < 0) {
             if (errno != EINTR) {
-                write_log_error("[CORE] epoll_wait critical error: %s", strerror(errno));
+                //write_log_error("[CORE] epoll_wait critical error: %s", strerror(errno));
+                write_log_error_code(ERR_CORE_EPOLL_WAIT, strerror(errno));
             }
             continue; // Jangan for-loop kalau error
         }
@@ -123,8 +126,9 @@ void core_event_loop_run() {
                         if (errno == EINTR) continue;
  
                         // Tambahkan keterangan errno biar tidak menebak-nebak
-                        write_log_error("[ERR] Accept failed:: %s (Errno: %d)", strerror(errno), errno);
-                        
+                        //write_log_error("[ERR] Accept failed:: %s (Errno: %d)", strerror(errno), errno);
+                        write_log_error_code(ERR_CORE_ACCEPT_FAIL, strerror(errno), errno);
+
                         // Jika karena limit file descriptor (EMFILE), kita harus berhenti sebentar
                         if (errno == EMFILE || errno == ENFILE) {
                             // Kasih jeda 1ms biar kernel bisa bersih-bersih FD lama
@@ -144,7 +148,8 @@ void core_event_loop_run() {
                     uint32_t conn_gen = core_conn_t_activate(sock_client);
                     if (conn_gen == 0) {
                         // FD berada di luar jangkauan g_max_fd
-                        write_log_error("[CRIT] FD %d exceeds g_max_fd capacity", sock_client);
+                        //write_log_error("[CRIT] FD %d exceeds g_max_fd capacity", sock_client);
+                        write_log_error_code(ERR_CORE_MAX_FD_EXCEED, sock_client);
                         close(sock_client);
                         atomic_fetch_sub(&global_telemetry.active_connections, 1);
                         break;
@@ -171,7 +176,8 @@ void core_event_loop_run() {
                     
                     if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, sock_client, &ev_client) == -1) {
                         if (errno != EBADF) {
-                            write_log_error("[CRIT] Epoll add failed for client FD %d: %s", sock_client, strerror(errno));
+                            //write_log_error("[CRIT] Epoll add failed for client FD %d: %s", sock_client, strerror(errno));
+                            write_log_error_code(ERR_CORE_EPOLL_ADD_CLI, sock_client, strerror(errno));
                         }
                         // Kurangi counter & jalankan cleanup terisolasi agar slot connection kembali reset
                         atomic_fetch_sub(&global_telemetry.active_connections, 1);
@@ -282,7 +288,8 @@ void core_event_loop_rearm_epoll_ex(int fd, uint32_t events_mask) {
  
     if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev) == -1) {
         if (errno != EBADF) {
-            write_log_error("[NET] Failed to re-arm epoll for FD %d: %s", fd, strerror(errno));
+            //write_log_error("[NET] Failed to re-arm epoll for FD %d: %s", fd, strerror(errno));
+            write_log_error_code(ERR_CORE_EPOLL_REARM, fd, strerror(errno));
         }
     }
 } 

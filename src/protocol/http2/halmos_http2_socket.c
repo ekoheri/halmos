@@ -50,7 +50,8 @@ void http2_socket_write_or_buffer(HTTP2Session *session, int fd, bool is_tls, co
             }
  
             if (!retry) {
-                write_log_error("[H2-SOCKET] Hard write error on FD %d, marking session failed", fd);
+                //write_log_error("[H2-SOCKET] Hard write error on FD %d, marking session failed", fd);
+                write_log_error_code(ERR_PROTO_H2_HARD_W, fd);
                 session->write_error = true;
                 return;
             }
@@ -69,7 +70,8 @@ void http2_socket_write_or_buffer(HTTP2Session *session, int fd, bool is_tls, co
  
     unsigned char *new_buf = malloc(new_total);
     if (!new_buf) {
-        write_log_error("[H2-SOCKET] Malloc failed for pending write buffer on FD %d", fd);
+        //write_log_error("[H2-SOCKET] Malloc failed for pending write buffer on FD %d", fd);
+        write_log_error_code(ERR_PROTO_H2_MALLOC, fd);
         session->write_error = true;
         return;
     }
@@ -122,7 +124,8 @@ int http2_socket_flush_pending_write(HTTP2Session *session) {
         }
         if (retry) return 1;
  
-        write_log_error("[H2-SOCKET] Hard write error while flushing pending buffer on FD %d", session->fd);
+        //write_log_error("[H2-SOCKET] Hard write error while flushing pending buffer on FD %d", session->fd);
+        write_log_error_code(ERR_PROTO_H2_FLUSH_W, session->fd);
         return -1;
     }
  

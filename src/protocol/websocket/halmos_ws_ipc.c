@@ -45,7 +45,8 @@ int setup_uds_bridge(const char *path) {
         if (S_ISSOCK(st.st_mode)) {
             unlink(path);
         } else {
-            write_log_error("[IPC] File %s exists and is NOT a socket. Aborting.", path);
+            //write_log_error("[IPC] File %s exists and is NOT a socket. Aborting.", path);
+            write_log_error_code(ERR_PROTO_IPC_NOT_SOCK, path);
             close(bridge_fd);
             return -1;
         }
@@ -58,19 +59,22 @@ int setup_uds_bridge(const char *path) {
 
     // 0660 grants RW permissions to owner and group (e.g., www-data) while blocking world access
     if (chmod(path, 0660) < 0) {
-        write_log_error("[IPC] Failed to change permissions on %s", path);
+        //write_log_error("[IPC] Failed to change permissions on %s", path);
+        write_log_error_code(ERR_PROTO_IPC_CHMOD, path);
     }
     
     // Explicit return checking prevents leaving partially bound sockets open on failure
     if (listen(bridge_fd, SOMAXCONN) < 0) {
-        write_log_error("[IPC] Listen failed on %s: %s", path, strerror(errno));
+        //write_log_error("[IPC] Listen failed on %s: %s", path, strerror(errno));
+        write_log_error_code(ERR_PROTO_IPC_LISTEN, path, strerror(errno));
         close(bridge_fd);
         unlink(path);
         return -1;
     }
 
     if (set_nonblocking_bridge(bridge_fd) < 0) {
-        write_log_error("[IPC] Failed to set non-blocking on bridge_fd");
+        //("[IPC] Failed to set non-blocking on bridge_fd");
+        write_log_error_code(ERR_PROTO_IPC_NONBLOCK);
         close(bridge_fd);
         unlink(path);
         return -1;

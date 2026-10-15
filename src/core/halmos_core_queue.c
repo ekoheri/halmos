@@ -30,7 +30,8 @@ void core_queue_thread_worker_start(void) {
     for (int i = 0; i < initial_workers; i++) {
         pthread_t tid;
         if (spawn_detached_worker(&tid, core_thread_pool_worker, &global_queue) != 0) {
-            write_log_error("[ERR] Failed to create initial worker thread %d", i);
+            //write_log_error("[ERR] Failed to create initial worker thread %d", i);
+            write_log_error_code(ERR_CORE_INIT_WORKER, i);
         }
     }
     
@@ -46,8 +47,9 @@ int core_queue_push(TaskQueue *q, halmos_event_t event_item) {
     // 1. Safety Check: Kapasitas Antrian
     if (q->count >= q->max_queue_limit) {
         pthread_mutex_unlock(&q->lock);
-        write_log_error("[QUEUE] Capacity reached! Rejecting client FD %d (Gen: %u)", 
-                        event_item.fd, event_item.generation);
+        //write_log_error("[QUEUE] Capacity reached! Rejecting client FD %d (Gen: %u)", 
+        //                event_item.fd, event_item.generation);
+        write_log_error_code(ERR_CORE_QUEUE_CAPACITY, event_item.fd, event_item.generation);
         return -1; 
     }
 
@@ -117,7 +119,8 @@ int core_queue_push(TaskQueue *q, halmos_event_t event_item) {
             if (spawn_detached_worker(&tid, core_thread_pool_worker, q) == 0) {
                 actually_spawned++;
             } else {
-                write_log_error("[SCALING] pthread_create failed while upscaling");
+                //write_log_error("[SCALING] pthread_create failed while upscaling");
+                write_log_error_code(ERR_CORE_PTHREAD_SCALE);
             }
         }
 

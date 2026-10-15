@@ -607,13 +607,15 @@ PHPConfig fetch_php_fpm_config(void) {
     PHPConfig cfg = {50, 511, "dynamic"}; 
 
     if (strlen(config.php_fpm_config_path) == 0) {
-        write_log_error("[WARN] PHP-FPM config path not defined, using baseline default (max_children=50)");
+        //write_log_error("[WARN] PHP-FPM config path not defined, using baseline default (max_children=50)");
+        write_log_error_code(ERR_CORE_PHP_PATH_DEF);
         return cfg;
     }
 
     FILE *fp = fopen(config.php_fpm_config_path, "r");
     if (!fp) {
-        write_log_error("[ERR] Failed to open PHP-FPM config: %s. Fallback to max_children=50", config.php_fpm_config_path);
+        //write_log_error("[ERR] Failed to open PHP-FPM config: %s. Fallback to max_children=50", config.php_fpm_config_path);
+        write_log_error_code(ERR_CORE_PHP_OPEN_FAIL, config.php_fpm_config_path);
         return cfg;
     }
 

@@ -53,7 +53,8 @@ HTTP2Stream *http2_stream_get_or_create(HTTP2Session *session, uint32_t stream_i
         st = calloc(1, sizeof(HTTP2Stream));
         if (!st) {
             pthread_mutex_unlock(&session->streams_lock);
-            write_log_error("[H2-ERROR] Malloc failed for new stream ID %u", stream_id);
+            //write_log_error("[H2-ERROR] Malloc failed for new stream ID %u", stream_id);
+            write_log_error_code(ERR_PROTO_H2_STREAM_MAL, stream_id);
             return NULL;
         }
         st->stream_id = stream_id;

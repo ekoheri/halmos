@@ -155,7 +155,8 @@ static void ws_system_start_maintenance(void) {
     if (pthread_create(&tid, NULL, ws_system_maintenance_run, NULL) == 0) {
         pthread_detach(tid);
     } else {
-        write_log_error("[WS-SYSTEM] Failed to start maintenance thread!");
+        //write_log_error("[WS-SYSTEM] Failed to start maintenance thread!");
+        write_log_error_code(ERR_PROTO_WS_MAINT_TH);
     }
 }
 
@@ -256,20 +257,23 @@ ws_recv_status_t halmos_ws_recv_frame(int fd, int *opcode, unsigned char **out_p
 
                 /* RFC Validation 1: Fragmentation Check */
                 if (!st->fin) {
-                    write_log_error("[WS-RFC6455] FD %d: Fragmentation intentionally unsupported (FIN=0). Dropping.", fd);
+                    //write_log_error("[WS-RFC6455] FD %d: Fragmentation intentionally unsupported (FIN=0). Dropping.", fd);
+                    write_log_warn_code(WARN_PROTO_WS_FIN_0, fd);
                     return WS_RECV_FATAL;
                 }
 
                 /* RFC Validation 2: Control Frame Payload Limits */
                 bool is_control_frame = (st->opcode >= 0x08 && st->opcode <= 0x0A);
                 if (is_control_frame && st->payload_len > 125) {
-                    write_log_error("[WS-RFC6455] FD %d: Control frame exceeds 125 bytes limit (%zu bytes).", fd, st->payload_len);
+                    //write_log_error("[WS-RFC6455] FD %d: Control frame exceeds 125 bytes limit (%zu bytes).", fd, st->payload_len);
+                    write_log_warn_code(WARN_PROTO_WS_CTRL_LEN, fd, st->payload_len);
                     return WS_RECV_FATAL;
                 }
 
                 /* RFC Validation 3: Client-to-Server Masking Enforcer */
                 if (!st->masked) {
-                    write_log_error("[WS-RFC6455] FD %d: Client-to-server frame unmasked. Violation!", fd);
+                    //write_log_error("[WS-RFC6455] FD %d: Client-to-server frame unmasked. Violation!", fd);
+                    write_log_warn_code(WARN_PROTO_WS_UNMASKED, fd);
                     return WS_RECV_FATAL;
                 }
 
@@ -307,7 +311,8 @@ ws_recv_status_t halmos_ws_recv_frame(int fd, int *opcode, unsigned char **out_p
                 }
 
                 if (st->payload_len > MAX_WS_PAYLOAD) {
-                    write_log_error("[SECURITY] FD %d payload size limit exceeded (%zu bytes).", fd, st->payload_len);
+                    //write_log_error("[SECURITY] FD %d payload size limit exceeded (%zu bytes).", fd, st->payload_len);
+                    write_log_warn_code(WARN_PROTO_WS_PAYLOAD_SZ, fd, st->payload_len);
                     return WS_RECV_FATAL;
                 }
 
@@ -439,6 +444,7 @@ void ws_system_on_message(int sock_client, uint32_t stream_id, unsigned char *da
 
     if (parsed_json == NULL) {
         //write_log_error("[WS-JSON] Malformed JSON on FD %d (Stream %u)", sock_client, stream_id);
+        write_log_warn_code(WARN_PROTO_WS_JSON_ERR, sock_client, stream_id);
         json_tokener_free(tok);
         return;
     }
@@ -525,7 +531,8 @@ void ws_system_internal_dispatch(const char *json_raw) {
     struct json_tokener *tok = json_tokener_new();
     struct json_object *parsed_json = json_tokener_parse_ex(tok, json_raw, strlen(json_raw));
     if (!parsed_json) {
-        write_log_error("[WS-IPC] Malformed Internal JSON!");
+        //write_log_error("[WS-IPC] Malformed Internal JSON!");
+        write_log_warn_code(WARN_PROTO_WS_IPC_JSON);
         json_tokener_free(tok);
         return;
     }
