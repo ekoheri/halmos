@@ -115,7 +115,8 @@ int http_bridge_dispatch(int sock_client, uint32_t events) {
         if (conn->protocol_session_destroy == http2_session_destroy) {
             return http2_manager_session(conn);
         }
-        write_log_error("[BRIDGE] Unknown protocol_session destructor on FD %d, closing", sock_client);
+        //write_log_error("[BRIDGE] Unknown protocol_session destructor on FD %d, closing", sock_client);
+        write_log_error_code(ERR_PROTO_DESTRUCTOR, sock_client);
         return 0;
     }
  

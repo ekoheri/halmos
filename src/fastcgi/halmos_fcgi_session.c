@@ -71,7 +71,8 @@ FCGISession *fcgi_session_http1_create(int client_sock, int backend_type, Reques
 
     // 3. Validasi: pastikan ada node yang tersedia
     if (cfg_group->node_count <= 0) {
-        write_log_error("[FCGI] No nodes configured for backend type %d", backend_type);
+        //write_log_error("[FCGI] No nodes configured for backend type %d", backend_type);
+        write_log_error_code(ERR_FCGI_NO_NODES, backend_type);
         return NULL;
     }
 
@@ -93,7 +94,8 @@ FCGISession *fcgi_session_http1_create(int client_sock, int backend_type, Reques
 
     session->fpm_sock = fcgi_pool_conn_acquire(selected_ip, selected_port);
     if (session->fpm_sock < 0) {
-        write_log_error("[FCGI-SES] Gagal mengambil koneksi dari FPM pool untuk URI: %s", req->uri ? req->uri : "/");
+        //write_log_error("[FCGI-SES] Gagal mengambil koneksi dari FPM pool untuk URI: %s", req->uri ? req->uri : "/");
+        write_log_error_code(ERR_FCGI_FETCH_POOL, req->uri ? req->uri : "/");
         free(session);
         return NULL; // Batalkan sesi jika pool kosong/gagal
     }

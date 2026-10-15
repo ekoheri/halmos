@@ -256,7 +256,8 @@ int fcgi_io_splice_response(int fpm_fd, int sock_client, RequestHeader *req) {
     tv.tv_sec = 30; // Timeout 30 detik (Standar upstream)
     tv.tv_usec = 0;
     if (setsockopt(fpm_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0) {
-        write_log_error("[FCGI] Warning: Could not set SO_RCVTIMEO: %s", strerror(errno));
+        //write_log_error("[FCGI] Warning: Could not set SO_RCVTIMEO: %s", strerror(errno));
+        write_log_error_code(ERR_FCGI_RCV_TIMEO, strerror(errno));
     }
 
     if (use_splice && pipe(pipe_fds) < 0) {
@@ -269,9 +270,11 @@ int fcgi_io_splice_response(int fpm_fd, int sock_client, RequestHeader *req) {
         ssize_t n_head = recv(fpm_fd, h_buf, 8, MSG_WAITALL);
         if (n_head != 8) {
             if (n_head < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-                write_log_error("[FCGI] Timeout: Backend unresponsive for 30s at URI: %s", req->uri);
+                //write_log_error("[FCGI] Timeout: Backend unresponsive for 30s at URI: %s", req->uri);
+                write_log_error_code(ERR_FCGI_TIMEOUT, req->uri);
             } else {
-                write_log_error("[FCGI] Connection lost/Header malformed.");
+                //write_log_error("[FCGI] Connection lost/Header malformed.");
+                write_log_error_code(ERR_FCGI_CONN_LOST);
             }
             break; 
         }
@@ -420,7 +423,8 @@ int fcgi_io_splice_response(int fpm_fd, int sock_client, RequestHeader *req) {
                 if (recv(fpm_fd, err_msg, clen, MSG_WAITALL) != clen)
                     goto cleanup_error;
                 err_msg[clen] = '\0';
-                write_log_error("[PHP-STDERR] %s", err_msg);
+                //write_log_error("[PHP-STDERR] %s", err_msg);
+                write_log_error_code(ERR_FCGI_PHP_STDERR, err_msg);
                 free(err_msg);
             }
         }
@@ -450,7 +454,8 @@ cleanup_error:
 
     if (final_status != 0) {
         /* STATE INCONSISTENT: Socket beracun, buang dari pool! */
-        write_log_error("[FCGI] Protocol Desync or Timeout. Closing backend socket.");
+        //write_log_error("[FCGI] Protocol Desync or Timeout. Closing backend socket.");
+        write_log_error_code(ERR_FCGI_DESYNC);
         close(fpm_fd); 
         return -2; 
     }

@@ -74,8 +74,9 @@ bool sec_traffic_is_request_allowed(const char *client_ip, int limit_per_sec) {
                 // LOGIKA CERDAS: Hanya tulis log jika ini request pertama yang melampaui limit
                 // Agar tidak banjir log (Log Spamming)
                 if (hash_table[current_idx].count == limit_per_sec) {
-                    write_log_error("[SEC] Rate limit exceeded for IP: %s (Limit: %d req/sec)", 
-                                     client_ip, limit_per_sec);
+                    //write_log_error("[SEC] Rate limit exceeded for IP: %s (Limit: %d req/sec)", 
+                    //                 client_ip, limit_per_sec);
+                    write_log_warn_code(WARN_SEC_RATE_LIMIT, client_ip, limit_per_sec);
                     hash_table[current_idx].count++; // Naikkan agar log tidak muncul lagi di detik ini
                 }
                 pthread_mutex_unlock(&rate_limit_mutex);
@@ -120,7 +121,8 @@ void sec_traffic_start_janitor(void) {
         write_log("[SEC] Defense System: Janitor background service activated.");
     } else {
         janitor_running = false;
-        write_log_error("[SEC] Failed to start Janitor thread.");
+        //write_log_error("[SEC] Failed to start Janitor thread.");
+        write_log_error_code(ERR_SEC_JANITOR_TH);
     }
     pthread_mutex_unlock(&janitor_lock);
 }

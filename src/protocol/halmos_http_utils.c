@@ -128,7 +128,8 @@ char *sanitize_path(const char *root, const char *uri) {
     }
 
     if (strlen(resolved_root) + strlen(uri) + 2 > PATH_MAX) {
-        write_log_error("[ERR] Path too long");
+        //write_log_error("[ERR] Path too long");
+        write_log_error_code(ERR_PROTO_PATH_TOO_LONG);
         return NULL;
     }
 
@@ -142,13 +143,13 @@ char *sanitize_path(const char *root, const char *uri) {
 
     char resolved_path[PATH_MAX];
     if (realpath(full_path, resolved_path) == NULL) {
-        //write_log_error("[ERR] Realpath failed for: %s. Reason: %s", full_path, strerror(errno));
         return NULL;
     }
 
     if (strncmp(resolved_root, resolved_path, root_len) != 0) {
         // TANDA BAHAYA: Percobaan Path Traversal!
-        write_log_error("[SECURITY] Path traversal attempt blocked: %s", resolved_path);
+        //write_log_error("[SECURITY] Path traversal attempt blocked: %s", resolved_path);
+        write_log_warn_code(WARN_PROTO_PATH_TRAVERSAL, resolved_path);
         return NULL;
     }
 

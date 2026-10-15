@@ -66,6 +66,7 @@ void http1_response_send_mem(int client_fd, int status_code, const char *status_
 void http1_response_send_dir_listing(int sock_client, const char *path, const char *uri, bool is_tls) {
     DIR *d = opendir(path);
     if (!d) {
+        write_log_error_code(ERR_PROTO_H1_DIR_OPEN, path);
         http1_response_send_mem(sock_client, 403, "Forbidden", "<h1>403 Directory Access Denied</h1>", false, is_tls);
         return;
     }
@@ -117,6 +118,7 @@ int http1_response_plain(int sock_client, HTTP1Session *session) {
                 session->header_sent_offset += n;
             } else if (n < 0) {
                 if (errno == EAGAIN || errno == EWOULDBLOCK) return 3;
+                write_log_error_code(ERR_PROTO_H1_FILE_READ, strerror(errno), errno);
                 return 0;
             } else {
                 return 0;
@@ -136,6 +138,7 @@ int http1_response_plain(int sock_client, HTTP1Session *session) {
                 session->file_remaining -= (size_t)n_sent;
             } else if (n_sent < 0) {
                 if (errno == EAGAIN || errno == EWOULDBLOCK) return 3;
+                write_log_error_code(ERR_PROTO_H1_SOCKET_FAIL, sock_client, strerror(errno), errno);
                 return 0;
             } else { 
                 if (session->file_remaining > 0) return 0;
@@ -175,6 +178,7 @@ int http1_response_ssl(halmos_conn_t *conn, HTTP1Session *session) {
 
         while (session->file_remaining > 0) {
             if (lseek(session->file_fd, session->file_offset, SEEK_SET) == (off_t)-1) {
+                write_log_error_code(ERR_PROTO_H1_FILE_SEEK, strerror(errno), errno);
                 return 0;
             }
 
@@ -194,6 +198,7 @@ int http1_response_ssl(halmos_conn_t *conn, HTTP1Session *session) {
                 }
             } else if (n_read < 0) {
                 if (errno == EAGAIN || errno == EWOULDBLOCK) return 3;
+                write_log_error_code(ERR_PROTO_H1_SOCKET_FAIL, conn->fd, "SSL_write header failed", errno);
                 return 0;
             } else {
                 break;

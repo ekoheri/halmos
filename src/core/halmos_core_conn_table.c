@@ -20,13 +20,15 @@ void core_conn_t_clear_write_buf(halmos_conn_t *conn) {
 
 int core_conn_t_init(void) {
     if (g_max_fd == 0) {
-        write_log_error("[ERR] Invalid g_max_fd (0) for connection system initialization");
+        //write_log_error("[ERR] Invalid g_max_fd (0) for connection system initialization");
+        write_log_error_code(ERR_CORE_INVALID_MAX_FD);
         return -1;
     }
  
     g_connections = calloc(g_max_fd, sizeof(halmos_conn_t));
     if (!g_connections) {
-        write_log_error("[ERR] Out of memory allocating %u connection slots", g_max_fd);
+        //write_log_error("[ERR] Out of memory allocating %u connection slots", g_max_fd);
+        write_log_error_code(ERR_CORE_SLOT_MEM, g_max_fd);
         return -1;
     }
  
@@ -41,7 +43,8 @@ int core_conn_t_init(void) {
  
         // Inisialisasi Mutex Per Slot FD
         if (pthread_mutex_init(&g_connections[i].io_lock, NULL) != 0) {
-            write_log_error("[ERR] Failed to init io_lock for FD slot %u", i);
+            //write_log_error("[ERR] Failed to init io_lock for FD slot %u", i);
+            write_log_error_code(ERR_CORE_IO_LOCK, i);
             return -1;
         }
     }

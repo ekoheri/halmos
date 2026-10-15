@@ -13,6 +13,7 @@
 #include "halmos_sec_traffic.h"
 #include "halmos_sec_tls.h"
 #include "halmos_log.h"
+#include "halmos_errors.h"
 #include "halmos_ws_system.h"
 #include "halmos_fcgi_proto.h"
 #include "halmos_fcgi_session.h"
@@ -411,7 +412,8 @@ int http1_manager_routing_bridge(halmos_conn_t *conn, HTTP1Session *session) {
 
         if (!session->fcgi_sess) {
             //fprintf(stderr, "[DEBUG-MGR] ERROR: Gagal membuat sesi FSM FastCGI!\n");
-            write_log_error("[HTTP1-Manager] Failed to create FastCGI FSM session (Out of memory or resource limit reached).");
+            //write_log_error("[HTTP1-Manager] Failed to create FastCGI FSM session (Out of memory or resource limit reached).");
+            write_log_error_code(ERR_PROTO_H1_FSM);
             http1_response_send_mem(sock_client, 502, "Bad Gateway", "502 Bad Gateway", false, is_tls);
             return 0;
         }

@@ -17,7 +17,8 @@ void http_multipart_parse_body(RequestHeader *req) {
     // 1. Ekstrak Boundary
     char *boundary_ptr = strstr(req->content_type, "boundary=");
     if (!boundary_ptr) {
-        write_log_error("[HTTP] Multipart boundary missing from %s", req->client_ip);
+        //write_log_error("[HTTP] Multipart boundary missing from %s", req->client_ip);
+        write_log_warn_code(WARN_PROTO_MULTIPART_BND, req->client_ip);
         return;
     }
     
@@ -40,7 +41,8 @@ void http_multipart_parse_body(RequestHeader *req) {
             if (!tmp) {
                 // Jika RAM penuh, kita berhenti parkir part baru tapi 
                 // data yang sudah masuk sebelumnya tidak hilang (tidak leak).
-                write_log_error("[MEM] Failed to realloc multipart parts for %s", req->client_ip);
+                //write_log_error("[MEM] Failed to realloc multipart parts for %s", req->client_ip);
+                write_log_warn_code(ERR_PROTO_MULTIPART_MEM, req->client_ip);
                 return; 
             }
             req->parts = tmp;

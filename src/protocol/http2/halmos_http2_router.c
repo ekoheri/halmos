@@ -79,7 +79,8 @@ void route_websocket_upgrade(HTTP2Session *session, HTTP2Stream *stream, Request
 void route_fastcgi_backend(HTTP2Session *session, HTTP2Stream *stream, RequestHeader *req, int backend_type) {
     int fpm_sock = fcgi_session_http2_create(req, backend_type);
     if (fpm_sock < 0) {
-        write_log_error("[FCGI-H2] Failed to acquire FPM connection / No nodes configured for URI: %s", req->uri ? req->uri : "/");
+        //write_log_error("[FCGI-H2] Failed to acquire FPM connection / No nodes configured for URI: %s", req->uri ? req->uri : "/");
+        write_log_error_code(ERR_PROTO_H2_FCGI_ACQ, req->uri ? req->uri : "/");
         http2_response_send_header(session, stream, 502);
         http2_response_send_data(session, stream, "Bad Gateway", 11, true);
         stream->state = 4;

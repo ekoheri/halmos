@@ -1,4 +1,5 @@
 #include "halmos_log.h"
+#include "halmos_errors.h"
 #include "halmos_global.h"
 #include "halmos_core_config.h"
 
@@ -71,6 +72,40 @@ void write_log_error(const char *format, ...) {
     va_start(args, format);
     enqueue_log(LOG_TYPE_ERROR, format, args);
     va_end(args);
+}
+
+void write_log_error_code(HalmosErrorCode code, ...) {
+    const char *module = get_module_prefix(code);
+    const char *template_str = get_error_template(code);
+
+    char message_body[MAX_LOG_MESSAGE];
+    va_list args;
+    va_start(args, code);
+    vsnprintf(message_body, sizeof(message_body), template_str, args);
+    va_end(args);
+
+    char final_log[MAX_LOG_MESSAGE + 128];
+    // Label level diset langsung secara eksplisit sebagai [ERROR]
+    snprintf(final_log, sizeof(final_log), "[%s] [ERROR] [ERR-%d] %s", module, code, message_body);
+
+    enqueue_log(LOG_TYPE_ERROR, final_log, (va_list){0});
+}
+
+void write_log_warn_code(HalmosErrorCode code, ...) {
+    const char *module = get_module_prefix(code);
+    const char *template_str = get_error_template(code);
+
+    char message_body[MAX_LOG_MESSAGE];
+    va_list args;
+    va_start(args, code);
+    vsnprintf(message_body, sizeof(message_body), template_str, args);
+    va_end(args);
+
+    char final_log[MAX_LOG_MESSAGE + 128];
+    // Label level diset langsung secara eksplisit sebagai [WARNING]
+    snprintf(final_log, sizeof(final_log), "[%s] [WARNING] [ERR-%d] %s", module, code, message_body);
+
+    enqueue_log(LOG_TYPE_WARNING, final_log, (va_list){0});
 }
 
 void write_log_access(const char *protocol, const char *client_ip, const char *method, const char *uri, int status, long bytes_sent) {
@@ -273,6 +308,8 @@ void* log_thread_routine(void* arg) {
         } else {
             if (current_entry.type == LOG_TYPE_ERROR) {
                 snprintf(log_filename, sizeof(log_filename), "%s%s_error.log", LOG_DIR, date_str);
+            } else if (current_entry.type == LOG_TYPE_WARNING) {
+                snprintf(log_filename, sizeof(log_filename), "%s%s_warning.log", LOG_DIR, date_str);
             } else if (current_entry.type == LOG_TYPE_TELEMETRY) {
                 snprintf(log_filename, sizeof(log_filename), "%s%s_telemetry.log", LOG_DIR, date_str);
             } else if (current_entry.type == LOG_TYPE_ACCESS) {
@@ -288,8 +325,8 @@ void* log_thread_routine(void* arg) {
                 } else if (current_entry.type == LOG_TYPE_ACCESS) {
                     fprintf(f, "[%s] %s\n", time_str, current_entry.text);
                 } else {
-                    const char* label = (current_entry.type == LOG_TYPE_ERROR) ? "ERROR" : "INFO";
-                    fprintf(f, "[%s] [%s] %s\n", time_str, label, current_entry.text);
+                    // Cukup cetak timestamp dan teks log utuh yang sudah berisi [MODULE] ERR-XXXX] Pesan
+                    fprintf(f, "[%s] %s\n", time_str, current_entry.text);
                 }
                 fclose(f);
             }
@@ -355,6 +392,7 @@ static void perform_log_maintenance() {
         bool is_valid_suffix = (
             strstr(name, "_system.log") != NULL ||
             strstr(name, "_error.log") != NULL ||
+            strstr(name, "_warning.log") != NULL ||
             strstr(name, "_access.log") != NULL ||
             strstr(name, "_telemetry.log") != NULL ||
             strstr(name, "_metrics.csv") != NULL

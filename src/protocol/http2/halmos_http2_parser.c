@@ -431,7 +431,8 @@ bool append_stream_body(HTTP2Session *session, HTTP2Stream *st, HTTP2FrameHeader
     unsigned char *temp_body = realloc(req->body_data, new_size + 1);
     if (!temp_body) {
         pthread_mutex_unlock(&session->streams_lock); 
-        write_log_error("[H2-ERROR] Realloc failed for Stream ID %d", head->stream_id);
+        //write_log_error("[H2-ERROR] Realloc failed for Stream ID %d", head->stream_id);
+        write_log_error_code(ERR_PROTO_H2_REALLOC, head->stream_id);
         return false; 
     }
     req->body_data = temp_body;

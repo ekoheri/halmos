@@ -84,7 +84,8 @@ void http_vhost_init_all() {
 int http_vhost_init_inotify(int epoll_fd) {
     g_vhost_inotify_fd = inotify_init1(IN_NONBLOCK);
     if (g_vhost_inotify_fd < 0) {
-        write_log_error("[VHOST] Failed to initialize inotify: %s", strerror(errno));
+        //write_log_error("[VHOST] Failed to initialize inotify: %s", strerror(errno));
+        write_log_error_code(ERR_PROTO_INOTIFY_INIT, strerror(errno));
         return -1;
     }
 
@@ -99,10 +100,11 @@ int http_vhost_init_inotify(int epoll_fd) {
         // Awasi direktori vhost root untuk event modifikasi/pembuatan file
         int wd = inotify_add_watch(g_vhost_inotify_fd, root_clean, IN_MODIFY | IN_CREATE | IN_MOVED_TO);
         if (wd < 0) {
-            write_log_error("[VHOST] Failed to add watch for path %s: %s", root_clean, strerror(errno));
-        } else {
-            // Opsional: Anda bisa menyimpan watch descriptor (wd) jika ingin memetakan rute secara spesifik per vhost
-        }
+            //write_log_error("[VHOST] Failed to add watch for path %s: %s", root_clean, strerror(errno));
+            write_log_error_code(ERR_PROTO_INOTIFY_WATCH, root_clean, strerror(errno));
+        } //else {
+        //    // Opsional: Anda bisa menyimpan watch descriptor (wd) jika ingin memetakan rute secara spesifik per vhost
+        //}
     }
 
     // Daftarkan g_vhost_inotify_fd ke epoll utama server
@@ -110,7 +112,8 @@ int http_vhost_init_inotify(int epoll_fd) {
     ev.data.fd = g_vhost_inotify_fd;
     ev.events = EPOLLIN;
     if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, g_vhost_inotify_fd, &ev) < 0) {
-        write_log_error("[VHOST] Failed to add vhost inotify to epoll: %s", strerror(errno));
+        //write_log_error("[VHOST] Failed to add vhost inotify to epoll: %s", strerror(errno));
+        write_log_error_code(ERR_PROTO_INOTIFY_EPOLL, strerror(errno));
         close(g_vhost_inotify_fd);
         g_vhost_inotify_fd = -1;
         return -1;
