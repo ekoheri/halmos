@@ -74,24 +74,36 @@ static void* admission_monitor_loop(void *arg) {
     AdmissionController *controller = (AdmissionController*) arg;
     CpuStats prev_stats = read_cpu_stats();
     
+    float smoothed_cpu = 0.0f;
+    bool is_first_sample = true; // Penanda sampel pertama yang bersih dari edge case 0.0f
+    
     while (atomic_load(&controller->is_running)) {
-        // Menggunakan 100ms (0.1 detik) agar pemantauan sangat responsif 
-        // terhadap lonjakan trafik singkat dari tool benchmarking seperti wrk.
+        // Sampling setiap 100ms agar sangat responsif terhadap lonjakan kilat wrk
         usleep(100000); 
         
         CpuStats curr_stats = read_cpu_stats();
         float cpu_usage = 0.0f;
         
         if (calculate_cpu_percentage(&prev_stats, &curr_stats, &cpu_usage)) {
-            atomic_store(&controller->live_cpu_usage, cpu_usage);
             prev_stats = curr_stats; 
+            
+            // Terapkan Exponential Moving Average (EMA) dengan alpha = 0.25f
+            if (is_first_sample) {
+                smoothed_cpu = cpu_usage;
+                is_first_sample = false;
+            } else {
+                smoothed_cpu = (0.25f * cpu_usage) + (0.75f * smoothed_cpu);
+            }
+            
+            // Simpan hasil yang sudah di-smoothing ke atomic variable
+            atomic_store(&controller->live_cpu_usage, smoothed_cpu);
             
             bool cpu_overload = atomic_load(&controller->is_cpu_overloaded);
             
-            // Evaluasi Hysteresis CPU menggunakan threshold atas & bawah yang dinamis
-            if (!cpu_overload && cpu_usage >= controller->max_cpu_threshold) {
+            // Evaluasi Hysteresis CPU menggunakan nilai smoothed_cpu
+            if (!cpu_overload && smoothed_cpu >= controller->max_cpu_threshold) {
                 atomic_store(&controller->is_cpu_overloaded, true);
-            } else if (cpu_overload && cpu_usage <= controller->recovery_cpu_threshold) {
+            } else if (cpu_overload && smoothed_cpu <= controller->recovery_cpu_threshold) {
                 atomic_store(&controller->is_cpu_overloaded, false);
             }
         }
@@ -101,7 +113,7 @@ static void* admission_monitor_loop(void *arg) {
         
         bool ram_overload = atomic_load(&controller->is_ram_overloaded);
         
-        // Evaluasi Hysteresis RAM menggunakan threshold atas & bawah yang dinamis
+        // Evaluasi Hysteresis RAM menggunakan threshold dinamis
         if (!ram_overload && ram_usage >= controller->max_ram_threshold) {
             atomic_store(&controller->is_ram_overloaded, true);
         } else if (ram_overload && ram_usage <= controller->recovery_ram_threshold) {
@@ -111,14 +123,14 @@ static void* admission_monitor_loop(void *arg) {
     return NULL;
 }
 
-AdmissionController* core_admission_init(float max_cpu, float recovery_cpu, float max_ram, float recovery_ram) {
+AdmissionController* core_admission_init(void) {
     AdmissionController *controller = (AdmissionController*) malloc(sizeof(AdmissionController));
     if (!controller) return NULL;
     
-    controller->max_cpu_threshold = max_cpu;
-    controller->recovery_cpu_threshold = recovery_cpu;
-    controller->max_ram_threshold = max_ram;
-    controller->recovery_ram_threshold = recovery_ram;
+    controller->max_cpu_threshold = ADMISSION_MAX_CPU;
+    controller->recovery_cpu_threshold = ADMISSION_RECOVERY_CPU;
+    controller->max_ram_threshold = ADMISSION_MAX_RAM;
+    controller->recovery_ram_threshold = ADMISSION_RECOVERY_RAM;
     
     atomic_init(&controller->live_cpu_usage, 0.0f);
     atomic_init(&controller->live_ram_usage, 0.0f);
@@ -147,22 +159,28 @@ bool core_admission_evaluate(AdmissionController *controller, size_t current_que
         return false; 
     }
     
-    // 2. Evaluasi RAM menggunakan Hysteresis (HARD CUTOFF yang stabil)
-    // Jika status is_ram_overloaded bernilai true (terpicu saat mencapai max threshold / 90%),
-    // ia akan terus menolak koneksi sampai background monitor menurunkan statusnya 
-    // kembali ke false (setelah menyentuh recovery threshold / 80%).
+    // 2. Evaluasi RAM (HARD CUTOFF - Wajib Tegas demi Mencegah OOM Killer)
     if (atomic_load(&controller->is_ram_overloaded)) {
         return false;
     }
 
-    // 3. Evaluasi CPU dengan Probabilistik Pintar (Soft Load Shedding)
+    // 3. Dual-Factor Check: Hitung rasio kepadatan antrean tugas
+    float queue_ratio = (float)current_queue_size / (float)adaptive_max_queue;
+
+    // Ambil nilai CPU yang sudah dihaluskan dengan EMA oleh background monitor loop
     float current_cpu = atomic_load(&controller->live_cpu_usage);
-    if (current_cpu >= controller->max_cpu_threshold) {
+
+    // KUNCI UTAMA DARI QA:
+    // Load shedding CPU HANYA AKTIF jika CPU melewati batas (misal 92%) 
+    // DAN antrean tugas juga sudah terisi lebih dari 50% (artinya worker mulai kewalahan).
+    // Jika CPU 95% tapi antrean kosong/lancar -> Jangan drop! Server sedang bekerja cepat.
+    if (current_cpu >= controller->max_cpu_threshold && queue_ratio > 0.50f) {
         
         float denom = (1.0f - controller->max_cpu_threshold);
         if (denom <= 0.001f) denom = 0.001f;
         
-        float severity = (current_cpu - controller->max_cpu_threshold) / denom;
+        // Severity proporsional yang juga dikalikan dengan kepadatan antrean
+        float severity = ((current_cpu - controller->max_cpu_threshold) / denom) * queue_ratio;
         if (severity > 1.0f) severity = 1.0f;
 
         static __thread unsigned int thread_seed = 0;
@@ -173,7 +191,7 @@ bool core_admission_evaluate(AdmissionController *controller, size_t current_que
         float random_roll = (float)rand_r(&thread_seed) / (float)RAND_MAX;
 
         if (random_roll < severity) {
-            return false; 
+            return false; // Soft load shedding probabilistik yang cerdas
         }
     }
     

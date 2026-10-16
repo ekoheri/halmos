@@ -22,7 +22,12 @@ typedef struct {
     atomic_bool is_running;
 } AdmissionController;
 
-AdmissionController* core_admission_init(float max_cpu, float recovery_cpu, float max_ram, float recovery_ram);
+#define ADMISSION_MAX_CPU       0.92f //Max CPU usage 92%
+#define ADMISSION_RECOVERY_CPU  0.82f //Recovery CPU 82%
+#define ADMISSION_MAX_RAM       0.90f //Max memory usage 90%
+#define ADMISSION_RECOVERY_RAM  0.80f //recovery memory 80%
+
+AdmissionController* core_admission_init(void);
 
 bool core_admission_evaluate(AdmissionController *controller, size_t current_queue_size);
 

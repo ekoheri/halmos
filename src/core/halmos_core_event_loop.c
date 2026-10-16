@@ -97,8 +97,7 @@ int core_event_loop_start(void) {
     }
 
     // Inisialisasi Admission Control saat server start:
-    // Contoh parameter: Max CPU 85% (0.85f), Recovery CPU 75% (0.75f), Max RAM 90% (0.90f), Recovery RAM 80% (0.80f)
-    admission_ctrl = core_admission_init(0.85f, 0.75f, 0.90f, 0.80f);
+      admission_ctrl = core_admission_init();
     if (!admission_ctrl) {
         write_log_error("[CRIT] Failed to initialize Admission Control module");
         return -1;
@@ -139,7 +138,7 @@ void core_event_loop_run() {
                         if (temp_sock >= 0) {
                             close(temp_sock); 
                         }
-                        break; 
+                        continue; // (Lewati koneksi ini, tapi tetap lanjut kuras socket backlog jika masih ada)
                     }
                     // ======================================================
 
