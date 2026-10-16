@@ -146,7 +146,8 @@ char *sanitize_path(const char *root, const char *uri) {
         return NULL;
     }
 
-    if (strncmp(resolved_root, resolved_path, root_len) != 0) {
+    if (strncmp(resolved_root, resolved_path, root_len) != 0 ||
+        (resolved_path[root_len] != '\0' && resolved_path[root_len] != '/'))  {
         // TANDA BAHAYA: Percobaan Path Traversal!
         //write_log_error("[SECURITY] Path traversal attempt blocked: %s", resolved_path);
         write_log_warn_code(WARN_PROTO_PATH_TRAVERSAL, resolved_path);

@@ -73,7 +73,7 @@
 
 // Definisi Identitas & Konfigurasi Global
 #define HALMOS_NAME       "Halmos Web Server"
-#define HALMOS_VERSION    "1.1.1-RC1"
+#define HALMOS_VERSION    "1.1.2-RC1"
 #define HALMOS_CONFIG_PATH "/etc/halmos/halmos.conf"
 
 // Handle sinyal dengan aman (Async-Signal Safe)

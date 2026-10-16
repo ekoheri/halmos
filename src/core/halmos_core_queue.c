@@ -54,11 +54,21 @@ int core_queue_push(TaskQueue *q, halmos_event_t event_item) {
     }
 
     // 2. Alokasi Task
-    Task *new_task = malloc(sizeof(Task));
+    /*Task *new_task = malloc(sizeof(Task));
     if (!new_task) {
         pthread_mutex_unlock(&q->lock);
         return -2; 
+    }*/
+
+    // 2. Alokasi Task -> Ganti malloc dengan mengambil dari free_list
+
+    if (q->free_list_head == NULL) {
+        pthread_mutex_unlock(&q->lock);
+        return -2; // Pool habis (seharusnya tidak terjadi jika max_queue_limit sinkron)
     }
+
+    Task *new_task = q->free_list_head;
+    q->free_list_head = new_task->next; // Geser pointer free list
 
     new_task->event = event_item;
     gettimeofday(&new_task->arrival_time, NULL);
@@ -235,10 +245,15 @@ int core_queue_pop(TaskQueue *q, halmos_event_t *out_event, struct timeval *arri
     q->count--;
 
     atomic_fetch_add(&q->active_workers, 1); 
-    
+ 
+    // --- KEMBALIKAN NODE KE FREE LIST ---
+    tmp->next = q->free_list_head;
+    q->free_list_head = tmp;
+    //karena sudah menggunakan ore-allocation pool memory, maka free ini di remark saja!
+    //free(tmp);
+
     pthread_mutex_unlock(&q->lock);
-    free(tmp);
-    
+
     return sock;
 }
 
@@ -272,12 +287,20 @@ void core_queue_thread_worker_stop(void) {
             core_conn_t_deactivate(tmp->event.fd);
             close(tmp->event.fd);
         }
-        free(tmp);
+        //karena sudah menggunakan ore-allocation pool memory, maka free ini di remark saja!
+        //free(tmp);
     }
 
     pthread_mutex_destroy(&global_queue.lock);
     pthread_cond_destroy(&global_queue.cond);
     pthread_cond_destroy(&global_queue.exit_cond);
+
+    // --- BEBASKAN SATU BLOK MEMORI UTAMA ---
+    if (global_queue.task_pool_memory) {
+        free(global_queue.task_pool_memory);
+        global_queue.task_pool_memory = NULL;
+    }
+    // ---------------------------------------
 
     write_log("[QUEUE] Worker thread pool shutdown instantly & cleanly.");
 }
@@ -297,6 +320,21 @@ void init_queue(TaskQueue *q, int min_limit, int max_limit, int max_queue_size) 
     pthread_mutex_init(&q->lock, NULL);
     pthread_cond_init(&q->cond, NULL);
     pthread_cond_init(&q->exit_cond, NULL);
+
+    // --- ALOKASI PRE-ALLOCATED POOL SEKALI SAJA ---
+    q->task_pool_memory = malloc(sizeof(Task) * max_queue_size);
+    if (q->task_pool_memory) {
+        // Rangkai semua node ke dalam free_list_head
+        q->free_list_head = NULL;
+        for (int i = 0; i < max_queue_size; i++) {
+            Task *node = &q->task_pool_memory[i];
+            node->next = q->free_list_head;
+            q->free_list_head = node;
+        }
+    } else {
+        q->free_list_head = NULL;
+    }
+    // ---------------------------------------------
 }
 
 // Helper internal untuk membuat thread dengan atribut DETACHED secara aman
