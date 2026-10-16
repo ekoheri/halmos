@@ -147,11 +147,21 @@ void *core_thread_pool_worker(void *arg) {
                 bound_type = (cpu_ratio > 0.70) ? 1 : 0;
             }
 
+            // Ambil snapshot metrik dengan mutex antrean.
+            pthread_mutex_lock(&global_queue.lock);
+
+            uint32_t snapshot_count = (uint32_t)global_queue.count;
+            uint32_t snapshot_total_workers = (uint32_t)global_queue.total_workers;
+            uint32_t snapshot_active_workers = atomic_load(&global_queue.active_workers);
+
+            pthread_mutex_unlock(&global_queue.lock);
+
+            // Gunakan hasil snapshot untuk logging (Aman dari Data Race)
             metrics_log_task_execution(
-                global_queue.count, 
-                global_queue.total_workers, 
-                atomic_load(&global_queue.active_workers), 
-                exec_time_us, 
+                snapshot_count,
+                snapshot_total_workers,
+                snapshot_active_workers,
+                exec_time_us,
                 bound_type
             );
         }

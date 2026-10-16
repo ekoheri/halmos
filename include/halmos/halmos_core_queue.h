@@ -30,6 +30,11 @@ typedef struct {
     int min_threads_limit;
     int max_threads_limit;
 
+    // --- TAMBAHAN UNTUK PRE-ALLOCATED POOL ---
+    Task *task_pool_memory;  // Blok memori besar yang dialokasikan sekali di awal (malloc 1x)
+    Task *free_list_head;    // Kepala rantai node Task yang sedang tidak terpakai
+    // ----------------------------------------
+
     pthread_mutex_t lock;
     pthread_cond_t cond;
     pthread_cond_t exit_cond;
