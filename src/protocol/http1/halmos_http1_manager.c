@@ -218,9 +218,6 @@ int http1_manager_session(halmos_conn_t *conn) {
     }
 
     // =========================================================================
-    // 3. STATE: PEMROSESAN FASTCGI BERBASIS FSM
-    // =========================================================================
-    // =========================================================================
     // 3. STATE: PEMROSESAN FASTCGI BERBASIS FSM (Non-blocking loop di worker)
     // =========================================================================
     if (session->state == STATE_FCGI_PROCESSING) {
@@ -461,8 +458,46 @@ int http1_manager_routing_bridge(halmos_conn_t *conn, HTTP1Session *session) {
     
     session->header_sent_offset = 0;
     session->is_header_sent = false;
-    
+
     session->state = STATE_SEND_STATIC_FILE;
-    return 3; // Pindah ke EPOLLOUT
+    
+    // =========================================================================
+    // PERBAIKAN: OPTIMISTIC IMMEDIATE WRITE (Menghilangkan Two-Phase Dispatch)
+    // =========================================================================
+    int res = is_tls ? http1_response_ssl(conn, session) 
+                     : http1_response_plain(sock_client, session);
+
+    // Jika socket tersumbat/belum selesai (EAGAIN / EWOULDBLOCK)
+    if (res == 3 || res == 2) {
+        return res; // Baru minta rearm EPOLLOUT ke epoll
+    }
+
+    // Jika error kirim
+    if (res <= 0) {
+        http1_parser_free_memory(&session->req);
+        if (session->file_fd >= 0) {
+            close(session->file_fd);
+            session->file_fd = -1;
+        }
+        return 0; 
+    }
+
+    // Jika pengiriman SELESAI LANGSUNG dalam 1 siklus
+    write_log_access("HTTP/1.1", session->req.client_ip, session->req.method, session->req.uri, 200, session->header_len + st.st_size);
+
+    if (session->file_fd >= 0) {
+        close(session->file_fd);
+        session->file_fd = -1;
+    }
+
+    bool keep_alive = session->req.is_keep_alive;
+    http1_parser_free_memory(&session->req);
+    memset(&session->req, 0, sizeof(RequestHeader));
+
+    session->buf_len = 0;
+    if (session->buffer) session->buffer[0] = '\0';
+    session->state = STATE_READ_HEADERS;
+
+    return keep_alive ? 2 : 0;
 }
 
