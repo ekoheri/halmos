@@ -57,7 +57,9 @@
 #include "halmos_core_thread_pool.h"
 #include "halmos_sec_traffic.h"
 #include "halmos_sec_tls.h"
-#include "halmos_fcgi_pool.h"
+#include "halmos_fcgi_poller.h"
+#include "halmos_fcgi_queue.h"
+#include "halmos_fcgi_worker.h"
 #include "halmos_http_route.h"
 #include "halmos_http_vhost.h"
 #include "halmos_ws_system.h"
@@ -246,8 +248,23 @@ int main(int argc, char *argv[]) {
         sec_traffic_start_janitor();    
     }
     
-    fcgi_pool_init();
 
+    if (!halmos_fcgi_queue_init()) {
+        fprintf(stderr, "[FATAL] Failed to initialize FastCGI Queue!\n");
+        return 1;
+    }
+
+    if (!halmos_fcgi_poller_init()) {
+        fprintf(stderr, "[FATAL] Failed to initialize FastCGI Async Poller!\n> exit(1);\n");
+        return 1;
+    }
+
+    // 2. INTI PERBAIKAN: Inisialisasi Worker Pool FastCGI (misal 4 thread worker)
+    if (!halmos_fcgi_worker_pool_init()) {
+        fprintf(stderr, "[FATAL] Failed to initialize FCGI worker pool!\n");
+        return 1;
+    }
+    
     // 5. Inisialisasi Server (Network & Epoll)
     if (core_event_loop_start() != 0) {
         fprintf(stderr, "[FATAL] Failed to start event loop.\n");
@@ -279,35 +296,42 @@ int main(int argc, char *argv[]) {
     
     write_log("[CORE] Shutdown signal caught. Cleaning up resources...");
     
-    // 2. Stop Worker Thread Pool & Join semua thread
-    core_queue_thread_worker_stop();
-    write_log("[CORE] Worker thread pool joined & stopped.");
+    // 1. Hentikan FastCGI Worker Pool TERLEBIH DAHULU (Bangunkan thread yang menunggu di queue)
+    halmos_fcgi_worker_pool_stop();
+    write_log("[CORE] FastCGI Worker Pool stopped.");
 
-    // Stop Janitor Security Thread
+    // 2. Hentikan FastCGI Poller
+    halmos_fcgi_poller_cleanup();
+    write_log("[CORE] FastCGI Poller cleaned up.");
+
+    halmos_fcgi_queue_destroy();
+    write_log("[CORE] FastCGI Queue cleaned up.");
+
+    // 3. Stop Worker Thread Pool utama Halmos & Join semua thread
+    core_queue_thread_worker_stop();
+    write_log("[CORE] Core Worker thread pool joined & stopped.");
+
+    // 4. Stop Janitor Security Thread
     if (config.rate_limit_enabled) {
         sec_traffic_stop_janitor();
     }
     
-    // 2. Hancurkan FastCGI Connection Pool (Tutup socket & free memory)
-    fcgi_pool_destroy();
-    write_log("[CORE] FastCGI Connection Pool destroyed.");
-    
+    // 5. Bersihkan WebSocket & TLS
     ws_system_destroy();
     write_log("[CORE] WebSocket Registry & Subsystems destroyed.");
-    // bersihkan resource SSL jika aktif
+    
     if (config.tls_enabled) {
         ssl_cleanup();
         write_log("[CORE] TLS Resources cleaned up.");
     }
    
-    // DESTROY CORE CONNECTION TABLE (Simetris dengan core_conn_t_init)
+    // 6. DESTROY CORE CONNECTION TABLE
     core_conn_t_destroy();
     write_log("[CORE] Connection Table destroyed.");
 
-    // 5. TERAKHIR: Wajib tempatkan stop_thread_logger() di paling ujung!
-    // Ini mengosongkan antrean memori log ke file disk sebelum proses exit.
-    write_log("[CORE] Halmos shutdown complete. Bye!");
+    // 7. TERAKHIR: Wajib tempatkan stop_thread_logger() di paling ujung!
     stop_thread_logger();
+    write_log("[CORE] Halmos shutdown complete. Bye!");
 
     return EXIT_SUCCESS;
 }

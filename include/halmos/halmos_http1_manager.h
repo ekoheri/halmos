@@ -40,7 +40,8 @@ typedef struct {
 
     int fcgi_sock;
 
-    FCGISession *fcgi_sess;
+    // Pointer ke struktur sesi FSM Async FastCGI yang baru
+    HalmosFCGISession *fcgi_sess;
 } HTTP1Session;
 
 void http1_session_destroy(void *session);

@@ -2,7 +2,7 @@
 #include "halmos_global.h"
 #include "halmos_core_config.h"
 #include "halmos_log.h"
-#include "halmos_fcgi_pool.h"
+//#include "halmos_fcgi_pool.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -177,36 +177,36 @@ void core_adaptive_init(int print_to_terminal) {
     // 5. Fetch Administrator's PHP-FPM Configuration
     PHPConfig php = fetch_php_fpm_config();
     
-    // 6. FCGI Quota Mapping Dinamis Berdasarkan Aktif/Tidaknya Backend
-    fcgi_pool.php_quota = is_php_active ? php.max_children : 0; 
+    // 6. Quota Mapping Dinamis Backend Berdasarkan Aktif/Tidaknya Backend
+    int php_quota = is_php_active ? php.max_children : 0; 
     
-    int sisa_jatah = g_worker_max - fcgi_pool.php_quota;
+    int sisa_jatah = g_worker_max - php_quota;
     if (sisa_jatah < 0) {
         sisa_jatah = 0; 
     }
 
+    int python_quota = 0;
+    int rust_quota = 0;
+
     if (is_python_active && is_rust_active) {
         unsigned long total_py_rust_ram = python_budget_ram + rust_budget_ram;
         if (total_py_rust_ram > 0) {
-            fcgi_pool.python_quota = (sisa_jatah * python_budget_ram) / total_py_rust_ram;
-            fcgi_pool.rust_quota   = sisa_jatah - fcgi_pool.python_quota;
+            python_quota = (int)((sisa_jatah * python_budget_ram) / total_py_rust_ram);
+            rust_quota   = sisa_jatah - python_quota;
         } else {
-            fcgi_pool.python_quota = sisa_jatah / 2;
-            fcgi_pool.rust_quota   = sisa_jatah - fcgi_pool.python_quota;
+            python_quota = sisa_jatah / 2;
+            rust_quota   = sisa_jatah - python_quota;
         }
     } else if (is_python_active) {
-        fcgi_pool.python_quota = sisa_jatah;
-        fcgi_pool.rust_quota   = 0;
+        python_quota = sisa_jatah;
+        rust_quota   = 0;
     } else if (is_rust_active) {
-        fcgi_pool.rust_quota   = sisa_jatah;
-        fcgi_pool.python_quota = 0;
-    } else {
-        fcgi_pool.python_quota = 0;
-        fcgi_pool.rust_quota   = 0;
+        rust_quota   = sisa_jatah;
+        python_quota = 0;
     }
 
-    fcgi_pool.pool_size    = fcgi_pool.php_quota + fcgi_pool.rust_quota + fcgi_pool.python_quota;
-    g_fcgi_pool_size       = fcgi_pool.pool_size;
+    int total_backend_pool_size = php_quota + rust_quota + python_quota;
+    g_fcgi_pool_size            = total_backend_pool_size;
 
     // 7. Queue Capacity Berbasis g_max_fd aktual
     g_event_batch_size = (g_worker_max > MAX_EVENT_BATCH_SIZE) ? MAX_EVENT_BATCH_SIZE : g_worker_max;
@@ -239,8 +239,8 @@ void core_adaptive_init(int print_to_terminal) {
               g_worker_min, g_worker_max, g_event_batch_size, g_queue_capacity);
     
     snprintf(log_buf_3, sizeof(log_buf_3),"[FCGI] Workers Allocation -> PHP: %d (from max_children configuration) | Rust: %d | Python: %d | Total Workers: %d", 
-              fcgi_pool.php_quota, fcgi_pool.rust_quota, fcgi_pool.python_quota, g_fcgi_pool_size);          
-
+              php_quota, rust_quota, python_quota, g_fcgi_pool_size);
+              
     snprintf(log_buf_mem, sizeof(log_buf_mem), "[MEM] Budget Awareness -> Reserved (OS/DB): %lu MB | Estimation per Process [PHP: %dMB, Python: %dMB, Rust: %dMB]", 
               reserved_ram_mb, php_mem_budget, python_mem_budget, rust_mem_budget);
     
