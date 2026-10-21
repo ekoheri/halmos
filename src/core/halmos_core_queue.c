@@ -30,12 +30,11 @@ void core_queue_thread_worker_start(void) {
     for (int i = 0; i < initial_workers; i++) {
         pthread_t tid;
         if (spawn_detached_worker(&tid, core_thread_pool_worker, &global_queue) != 0) {
-            //write_log_error("[ERR] Failed to create initial worker thread %d", i);
             write_log_error_code(ERR_CORE_INIT_WORKER, i);
         }
     }
     
-    write_log("[QUEUE] Thread pool started dynamically with %d workers (DETACHED mode).", initial_workers);
+    write_log("[QUEUE] Thread pool started dynamically with %d workers (DETACHED malloc/free mode).", initial_workers);
 }
 
 /********************************************************************
@@ -47,28 +46,16 @@ int core_queue_push(TaskQueue *q, halmos_event_t event_item) {
     // 1. Safety Check: Kapasitas Antrian
     if (q->count >= q->max_queue_limit) {
         pthread_mutex_unlock(&q->lock);
-        //write_log_error("[QUEUE] Capacity reached! Rejecting client FD %d (Gen: %u)", 
-        //                event_item.fd, event_item.generation);
         write_log_error_code(ERR_CORE_QUEUE_CAPACITY, event_item.fd, event_item.generation);
         return -1; 
     }
 
-    // 2. Alokasi Task
-    /*Task *new_task = malloc(sizeof(Task));
+    // 2. Alokasi Task menggunakan malloc per task
+    Task *new_task = malloc(sizeof(Task));
     if (!new_task) {
         pthread_mutex_unlock(&q->lock);
         return -2; 
-    }*/
-
-    // 2. Alokasi Task -> Ganti malloc dengan mengambil dari free_list
-
-    if (q->free_list_head == NULL) {
-        pthread_mutex_unlock(&q->lock);
-        return -2; // Pool habis (seharusnya tidak terjadi jika max_queue_limit sinkron)
     }
-
-    Task *new_task = q->free_list_head;
-    q->free_list_head = new_task->next; // Geser pointer free list
 
     new_task->event = event_item;
     gettimeofday(&new_task->arrival_time, NULL);
@@ -84,14 +71,7 @@ int core_queue_push(TaskQueue *q, halmos_event_t event_item) {
     q->count++;
 
     // 4. LOGIKA UPSCALING
-    /*
-    Untuk uji coba misalkan menggunakan :
-      wrk -t8 -c1500 -d30s https://localhost:8080/index.html
-      queue_threshold = gunakan 5% saja (0.05)
-      tetapi kalau di server production,queue_threshold buat saja 50% (0.5) ya
-    */
     int queue_threshold = q->max_queue_limit * config.queue_threshold_ratio;
-
     int spawn_count = 0;
 
     if (q->count > queue_threshold 
@@ -99,7 +79,7 @@ int core_queue_push(TaskQueue *q, halmos_event_t event_item) {
         && !q->scaling_in_progress) {
 
         int available_slots = q->max_threads_limit - q->total_workers;
-        int spawn_step = config.spawn_worker_step; // Mengambil dari file konfigurasi
+        int spawn_step = config.spawn_worker_step;
 
         spawn_count = (available_slots < spawn_step) ? available_slots : spawn_step;
 
@@ -129,7 +109,6 @@ int core_queue_push(TaskQueue *q, halmos_event_t event_item) {
             if (spawn_detached_worker(&tid, core_thread_pool_worker, q) == 0) {
                 actually_spawned++;
             } else {
-                //write_log_error("[SCALING] pthread_create failed while upscaling");
                 write_log_error_code(ERR_CORE_PTHREAD_SCALE);
             }
         }
@@ -140,9 +119,6 @@ int core_queue_push(TaskQueue *q, halmos_event_t event_item) {
             q->total_workers -= (spawn_count - actually_spawned);
             pthread_mutex_unlock(&q->lock);
         }
-
-        //write_log("[SCALING] Load spike detected. Upscaling pool to %d workers (%d spawned)", 
-        //          q->total_workers, actually_spawned);
 
         pthread_mutex_lock(&q->lock);
         q->scaling_in_progress = 0;
@@ -164,7 +140,7 @@ int core_queue_pop(TaskQueue *q, halmos_event_t *out_event, struct timeval *arri
     while (q->head == NULL) {
         if (!q->is_running) {
             q->total_workers--;
-            pthread_cond_signal(&q->exit_cond); // Beritahu bahwa thread ini keluar
+            pthread_cond_signal(&q->exit_cond);
             pthread_mutex_unlock(&q->lock);
             return -3;
         }
@@ -192,20 +168,19 @@ int core_queue_pop(TaskQueue *q, halmos_event_t *out_event, struct timeval *arri
         if (rc == ETIMEDOUT && q->head == NULL && q->total_workers > q->min_threads_limit) {
             q->total_workers--;
 
-            // --- PANGGIL METRIK DOWNSCALE DI SINI ---
+            // --- PANGGIL METRIK DOWNSCALE ---
             metrics_log_event(
                 METRIC_EVENT_DOWNSCALE, 
-                -1, // Delta negatif karena worker berkurang 1
+                -1, 
                 q->count, 
                 q->total_workers, 
                 atomic_load(&q->active_workers)
             );
 
-            //write_log("[SCALING] Load subsided. Downscaling pool to %d workers", q->total_workers);
-            pthread_cond_signal(&q->exit_cond); // Beritahu bahwa thread ini keluar
+            pthread_cond_signal(&q->exit_cond);
             pthread_mutex_unlock(&q->lock);
             
-            return -3; // Thread langsung exit secara mandiri, OS mendaur ulang memorinya karena detached
+            return -3;
         }
     }
 
@@ -224,14 +199,12 @@ int core_queue_pop(TaskQueue *q, halmos_event_t *out_event, struct timeval *arri
     int sock = tmp->event.fd;
     *arrival = tmp->arrival_time;
 
-    // --- HITUNG QUEUE WAIT TIME ($T_{queue}$) DI SINI ---
+    // --- HITUNG QUEUE WAIT TIME ($T_{queue}$) ---
     gettimeofday(&now, NULL);
     uint64_t arrival_us = (uint64_t)tmp->arrival_time.tv_sec * 1000000ULL + tmp->arrival_time.tv_usec;
     uint64_t pop_us = (uint64_t)now.tv_sec * 1000000ULL + now.tv_usec;
     uint64_t queue_wait_us = (pop_us > arrival_us) ? (pop_us - arrival_us) : 0;
 
-    // Anda bisa mencatat periodic snapshot secara opsional di sini atau via thread terpisah, 
-    // contoh pencatatan periodik langsung ringan:
     metrics_log_periodic(
         q->count, 
         q->max_queue_limit, 
@@ -246,11 +219,8 @@ int core_queue_pop(TaskQueue *q, halmos_event_t *out_event, struct timeval *arri
 
     atomic_fetch_add(&q->active_workers, 1); 
  
-    // --- KEMBALIKAN NODE KE FREE LIST ---
-    tmp->next = q->free_list_head;
-    q->free_list_head = tmp;
-    //karena sudah menggunakan ore-allocation pool memory, maka free ini di remark saja!
-    //free(tmp);
+    // Bebaskan memori task menggunakan free()
+    free(tmp);
 
     pthread_mutex_unlock(&q->lock);
 
@@ -259,14 +229,12 @@ int core_queue_pop(TaskQueue *q, halmos_event_t *out_event, struct timeval *arri
 
 /********************************************************************
  * queue_thread_worker_stop()
- * Shutdown bersih menggunakan exit_cond tanpa pthread_join/SIGUSR1
  ********************************************************************/
 void core_queue_thread_worker_stop(void) {
     pthread_mutex_lock(&global_queue.lock);
     global_queue.is_running = 0; 
-    pthread_cond_broadcast(&global_queue.cond); // Bangunkan semua thread yang tidur
+    pthread_cond_broadcast(&global_queue.cond);
 
-    // Tunggu sampai seluruh worker thread benar-benar keluar (total_workers == 0)
     while (global_queue.total_workers > 0) {
         pthread_cond_wait(&global_queue.exit_cond, &global_queue.lock);
     }
@@ -283,29 +251,20 @@ void core_queue_thread_worker_stop(void) {
         Task *tmp = curr;
         curr = curr->next;
         if (tmp->event.fd >= 0) {
-            // Menggunakan core_conn_deactivate sesuai nama asli modul connection
             core_conn_t_deactivate(tmp->event.fd);
             close(tmp->event.fd);
         }
-        //karena sudah menggunakan ore-allocation pool memory, maka free ini di remark saja!
-        //free(tmp);
+        free(tmp);
     }
 
     pthread_mutex_destroy(&global_queue.lock);
     pthread_cond_destroy(&global_queue.cond);
     pthread_cond_destroy(&global_queue.exit_cond);
 
-    // --- BEBASKAN SATU BLOK MEMORI UTAMA ---
-    if (global_queue.task_pool_memory) {
-        free(global_queue.task_pool_memory);
-        global_queue.task_pool_memory = NULL;
-    }
-    // ---------------------------------------
-
     write_log("[QUEUE] Worker thread pool shutdown instantly & cleanly.");
 }
 
-/* Helper / Private Function*/
+/* Helper / Private Function */
 void init_queue(TaskQueue *q, int min_limit, int max_limit, int max_queue_size) {
     q->head = q->tail = NULL;
     q->count = 0;
@@ -320,24 +279,8 @@ void init_queue(TaskQueue *q, int min_limit, int max_limit, int max_queue_size) 
     pthread_mutex_init(&q->lock, NULL);
     pthread_cond_init(&q->cond, NULL);
     pthread_cond_init(&q->exit_cond, NULL);
-
-    // --- ALOKASI PRE-ALLOCATED POOL SEKALI SAJA ---
-    q->task_pool_memory = malloc(sizeof(Task) * max_queue_size);
-    if (q->task_pool_memory) {
-        // Rangkai semua node ke dalam free_list_head
-        q->free_list_head = NULL;
-        for (int i = 0; i < max_queue_size; i++) {
-            Task *node = &q->task_pool_memory[i];
-            node->next = q->free_list_head;
-            q->free_list_head = node;
-        }
-    } else {
-        q->free_list_head = NULL;
-    }
-    // ---------------------------------------------
 }
 
-// Helper internal untuk membuat thread dengan atribut DETACHED secara aman
 int spawn_detached_worker(pthread_t *out_tid, void *(*routine)(void *), void *arg) {
     pthread_attr_t attr;
     pthread_attr_init(&attr);
@@ -356,7 +299,7 @@ int get_adaptive_timeout(TaskQueue *q) {
     float load_factor = (q->max_queue_limit > 0) ? (float)q->count / q->max_queue_limit : 0;
 
     if (load_factor > config.queue_threshold_ratio || q->count > high_load_threshold) {
-        return config.timeout_worker_high_load; // Membaca dari konfigurasi (default: 300)
+        return config.timeout_worker_high_load; 
     }
     else if (q->count > 0) {
         return config.timeout_worker_light_load; 

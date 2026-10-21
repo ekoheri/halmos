@@ -1,5 +1,6 @@
 #include "halmos_core_admission.h"
 #include "halmos_global.h" // Mengambil semua variabel global termasuk g_queue_capacity
+#include "halmos_log.h" 
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -75,8 +76,8 @@ static void* admission_monitor_loop(void *arg) {
     CpuStats prev_stats = read_cpu_stats();
     
     float smoothed_cpu = 0.0f;
-    bool is_first_sample = true; // Penanda sampel pertama yang bersih dari edge case 0.0f
-    
+    int consecutive_idle_counts = 0;
+
     while (atomic_load(&controller->is_running)) {
         // Sampling setiap 100ms agar sangat responsif terhadap lonjakan kilat wrk
         usleep(100000); 
@@ -87,10 +88,23 @@ static void* admission_monitor_loop(void *arg) {
         if (calculate_cpu_percentage(&prev_stats, &curr_stats, &cpu_usage)) {
             prev_stats = curr_stats; 
             
-            // Terapkan Exponential Moving Average (EMA) dengan alpha = 0.25f
-            if (is_first_sample) {
+            // Deteksi cepat jika server sedang sangat sepi / habis digeber wrk
+            if (cpu_usage < 0.05f) {
+                consecutive_idle_counts++;
+                if (consecutive_idle_counts > 5) {
+                    smoothed_cpu = 0.0f;
+                    consecutive_idle_counts = 0;
+                    //is_first_sample = true;
+                    atomic_store(&controller->is_cpu_overloaded, false);
+                }
+            } else {
+                consecutive_idle_counts = 0;
+            }
+
+            // Perhitungan EMA (jika di-reset ke 0, langsung ambil nilai cpu_usage terbaru)
+            if (smoothed_cpu == 0.0f) {
                 smoothed_cpu = cpu_usage;
-                is_first_sample = false;
+                //is_first_sample = false; // pastikan tidak dianggap first sample kosong
             } else {
                 smoothed_cpu = (0.25f * cpu_usage) + (0.75f * smoothed_cpu);
             }
@@ -149,7 +163,7 @@ AdmissionController* core_admission_init(void) {
 
 bool core_admission_evaluate(AdmissionController *controller, size_t current_queue_size) {
     if (!controller) return true;
-    
+
     // 1. Ambil kapasitas antrean adaptif dengan fallback pengaman
     size_t adaptive_max_queue = (size_t)g_queue_capacity;
     if (adaptive_max_queue == 0) adaptive_max_queue = 256; 
@@ -175,7 +189,6 @@ bool core_admission_evaluate(AdmissionController *controller, size_t current_que
     // DAN antrean tugas juga sudah terisi lebih dari 50% (artinya worker mulai kewalahan).
     // Jika CPU 95% tapi antrean kosong/lancar -> Jangan drop! Server sedang bekerja cepat.
     if (current_cpu >= controller->max_cpu_threshold && queue_ratio > 0.50f) {
-        
         float denom = (1.0f - controller->max_cpu_threshold);
         if (denom <= 0.001f) denom = 0.001f;
         

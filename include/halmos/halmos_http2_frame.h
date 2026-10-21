@@ -10,8 +10,5 @@ void http2_frame_send_settings(int fd, bool is_tls);
 void http2_frame_send_settings_ack(int fd, bool is_tls);
 void http2_frame_send_window_update(int fd, bool is_tls, uint32_t stream_id, uint32_t increment);
 void http2_frame_handle_window_update(HTTP2Session *session, HTTP2FrameHeader *head, const unsigned char *payload);
-/**
- * Handler untuk tipe frame yang masuk
- */
 
 #endif // HALMOS_HTTP2_FRAME_H

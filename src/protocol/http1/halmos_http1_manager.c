@@ -286,14 +286,35 @@ int http1_manager_session(halmos_conn_t *conn) {
         }
 
         if (status == FCGI_SES_STATUS_COMPLETED) {
-            //fprintf(stderr, "[DEBUG-MGR] Sesi FastCGI SELESAI dengan sukses.\n");
             write_log_access("HTTP/1.1", session->req.client_ip, session->req.method, session->req.uri, 200, session->req.content_length);
+            
+            // Cleanup normal untuk sukses
+            fcgi_session_destroy(session->fcgi_sess);
+            session->fcgi_sess = NULL;
+
+            bool keep_alive = session->req.is_keep_alive;
+            http1_parser_free_memory(&session->req);
+            memset(&session->req, 0, sizeof(RequestHeader));
+            
+            session->buf_len = 0;
+            if (session->buffer) session->buffer[0] = '\0';
+            session->state = STATE_READ_HEADERS;
+            
+            return keep_alive ? 2 : 0;
         } else {
-            //fprintf(stderr, "[DEBUG-MGR] ERROR: Sesi FastCGI gagal, timeout, atau error.\n");
-            // Kirim respons 502 Bad Gateway jika gagal di tengah jalan
+            // ERROR / 502 / TIMEOUT: Kirim 502 lalu PUTUS KONEKSI MUTLAK (Jangan Keep-Alive!)
             if (!session->is_header_sent) {
+                // Perhatikan parameter is_tls yang benar (gunakan variabel is_tls, bukan false statis)
                 http1_response_send_mem(sock_client, 502, "Bad Gateway", "502 Bad Gateway", false, is_tls);
             }
+            
+            fcgi_session_destroy(session->fcgi_sess);
+            session->fcgi_sess = NULL;
+            
+            http1_parser_free_memory(&session->req);
+            
+            // RETURN 0 ARTINYA TUTUP KONEKSI PERMANEN, BERSIHKAN TLS CONTEXT
+            return 0;
         }
 
         // Cleanup sesi FastCGI & kembalikan koneksi FPM ke pool
@@ -461,43 +482,6 @@ int http1_manager_routing_bridge(halmos_conn_t *conn, HTTP1Session *session) {
 
     session->state = STATE_SEND_STATIC_FILE;
     
-    // =========================================================================
-    // PERBAIKAN: OPTIMISTIC IMMEDIATE WRITE (Menghilangkan Two-Phase Dispatch)
-    // =========================================================================
-    int res = is_tls ? http1_response_ssl(conn, session) 
-                     : http1_response_plain(sock_client, session);
-
-    // Jika socket tersumbat/belum selesai (EAGAIN / EWOULDBLOCK)
-    if (res == 3 || res == 2) {
-        return res; // Baru minta rearm EPOLLOUT ke epoll
-    }
-
-    // Jika error kirim
-    if (res <= 0) {
-        http1_parser_free_memory(&session->req);
-        if (session->file_fd >= 0) {
-            close(session->file_fd);
-            session->file_fd = -1;
-        }
-        return 0; 
-    }
-
-    // Jika pengiriman SELESAI LANGSUNG dalam 1 siklus
-    write_log_access("HTTP/1.1", session->req.client_ip, session->req.method, session->req.uri, 200, session->header_len + st.st_size);
-
-    if (session->file_fd >= 0) {
-        close(session->file_fd);
-        session->file_fd = -1;
-    }
-
-    bool keep_alive = session->req.is_keep_alive;
-    http1_parser_free_memory(&session->req);
-    memset(&session->req, 0, sizeof(RequestHeader));
-
-    session->buf_len = 0;
-    if (session->buffer) session->buffer[0] = '\0';
-    session->state = STATE_READ_HEADERS;
-
-    return keep_alive ? 2 : 0;
+    return 3;
 }
 

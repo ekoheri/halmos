@@ -30,8 +30,6 @@ static int  fcgi_proto_add_pair(unsigned char* dest, const char *name, const cha
 
 static ssize_t fcgi_smart_response(int fd, const void *buf, size_t len, bool is_tls);
 
-//static int fcgi_io_splice_response(int fpm_fd, int sock_client, RequestHeader *req);
-
 /* --- CORE FUNCTIONS --- */
 
 int fcgi_proto_begin_request(const char *target, int port, unsigned char *gather_buf, int *g_ptr, int request_id) {
@@ -240,6 +238,8 @@ void fcgi_proto_send_stdin(int sockfd, int request_id, const void *data, int dat
  */
 int fcgi_io_splice_response(int fpm_fd, int sock_client, RequestHeader *req) {
     unsigned char h_buf[8];
+    int header_bytes_read = 0;
+    
     int pipe_fds[2];
     bool is_tls = req->is_tls;
     bool use_splice = !is_tls;
@@ -251,12 +251,11 @@ int fcgi_io_splice_response(int fpm_fd, int sock_client, RequestHeader *req) {
     bool is_redirect = false;
     int final_status = -1; // Default gagal (Poisoned state)
 
-    // 1. SET TIMEOUT: Mencegah Worker Thread Hang Selamanya
+    // 1. SET TIMEOUT: Mencegah Worker Thread Hang Selamanya di level Kernel Socket
     struct timeval tv;
-    tv.tv_sec = 30; // Timeout 30 detik (Standar upstream)
+    tv.tv_sec = 30; // Timeout 30 detik
     tv.tv_usec = 0;
     if (setsockopt(fpm_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0) {
-        //write_log_error("[FCGI] Warning: Could not set SO_RCVTIMEO: %s", strerror(errno));
         write_log_error_code(ERR_FCGI_RCV_TIMEO, strerror(errno));
     }
 
@@ -264,19 +263,28 @@ int fcgi_io_splice_response(int fpm_fd, int sock_client, RequestHeader *req) {
         use_splice = false;
     }
 
-    /* --- LOOP UTAMA: FASTCGI RECORD PARSING --- */
+    /* --- LOOP UTAMA: FASTCGI RECORD PARSING (TANPA MSG_WAITALL) --- */
     while (1) {
-        // Baca Header (MSG_WAITALL akan patuh pada SO_RCVTIMEO)
-        ssize_t n_head = recv(fpm_fd, h_buf, 8, MSG_WAITALL);
-        if (n_head != 8) {
-            if (n_head < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-                //write_log_error("[FCGI] Timeout: Backend unresponsive for 30s at URI: %s", req->uri);
-                write_log_error_code(ERR_FCGI_TIMEOUT, req->uri);
-            } else {
-                //write_log_error("[FCGI] Connection lost/Header malformed.");
+        // --- BACA HEADER 8 BYTE SECARA PARSIAL (NON-BLOCKING SAFE) ---
+        header_bytes_read = 0;
+        while (header_bytes_read < 8) {
+            ssize_t n_head = recv(fpm_fd, h_buf + header_bytes_read, 8 - header_bytes_read, 0);
+            if (n_head < 0) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    struct pollfd pfd = {.fd = fpm_fd, .events = POLLIN};
+                    int pr = poll(&pfd, 1, 1000); // Max tunggu 1 detik per iterasi header
+                    if (pr > 0 && (pfd.revents & POLLIN)) continue;
+                    write_log_error_code(ERR_FCGI_TIMEOUT, req->uri ? req->uri : "/");
+                    goto cleanup_error;
+                }
+                if (errno == EINTR) continue;
                 write_log_error_code(ERR_FCGI_CONN_LOST);
+                goto cleanup_error;
+            } else if (n_head == 0) {
+                write_log_error_code(ERR_FCGI_CONN_LOST);
+                goto cleanup_error;
             }
-            break; 
+            header_bytes_read += n_head;
         }
 
         HalmosFCGI_Header *h = (HalmosFCGI_Header *)h_buf;
@@ -290,7 +298,19 @@ int fcgi_io_splice_response(int fpm_fd, int sock_client, RequestHeader *req) {
                     int space = sizeof(header_buffer) - header_pos - 1;
                     int to_read = (clen < space) ? clen : space;
                     
-                    if (recv(fpm_fd, header_buffer + header_pos, to_read, MSG_WAITALL) != to_read) break;
+                    int header_chunk_read = 0;
+                    while (header_chunk_read < to_read) {
+                        ssize_t nr = recv(fpm_fd, header_buffer + header_pos + header_chunk_read, to_read - header_chunk_read, 0);
+                        if (nr < 0) {
+                            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                                struct pollfd pfd = {.fd = fpm_fd, .events = POLLIN};
+                                if (poll(&pfd, 1, 1000) > 0) continue;
+                            }
+                            goto cleanup_error;
+                        } else if (nr == 0) goto cleanup_error;
+                        header_chunk_read += nr;
+                    }
+                    
                     header_pos += to_read;
                     header_buffer[header_pos] = '\0';
 
@@ -302,20 +322,17 @@ int fcgi_io_splice_response(int fpm_fd, int sock_client, RequestHeader *req) {
                         else if (strcasestr(header_buffer, "Location:")) status_code = 302;
                         is_redirect = (status_code >= 300 && status_code < 400);
 
-                        // Cek apakah PHP sudah mengirimkan Content-Length
                         bool has_content_length = (strcasestr(header_buffer, "Content-Length:") != NULL);
 
-                        // Susun Respon HTTP/1.1 ke Klien
                         char res_start[1024];
                         int s_len;
 
                         if (is_redirect) {
-                            // Untuk redirect (302), paksa Content-Length: 0 di header utama jika belum ada
                             s_len = snprintf(res_start, sizeof(res_start),
                                 "HTTP/1.1 %d %s\r\nServer: Halmos\r\n%s%sConnection: %s\r\n",
                                 status_code, get_status_text(status_code),
                                 has_content_length ? "" : "Content-Length: 0\r\n",
-                                "", // Tempat tambahan jika diperlukan
+                                "",
                                 req->is_keep_alive ? "keep-alive" : "close");
                         } else {
                             s_len = snprintf(res_start, sizeof(res_start),
@@ -326,26 +343,23 @@ int fcgi_io_splice_response(int fpm_fd, int sock_client, RequestHeader *req) {
                         
                         if (fcgi_smart_response(sock_client, res_start, s_len, is_tls) < 0) break;
                         
-                        // Kirim header asli dari PHP-FPM (termasuk \r\n\r\n penutupnya)
                         int h_only_len = (delim - header_buffer) + 4; 
                         if (fcgi_smart_response(sock_client, header_buffer, h_only_len, is_tls) < 0) break;
                         
                         header_sent = true;
 
-                        // Jika redirect, kita tidak perlu memproses body sama sekali
                         if (is_redirect) {
-                            // Kuras sisa buffer record FPM jika ada lalu keluar
-                            int remain = clen - (header_pos);
+                            int remain = clen - header_pos;
                             while (remain > 0) {
                                 int pull = (remain > (int)sizeof(body_temp)) ? (int)sizeof(body_temp) : remain;
-                                if (recv(fpm_fd, body_temp, pull, MSG_WAITALL) != pull) break;
-                                remain -= pull;
+                                ssize_t nd = recv(fpm_fd, body_temp, pull, 0);
+                                if (nd <= 0) break;
+                                remain -= nd;
                             }
                             final_status = 0;
                             break; 
                         }
 
-                        // Handle sisa body normal (selain redirect)
                         int body_in_buf = header_pos - h_only_len;
                         if (body_in_buf > 0) {
                             char sz[16];
@@ -358,7 +372,16 @@ int fcgi_io_splice_response(int fpm_fd, int sock_client, RequestHeader *req) {
                         int remain = clen - to_read;
                         while (remain > 0) {
                             int pull = (remain > (int)sizeof(body_temp)) ? (int)sizeof(body_temp) : remain;
-                            if (recv(fpm_fd, body_temp, pull, MSG_WAITALL) != pull) goto cleanup_error;
+                            
+                            int read_actual = 0;
+                            while (read_actual < pull) {
+                                ssize_t nr = recv(fpm_fd, body_temp + read_actual, pull - read_actual, 0);
+                                if (nr < 0) {
+                                    if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
+                                    goto cleanup_error;
+                                } else if (nr == 0) goto cleanup_error;
+                                read_actual += nr;
+                            }
                             
                             char sz[16];
                             int sz_l = snprintf(sz, sizeof(sz), "%X\r\n", pull);
@@ -379,33 +402,42 @@ int fcgi_io_splice_response(int fpm_fd, int sock_client, RequestHeader *req) {
                     if (use_splice) {
                         int to_move = clen;
                         while (to_move > 0) {
-                            // 1. Pindahkan dari Backend ke Pipe (In)
                             ssize_t n_in = splice(fpm_fd, NULL, pipe_fds[1], NULL, to_move, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
-                            
                             if (n_in < 0) {
-                                if (errno == EAGAIN || errno == EINTR) continue;
+                                if (errno == EAGAIN || errno == EINTR) {
+                                    struct pollfd pfd = {.fd = fpm_fd, .events = POLLIN};
+                                    poll(&pfd, 1, 50);
+                                    continue;
+                                }
                                 goto cleanup_error;
-                            } else if (n_in == 0) goto cleanup_error; // Backend closed
+                            } else if (n_in == 0) goto cleanup_error;
 
-                            // 2. Pindahkan dari Pipe ke Client (Out)
-                            // Kita harus menguras apa yang baru saja masuk ke pipe
                             int pipe_level = (int)n_in;
                             while (pipe_level > 0) {
                                 ssize_t n_out = splice(pipe_fds[0], NULL, sock_client, NULL, pipe_level, SPLICE_F_MOVE);
                                 if (n_out <= 0) {
                                     if (n_out < 0 && (errno == EAGAIN || errno == EINTR)) continue;
-                                    goto cleanup_error; // Client closed/error
+                                    goto cleanup_error;
                                 }
                                 pipe_level -= (int)n_out;
                             }
-                            
                             to_move -= (int)n_in;
                         }
                     } else {
                         int to_pull = clen;
                         while (to_pull > 0) {
                             int pull = (to_pull > (int)sizeof(body_temp)) ? (int)sizeof(body_temp) : to_pull;
-                            if (recv(fpm_fd, body_temp, pull, MSG_WAITALL) != pull) goto cleanup_error;
+                            
+                            int read_actual = 0;
+                            while (read_actual < pull) {
+                                ssize_t nr = recv(fpm_fd, body_temp + read_actual, pull - read_actual, 0);
+                                if (nr < 0) {
+                                    if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
+                                    goto cleanup_error;
+                                } else if (nr == 0) goto cleanup_error;
+                                read_actual += nr;
+                            }
+
                             if (!is_redirect) {
                                 if (fcgi_smart_response(sock_client, body_temp, pull, is_tls) < 0) goto cleanup_error;
                             }
@@ -419,30 +451,47 @@ int fcgi_io_splice_response(int fpm_fd, int sock_client, RequestHeader *req) {
         else if (h->type == FCGI_STDERR && clen > 0) {
             char *err_msg = malloc(clen + 1);
             if (err_msg) {
-                //recv(fpm_fd, err_msg, clen, MSG_WAITALL);
-                if (recv(fpm_fd, err_msg, clen, MSG_WAITALL) != clen)
-                    goto cleanup_error;
+                int err_read = 0;
+                while (err_read < clen) {
+                    ssize_t nr = recv(fpm_fd, err_msg + err_read, clen - err_read, 0);
+                    if (nr < 0) {
+                        if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
+                        break;
+                    } else if (nr == 0) break;
+                    err_read += nr;
+                }
                 err_msg[clen] = '\0';
-                //write_log_error("[PHP-STDERR] %s", err_msg);
                 write_log_error_code(ERR_FCGI_PHP_STDERR, err_msg);
                 free(err_msg);
             }
         }
         else if (h->type == FCGI_END_REQUEST) {
             unsigned char end_payload[8]; 
-            if (recv(fpm_fd, end_payload, 8, MSG_WAITALL) == 8) {
+            int end_read = 0;
+            while (end_read < 8) {
+                ssize_t nr = recv(fpm_fd, end_payload + end_read, 8 - end_read, 0);
+                if (nr <= 0) break;
+                end_read += nr;
+            }
+            if (end_read == 8) {
                 if (!is_redirect && header_sent) {
                     fcgi_smart_response(sock_client, "0\r\n\r\n", 5, is_tls);
                 }
-                final_status = 0; // KONDISI SUKSES MUTLAK
+                final_status = 0; // Sukses Mutlak
             }
             break; 
         }
 
-        // Kuras Padding
+        // Kuras Padding tanpa MSG_WAITALL
         if (plen > 0) {
             char junk[256];
-            if (recv(fpm_fd, junk, plen, MSG_WAITALL) != plen) break;
+            int pad_read = 0;
+            while (pad_read < plen) {
+                int chunk = (plen - pad_read > (int)sizeof(junk)) ? (int)sizeof(junk) : (plen - pad_read);
+                ssize_t nr = recv(fpm_fd, junk, chunk, 0);
+                if (nr <= 0) break;
+                pad_read += nr;
+            }
         }
     }
 
@@ -453,8 +502,6 @@ cleanup_error:
     }
 
     if (final_status != 0) {
-        /* STATE INCONSISTENT: Socket beracun, buang dari pool! */
-        //write_log_error("[FCGI] Protocol Desync or Timeout. Closing backend socket.");
         write_log_error_code(ERR_FCGI_DESYNC);
         close(fpm_fd); 
         return -2; 
@@ -546,16 +593,12 @@ int fcgi_proto_add_pair(unsigned char* dest, const char *name, const char *value
 
 ssize_t fcgi_smart_response(int fd, const void *buf, size_t len, bool is_tls) {
     if (is_tls) {
-        // Panggil fungsi pusat yang sudah pinter handle WANT_WRITE (code 3)
-        // Kita loop di sini biar semua chunk datanya beneran keluar
         size_t total_sent = 0;
         while (total_sent < len) {
             ssize_t n = ssl_send(fd, (const char*)buf + total_sent, len - total_sent);
             if (n > 0) {
                 total_sent += n;
-            } else if (n == 0) {
-                // Pakai wait_for_write yang kita buat di manager tadi
-                // Kalau fungsi wait_for_write juga static, terpaksa bikin poll lokal di sini
+            } else if (n == 0 || (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))) {
                 struct pollfd pfd = {.fd = fd, .events = POLLOUT};
                 poll(&pfd, 1, 10); 
             } else {
@@ -563,9 +606,27 @@ ssize_t fcgi_smart_response(int fd, const void *buf, size_t len, bool is_tls) {
             }
         }
         return total_sent;
+    } else {
+        // Jalur Plaintext (Non-TLS) dengan Loop Anti-Partial Send
+        size_t total_sent = 0;
+        const char *ptr = (const char *)buf;
+        while (total_sent < len) {
+            ssize_t n = send(fd, ptr + total_sent, len - total_sent, MSG_NOSIGNAL);
+            if (n > 0) {
+                total_sent += n;
+            } else if (n < 0) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+                    struct pollfd pfd = {.fd = fd, .events = POLLOUT};
+                    poll(&pfd, 1, 10);
+                    continue;
+                }
+                return -1; // Error socket beneran
+            } else {
+                // n == 0 berarti koneksi ditutup klien
+                return -1;
+            }
+        }
+        return total_sent;
     }
-    // Jalur Plaintext (Non-TLS)
-    return send(fd, buf, len, MSG_NOSIGNAL);
 }
-
 

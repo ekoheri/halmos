@@ -126,22 +126,7 @@ void core_event_loop_run() {
             } else if (current_fd == sock_server) {
                 // LOOP ACCEPT: Ambil semua tamu yang antre sampai ludes
                 while (server_running) {
-                    // === [1] ADMISSION CONTROL CHECK ===
-                    size_t current_q_sz = (size_t)global_queue.count;
-
-                    // Server Overload: Tolak koneksi baru secara instan dan aman (Load Shedding)
-                    if (admission_ctrl && !core_admission_evaluate(admission_ctrl, current_q_sz)) {
-                        
-                        struct sockaddr_in temp_addr;
-                        socklen_t temp_len = sizeof(temp_addr);
-                        int temp_sock = accept(sock_server, (struct sockaddr *)&temp_addr, &temp_len);
-                        if (temp_sock >= 0) {
-                            close(temp_sock); 
-                        }
-                        continue; // (Lewati koneksi ini, tapi tetap lanjut kuras socket backlog jika masih ada)
-                    }
-                    // ======================================================
-
+                    // 1. Terima koneksi terlebih dahulu dari socket listener (non-blocking)
                     struct sockaddr_in client_addr;
                     socklen_t addr_len = sizeof(client_addr);
                     int sock_client = accept(sock_server, (struct sockaddr *)&client_addr, &addr_len);
@@ -162,6 +147,18 @@ void core_event_loop_run() {
                             usleep(1000); 
                         }
                         break;
+                    }
+
+                    // 2. Evaluasi Admission Control SETELAH accept berhasil
+                    pthread_mutex_lock(&global_queue.lock);
+                    size_t current_q_sz = (size_t)global_queue.count;
+                    pthread_mutex_unlock(&global_queue.lock);
+
+                    if (admission_ctrl &&
+                        !core_admission_evaluate(admission_ctrl, current_q_sz)) {
+                        // Server Overload: Tolak koneksi secara instan tanpa membebani worker pool
+                        close(sock_client);
+                        continue;  // Lanjutkan menguras sisa backlog di antrean TCP
                     }
  
                     // Set SO_RCVTIMEO agar worker tidak menggantung di read socket I/O (Keep-Alive Safety)
@@ -246,10 +243,6 @@ void core_event_loop_run() {
                     int status = core_queue_push(&global_queue, event_item);
  
                     if (status < 0) {
-                        if (status == -1) {
-                            char *res = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-                            send(client_fd, res, strlen(res), 0);
-                        }
                         atomic_fetch_sub(&global_telemetry.active_connections, 1);
                         core_event_loop_cleanup_connection(client_fd);
                     }
