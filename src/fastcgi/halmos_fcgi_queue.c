@@ -40,6 +40,8 @@ void halmos_fcgi_queue_destroy(void) {
     pthread_mutex_unlock(&fcgi_task_queue.lock);
     pthread_mutex_destroy(&fcgi_task_queue.lock);
     pthread_cond_destroy(&fcgi_task_queue.not_empty);
+
+    fprintf(stderr, "[FCGI_QUEUE_DEBUG] halmos_fcgi_queue_destroy() completed.\n");
 }
 
 bool halmos_fcgi_queue_push(HalmosFCGISession *session, FCGI_TaskType type) {

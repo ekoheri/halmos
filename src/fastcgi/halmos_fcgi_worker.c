@@ -1,9 +1,10 @@
 #include "halmos_fcgi_worker.h"
 #include "halmos_global.h"
+#include "halmos_core_conn_table.h"
 #include "halmos_http2_core.h"
-#include "halmos_http2_stream.h"
-#include "halmos_http2_frame.h"
-#include "halmos_http2_response.h"
+//#include "halmos_http2_stream.h"
+//#include "halmos_http2_frame.h"
+//#include "halmos_http2_response.h"
 #include "halmos_fcgi_queue.h"
 #include "halmos_fcgi_poller.h"
 #include "halmos_fcgi_proto.h"
@@ -64,18 +65,30 @@ bool halmos_fcgi_worker_pool_init(void) {
 }
 
 void halmos_fcgi_worker_pool_stop(void) {
+    fprintf(stderr, "[FCGI_WORKER_DEBUG] Stopping worker pool and forcing active socket closure...\n");
     fcgi_worker_pool.running = false;
 
-    // Bangunkan semua worker yang sedang tertahan di antrean queue
+    // 1. Tutup paksa semua fpm_fd yang masih aktif/tersisa di sesi agar operasi recv/poll unblock seketika
+    // (Asumsikan Anda memiliki fungsi untuk iterasi sesi aktif atau membersihkannya dari connection table/registry)
+    // Jika sesi dikelola via antrean atau tabel koneksi, tutup fd-nya di sini.
+    
+    // 2. Bangunkan semua worker yang sedang tertahan di antrean queue
     halmos_fcgi_queue_broadcast();
 
     if (fcgi_worker_pool.threads) {
         for (int i = 0; i < fcgi_worker_pool.worker_count; i++) {
-            pthread_join(fcgi_worker_pool.threads[i], NULL);
+            // Jika thread menggunakan pthread_cancel sebagai opsi darurat unblock:
+            // pthread_cancel(fcgi_worker_pool.threads[i]);
+            
+            int rc = pthread_join(fcgi_worker_pool.threads[i], NULL);
+            if (rc != 0) {
+                fprintf(stderr, "[FCGI_WORKER_DEBUG] WARNING: Failed to join worker thread %d!\n", i);
+            }
         }
         free(fcgi_worker_pool.threads);
         fcgi_worker_pool.threads = NULL;
     }
+    fprintf(stderr, "[FCGI_WORKER_DEBUG] Worker pool successfully stopped and joined.\n");
 }
 
 void* halmos_fcgi_worker_routine(void *arg) {
@@ -141,17 +154,17 @@ static ssize_t worker_smart_send(int fd, const void *buf, size_t len, bool is_tl
     }
 }
 
-bool halmos_fcgi_fsm_step(HalmosFCGISession *session) {
+// ==========================================
+// 1. FSM STEP KHUSUS HTTP/1.1 (Logika Asli Langsung Kirim ke Klien)
+// ==========================================
+bool halmos_fcgi_fsm_step_http1(HalmosFCGISession *session) {
     if (!session || session->fpm_fd == -1) return false;
 
-    fprintf(stderr, "[FSM_DEBUG] Attempting to lock session %p\n", (void*)session);
     pthread_mutex_lock(&session->lock);
-    fprintf(stderr, "[FSM_DEBUG] Session %p locked successfully\n", (void*)session);
 
     unsigned char h_buf[8];
     ssize_t n_head = recv(session->fpm_fd, h_buf, 8, 0);
     if (n_head <= 0) {
-        fprintf(stderr, "[FSM_DEBUG] recv header failed or EOF, n_head=%zd\n", n_head);
         pthread_mutex_unlock(&session->lock);
         return false; 
     }
@@ -164,19 +177,6 @@ bool halmos_fcgi_fsm_step(HalmosFCGISession *session) {
     FCGI_Header *h = (FCGI_Header *)h_buf;
     int clen = (h->contentLengthB1 << 8) | h->contentLengthB0;
     int plen = h->paddingLength;
-
-    // --- CACHE / RESOLVE HTTP/2 CONTEXT DI ATAS ---
-    HTTP2Session *h2_sess = NULL;
-    HTTP2Stream *h2_stream = NULL;
-    if (session->is_http2) {
-        h2_sess = (HTTP2Session *)(uintptr_t)session->http2_session_ptr;
-        if (h2_sess) {
-            h2_stream = http2_stream_find(h2_sess, session->http2_stream_id);
-        }
-        fprintf(stderr, "[H2-FSM_DEBUG] Step resolved: h2_sess=%p, h2_stream=%p (stream_id=%u, type=%d)\n", 
-                (void*)h2_sess, (void*)h2_stream, session->http2_stream_id, h->type);
-    }
-    // ----------------------------------------------
 
     if (h->type == FCGI_STDOUT) {
         if (clen > 0) {
@@ -195,60 +195,30 @@ bool halmos_fcgi_fsm_step(HalmosFCGISession *session) {
                         int h_only_len = (delim - payload) + 4;
                         int body_len = clen - h_only_len;
 
-                        if (session->is_http2) {
-                            fprintf(stderr, "[H2-FSM_DEBUG] Header found from PHP-FPM! h_only_len=%d, body_len=%d\n", h_only_len, body_len);
-                            
-                            if (h2_stream) {
-                                char *raw_headers = malloc((size_t)h_only_len + 1);
-                                if (raw_headers) {
-                                    memcpy(raw_headers, payload, (size_t)h_only_len);
-                                    raw_headers[h_only_len] = '\0';
+                        const char *default_resp = "HTTP/1.1 200 OK\r\nServer: Halmos\r\nTransfer-Encoding: chunked\r\nConnection: keep-alive\r\n\r\n";
+                        worker_smart_send(session->sock_client, default_resp, strlen(default_resp), session->is_tls, session->ssl_conn);
 
-                                    fprintf(stderr, "[H2-FSM_DEBUG] Calling http2_response_send_complex_header...\n");
-                                    // Kirim dengan flag 0x04 (END_HEADERS) agar curl tahu blok header selesai
-                                    http2_response_send_complex_header(h2_sess, h2_stream, raw_headers, 0x04);
-                                    free(raw_headers);
-                                }
+                        char chunk_header[32];
+                        int ch_len = snprintf(chunk_header, sizeof(chunk_header), "%X\r\n", h_only_len);
+                        worker_smart_send(session->sock_client, chunk_header, ch_len, session->is_tls, session->ssl_conn);
+                        worker_smart_send(session->sock_client, payload, h_only_len, session->is_tls, session->ssl_conn);
+                        worker_smart_send(session->sock_client, "\r\n", 2, session->is_tls, session->ssl_conn);
 
-                                if (body_len > 0) {
-                                    fprintf(stderr, "[H2-FSM_DEBUG] Sending initial body chunk (%d bytes)...\n", body_len);
-                                    http2_response_send_data(h2_sess, h2_stream, payload + h_only_len, (size_t)body_len, false);
-                                }
-                            }
-                        } else {
-                            // Jalur HTTP/1.1
-                            const char *default_resp = "HTTP/1.1 200 OK\r\nServer: Halmos\r\nTransfer-Encoding: chunked\r\nConnection: keep-alive\r\n\r\n";
-                            worker_smart_send(session->sock_client, default_resp, strlen(default_resp), session->is_tls, session->ssl_conn);
-
-                            char chunk_header[32];
-                            int ch_len = snprintf(chunk_header, sizeof(chunk_header), "%X\r\n", h_only_len);
+                        if (body_len > 0) {
+                            ch_len = snprintf(chunk_header, sizeof(chunk_header), "%X\r\n", body_len);
                             worker_smart_send(session->sock_client, chunk_header, ch_len, session->is_tls, session->ssl_conn);
-                            worker_smart_send(session->sock_client, payload, h_only_len, session->is_tls, session->ssl_conn);
+                            worker_smart_send(session->sock_client, payload + h_only_len, body_len, session->is_tls, session->ssl_conn);
                             worker_smart_send(session->sock_client, "\r\n", 2, session->is_tls, session->ssl_conn);
-
-                            if (body_len > 0) {
-                                ch_len = snprintf(chunk_header, sizeof(chunk_header), "%X\r\n", body_len);
-                                worker_smart_send(session->sock_client, chunk_header, ch_len, session->is_tls, session->ssl_conn);
-                                worker_smart_send(session->sock_client, payload + h_only_len, body_len, session->is_tls, session->ssl_conn);
-                                worker_smart_send(session->sock_client, "\r\n", 2, session->is_tls, session->ssl_conn);
-                            }
                         }
 
                         session->header_sent = true;
                     }
                 } else {
-                    // Streaming Body Lanjutan
-                    if (session->is_http2) {
-                        if (h2_stream) {
-                            http2_response_send_data(h2_sess, h2_stream, payload, (size_t)clen, false);
-                        }
-                    } else {
-                        char chunk_header[32];
-                        int ch_len = snprintf(chunk_header, sizeof(chunk_header), "%X\r\n", clen);
-                        worker_smart_send(session->sock_client, chunk_header, ch_len, session->is_tls, session->ssl_conn);
-                        worker_smart_send(session->sock_client, payload, clen, session->is_tls, session->ssl_conn);
-                        worker_smart_send(session->sock_client, "\r\n", 2, session->is_tls, session->ssl_conn);
-                    }
+                    char chunk_header[32];
+                    int ch_len = snprintf(chunk_header, sizeof(chunk_header), "%X\r\n", clen);
+                    worker_smart_send(session->sock_client, chunk_header, ch_len, session->is_tls, session->ssl_conn);
+                    worker_smart_send(session->sock_client, payload, clen, session->is_tls, session->ssl_conn);
+                    worker_smart_send(session->sock_client, "\r\n", 2, session->is_tls, session->ssl_conn);
                 }
 
                 free(payload);
@@ -256,19 +226,7 @@ bool halmos_fcgi_fsm_step(HalmosFCGISession *session) {
         }
     } else if (h->type == FCGI_END_REQUEST) {
         if (session->header_sent) {
-            if (session->is_http2) {
-                if (h2_stream) {
-                    // Jika stream masih ada, kirim data kosong dengan flag END_STREAM (0x01)
-                    http2_response_send_data(h2_sess, h2_stream, NULL, 0, true);
-                } else if (h2_sess) {
-                    // Fallback: Kirim frame DATA kosong berflag END_STREAM (0x01) 
-                    // langsung menggunakan fungsi pengiriman frame HTTP/2 yang ada di project Anda.
-                    // (Sesuaikan nama fungsi pengiriman frame Anda, misal: http2_frame_send)
-                    http2_frame_send(h2_sess->fd, h2_sess->is_tls, 0x00, 0x01, session->http2_stream_id, NULL, 0);
-                }
-            } else {
-                worker_smart_send(session->sock_client, "0\r\n\r\n", 5, session->is_tls, session->ssl_conn);
-            }
+            worker_smart_send(session->sock_client, "0\r\n\r\n", 5, session->is_tls, session->ssl_conn);
         }
         pthread_mutex_unlock(&session->lock);
         return false; 
@@ -292,4 +250,157 @@ bool halmos_fcgi_fsm_step(HalmosFCGISession *session) {
     }
 
     return true; 
+}
+
+// ==========================================
+// 2. FSM STEP KHUSUS HTTP/2 (Kerangka / Placeholder Awal)
+// ==========================================
+bool halmos_fcgi_fsm_step_http2(HalmosFCGISession *session) {
+    if (!session || session->fpm_fd == -1) return false;
+
+    pthread_mutex_lock(&session->lock);
+
+    unsigned char h_buf[8];
+    ssize_t n_head = recv(session->fpm_fd, h_buf, 8, 0);
+    if (n_head <= 0) {
+        pthread_mutex_unlock(&session->lock);
+        return false; 
+    }
+    
+    if (n_head < 8) {
+        pthread_mutex_unlock(&session->lock);
+        return true;
+    }
+
+    FCGI_Header *h = (FCGI_Header *)h_buf;
+    int clen = (h->contentLengthB1 << 8) | h->contentLengthB0;
+    int plen = h->paddingLength;
+    
+    // AMBIL LANGSUNG STREAM DARI SESSION H2 (Pastikan session->h2_session dan session->h2_stream sinkron)
+    HTTP2Stream *stream = session->h2_stream;
+
+    if (h->type == FCGI_STDOUT) {
+        if (clen > 0) {
+            char *payload = malloc(clen + 1); // Tambah 1 untuk null terminator
+            if (payload) {
+                int read_bytes = 0;
+                while (read_bytes < clen) {
+                    ssize_t nr = recv(session->fpm_fd, payload + read_bytes, clen - read_bytes, 0);
+                    if (nr <= 0) break;
+                    read_bytes += nr;
+                }
+                payload[read_bytes] = '\0'; // Aman dicetak sebagai string
+
+                // --- TAMBAHAN DEBUG MENTAH FPM ---
+                fprintf(stderr, "[FCGI-RAW] Received %d bytes from FPM:\n%.*s\n--- END RAW ---\n", 
+                        read_bytes, (int)read_bytes, payload);
+
+                if (stream) {
+                    int payload_offset = 0;
+
+                    if (!stream->fcgi_header_parsed) {
+                        size_t space_left = FCGI_HEADER_BUF_SIZE - stream->fcgi_h_ptr - 1;
+                        size_t to_copy = (size_t)(read_bytes - payload_offset) < space_left ? (size_t)(read_bytes - payload_offset) : space_left;
+
+                        if (to_copy > 0) {
+                            memcpy(stream->fcgi_header_buf + stream->fcgi_h_ptr, payload + payload_offset, to_copy);
+                            stream->fcgi_h_ptr += to_copy;
+                            stream->fcgi_header_buf[stream->fcgi_h_ptr] = '\0';
+                            payload_offset += to_copy;
+                        }
+
+                        char *sep = strstr((char *)stream->fcgi_header_buf, "\r\n\r\n");
+                        if (!sep) {
+                            sep = strstr((char *)stream->fcgi_header_buf, "\n\n"); // Fallback deteksi newline ganda biasa
+                        }
+
+                        if (sep) {
+                            stream->fcgi_header_parsed = true;
+                            
+                            // Hitung posisi awal body yang sebenarnya
+                            size_t header_len_actual = (size_t)(sep - stream->fcgi_header_buf) + (sep[0] == '\r' ? 4 : 2);
+                            
+                            // Jika ada sisa byte di dalam buffer header yang masuk wilayah body
+                            if (stream->fcgi_h_ptr > header_len_actual) {
+                                size_t spill_len = stream->fcgi_h_ptr - header_len_actual;
+                                size_t body_space_left = GATHER_BUF_SIZE - stream->fcgi_g_ptr;
+                                
+                                if (spill_len <= body_space_left) {
+                                    memcpy(stream->fcgi_gather_buf + stream->fcgi_g_ptr, stream->fcgi_header_buf + header_len_actual, spill_len);
+                                    stream->fcgi_g_ptr += spill_len;
+                                }
+                                // Koreksi ulang ukuran buffer header murni
+                                stream->fcgi_h_ptr = header_len_actual;
+                                stream->fcgi_header_buf[header_len_actual] = '\0';
+                            }
+
+                            // Jika ada sisa payload setelah pemisah yang belum masuk
+                            if (payload_offset < read_bytes) {
+                                int body_chunk = read_bytes - payload_offset;
+                                size_t body_space_left = GATHER_BUF_SIZE - stream->fcgi_g_ptr;
+
+                                if ((size_t)body_chunk <= body_space_left) {
+                                    memcpy(stream->fcgi_gather_buf + stream->fcgi_g_ptr, payload + payload_offset, body_chunk);
+                                    stream->fcgi_g_ptr += body_chunk;
+                                }
+                            }
+                        }
+                    } else {
+                        int body_chunk = read_bytes - payload_offset;
+                        size_t space_left = GATHER_BUF_SIZE - stream->fcgi_g_ptr;
+
+                        if (body_chunk > 0 && (size_t)body_chunk <= space_left) {
+                            memcpy(stream->fcgi_gather_buf + stream->fcgi_g_ptr, payload + payload_offset, body_chunk);
+                            stream->fcgi_g_ptr += body_chunk;
+                        }
+                    }
+                }
+                free(payload);
+            }
+        }
+    } else if (h->type == FCGI_END_REQUEST) {
+        if (stream) {
+            if (!stream->fcgi_header_parsed && stream->fcgi_h_ptr > 0) {
+                stream->fcgi_header_parsed = true;
+            }
+            stream->is_fcgi_active = false;
+            
+            fprintf(stderr, "[FCGI-FSM] Stream %u Done | Header: %zu bytes | Body: %zu bytes\n", 
+                    stream->stream_id, stream->fcgi_h_ptr, stream->fcgi_g_ptr);
+        }
+        pthread_mutex_unlock(&session->lock);
+        return false; 
+    }
+
+    if (plen > 0) {
+        char junk[256];
+        int pad_read = 0;
+        while (pad_read < plen) {
+            int chunk = (plen - pad_read > (int)sizeof(junk)) ? (int)sizeof(junk) : (plen - pad_read);
+            ssize_t nr = recv(session->fpm_fd, junk, chunk, 0);
+            if (nr <= 0) break;
+            pad_read += nr;
+        }
+    }
+
+    pthread_mutex_unlock(&session->lock);
+
+    if (session->fpm_fd != -1) {
+        halmos_fcgi_poller_add(session->fpm_fd, session, EPOLLIN);
+    }
+
+    return true;
+}
+
+// ==========================================
+// 3. ROUTER UTAMA FSM STEP (Pemanggil Dispatcher)
+// ==========================================
+bool halmos_fcgi_fsm_step(HalmosFCGISession *session) {
+    if (!session) return false;
+    
+    if (session->is_http2) {
+        return halmos_fcgi_fsm_step_http2(session);
+    } else {
+        return halmos_fcgi_fsm_step_http1(session);
+    }
 }

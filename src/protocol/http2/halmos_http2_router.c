@@ -96,9 +96,13 @@ void route_fastcgi_backend(HTTP2Session *session, HTTP2Stream *stream, RequestHe
     }
 
     if (fcgi_sess) {
-        fcgi_sess->is_http2 = true;                  // Tandai sebagai sesi HTTP/2
-        fcgi_sess->http2_stream_id = stream->stream_id; // Simpan ID Stream HTTP/2
-        fcgi_sess->http2_session_ptr = session;        // Simpan pointer HTTP2Session
+        fcgi_sess->is_http2 = true;                  
+        fcgi_sess->http2_stream_id = stream->stream_id; 
+        
+        // --- TAMBAHAN SELARAS ---
+        // Simpan pointer HTTP2Session (HTTP/2 connection session) dan HTTP2Stream langsung ke fcgi_sess
+        fcgi_sess->h2_session = session; 
+        fcgi_sess->h2_stream = stream;   // Pointer langsung ke stream terkait!
     }
 
     // 2. Hubungkan ke PHP-FPM menggunakan modul proto

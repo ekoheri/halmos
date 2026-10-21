@@ -26,8 +26,10 @@ typedef struct {
     // --- TAMBAHAN DUKUNGAN HTTP/2 ---
     bool is_http2;              // true jika ini berasal dari request HTTP/2, false jika HTTP/1
     uint32_t http2_stream_id;   // ID Stream HTTP/2 yang bersangkutan
-    void *http2_session_ptr;    // Pointer ke objek HTTP2Session (opsional, untuk memudahkan pencarian stream)
     // --------------------------------
+
+    void *h2_session; // Menyimpan pointer HTTP2Session
+    void *h2_stream;
 
     FCGI_AsyncState state;      // Status FSM saat ini
 

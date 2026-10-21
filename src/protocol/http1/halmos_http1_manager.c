@@ -66,7 +66,7 @@ void http1_session_destroy(void *session) {
 
     // Tambahkan ini: Bersihkan sesi FCGI jika masih aktif
     if (s->fcgi_sess) {
-        halmos_fcgi_session_destroy(s->fcgi_sess);
+        //halmos_fcgi_session_destroy(s->fcgi_sess);
         s->fcgi_sess = NULL;
     }
 

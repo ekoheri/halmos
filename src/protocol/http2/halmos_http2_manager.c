@@ -39,6 +39,9 @@ int http2_manager_session(halmos_conn_t *conn) {
     bool is_tls = session->is_tls;
  
     while (1) {
+        // Cukup panggil sekali di sini agar selalu aktif memompa buffer & stream setiap putaran loop
+        http2_response_flush_active_streams(session);
+
         // === Flush write backlog & cek hard error SEBELUM apa pun ===
         if (session->write_error) {
             return 0; 
@@ -55,8 +58,8 @@ int http2_manager_session(halmos_conn_t *conn) {
         if (preface_res == 2 || preface_res == 4) return preface_res;
         if (preface_res == 1 && session->preface_bytes_read < 24) continue;
  
-        http2_response_flush_active_streams(session);
- 
+        // (Pemanggilan kedua dihapus)
+
         // === Baca Frame Header (9 byte) ===
         int header_res = read_frame_header(session, sock_client, is_tls, conn);
         if (header_res == 0) return 0;
@@ -74,7 +77,6 @@ int http2_manager_session(halmos_conn_t *conn) {
         if (dispatch_res == 0) return 0;
     }
     
-    // Return akhir sesi (jika loop selesai/keluar)
     bool need_write = (session->pending_write_len > session->pending_write_offset) || 
                       http2_response_has_active_streams(session);
     return need_write ? 4 : 1;

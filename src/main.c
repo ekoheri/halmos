@@ -297,13 +297,14 @@ int main(int argc, char *argv[]) {
     write_log("[CORE] Shutdown signal caught. Cleaning up resources...");
     
     // 1. Hentikan FastCGI Worker Pool TERLEBIH DAHULU (Bangunkan thread yang menunggu di queue)
-    halmos_fcgi_worker_pool_stop();
-    write_log("[CORE] FastCGI Worker Pool stopped.");
-
-    // 2. Hentikan FastCGI Poller
     halmos_fcgi_poller_cleanup();
     write_log("[CORE] FastCGI Poller cleaned up.");
 
+    // 2. Hentikan worker yang memproses task, pastikan thread-nya sudah join/mati total
+    halmos_fcgi_worker_pool_stop();
+    write_log("[CORE] FastCGI Worker Pool stopped.");
+
+    // 3. Baru hancurkan wadah antreannya setelah dipastikan tidak ada worker yang pakai
     halmos_fcgi_queue_destroy();
     write_log("[CORE] FastCGI Queue cleaned up.");
 

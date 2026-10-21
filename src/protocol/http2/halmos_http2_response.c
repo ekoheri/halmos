@@ -7,7 +7,6 @@
 #include "halmos_http_multipart.h"
 #include "halmos_http_utils.h"
 #include "halmos_log.h"
-//#include "halmos_fcgi_pool.h"           // Untuk fungsi fcgi_pool_conn_release
 
 #include <poll.h>                  // Wajib ada untuk POLLIN dan POLLOUT
 #include <stdio.h>
@@ -140,15 +139,13 @@ void http2_response_send_data(HTTP2Session *session, HTTP2Stream *stream, const 
 
 void http2_response_send_complex_header(HTTP2Session *session, HTTP2Stream *stream, char *raw_headers, unsigned char flags) {
     if (!raw_headers) {
-        //fprintf(stderr, "[H2-COMPLEX-HEADER][ERR] Stream %u: raw_headers is NULL!\n", stream->stream_id);
         return;
     }
 
-    // Alokasi dinamis 16KB di heap untuk mengantisipasi header FastCGI/PHP yang sangat besar (Set-Cookie, JWT, dll)
+    // Alokasi dinamis 16KB di heap untuk mengantisipasi header FastCGI/PHP yang sangat besar
     size_t buf_capacity = 16384;
     unsigned char *hpack_buf = (unsigned char *)malloc(buf_capacity);
     if (!hpack_buf) {
-        //fprintf(stderr, "[H2-COMPLEX-HEADER][ERR] Stream %u: Failed to allocate HPACK buffer!\n", stream->stream_id);
         return;
     }
 
@@ -165,20 +162,15 @@ void http2_response_send_complex_header(HTTP2Session *session, HTTP2Stream *stre
         if (parsed > 0) {
             final_status = parsed;
         }
-        //fprintf(stderr, "[H2-COMPLEX-HEADER][DEBUG] Stream %u: Found 'Status:' header -> Parsed Status: %d\n", 
-        //        stream->stream_id, parsed);
     }
 
     // 2. DETEKSI HEADER "Location:"
     if (strcasestr(raw_headers, "Location:") != NULL) {
         has_location = true;
-        //fprintf(stderr, "[H2-COMPLEX-HEADER][DEBUG] Stream %u: Found 'Location:' header.\n", stream->stream_id);
     }
 
     // 3. KOREKSI STATUS UNTUK REDIRECT
     if (has_location && (final_status == 200 || final_status == 304 || final_status == 0)) {
-        //(stderr, "[H2-COMPLEX-HEADER][DEBUG] Stream %u: Override status %d -> 302 (Location header exists)\n", 
-        //        stream->stream_id, final_status);
         final_status = 302;
     }
 
@@ -195,11 +187,10 @@ void http2_response_send_complex_header(HTTP2Session *session, HTTP2Stream *stre
             char s_str[10];
             int s_len = snprintf(s_str, sizeof(s_str), "%d", final_status);
             
-            // Encode length (7-bit prefix HPACK)
             if (s_len < 127) {
                 hpack_buf[pos++] = (unsigned char)s_len;
             } else {
-                hpack_buf[pos++] = 0x7F; // Fallback bound
+                hpack_buf[pos++] = 0x7F; 
             }
             memcpy(hpack_buf + pos, s_str, (size_t)s_len);
             pos += s_len;
@@ -234,7 +225,6 @@ void http2_response_send_complex_header(HTTP2Session *session, HTTP2Stream *stre
             
             for (char *p = key; *p; p++) *p = (char)tolower((unsigned char)*p);
 
-            // Filter pseudo-header "status"
             if (strcmp(key, "status") == 0) {
                 line = strtok_r(NULL, "\r\n", &saveptr);
                 continue;
@@ -243,36 +233,29 @@ void http2_response_send_complex_header(HTTP2Session *session, HTTP2Stream *stre
             size_t klen = strlen(key);
             size_t vlen = strlen(value);
 
-            // Safety Guard: Reallocate jika mendekati batas kapasitas buffer
             if ((size_t)pos + klen + vlen + 16 > buf_capacity) {
                 buf_capacity *= 2;
                 unsigned char *new_buf = (unsigned char *)realloc(hpack_buf, buf_capacity);
                 if (!new_buf) {
-                    //fprintf(stderr, "[H2-COMPLEX-HEADER][ERR] Stream %u: Realloc failed! Truncating headers.\n", stream->stream_id);
                     break;
                 }
                 hpack_buf = new_buf;
             }
 
-            // HPACK Encoding: Literal without Indexing (0x00)
             hpack_buf[pos++] = 0x00; 
             
-            // Encode Key Length (HPACK 7-bit prefix integer)
             if (klen < 127) {
                 hpack_buf[pos++] = (unsigned char)klen;
             } else {
-                // Sederhanakan truncate jika key anomali > 127 char
                 klen = 127;
                 hpack_buf[pos++] = 0x7F;
             }
             memcpy(hpack_buf + pos, key, klen);
             pos += (int)klen;
             
-            // Encode Value Length (FIX: Mengatasi truncation pada value > 127 bytes seperti Cookie)
             if (vlen < 127) {
                 hpack_buf[pos++] = (unsigned char)vlen;
             } else {
-                // Untuk string > 127, HPACK menggunakan multi-byte integer encoding
                 hpack_buf[pos++] = 0x7F;
                 size_t rem = vlen - 127;
                 while (rem >= 128) {
@@ -283,38 +266,31 @@ void http2_response_send_complex_header(HTTP2Session *session, HTTP2Stream *stre
             }
             memcpy(hpack_buf + pos, value, vlen);
             pos += (int)vlen;
-
-            //fprintf(stderr, "[H2-COMPLEX-HEADER][TRACE] Stream %u Header: %s: %s (KLen: %zu, VLen: %zu)\n", 
-            //        stream->stream_id, key, value, klen, vlen);
         }
         line = strtok_r(NULL, "\r\n", &saveptr);
     }
     free(headers_copy);
 
-    //fprintf(stderr, "[H2-COMPLEX-HEADER][DEBUG] Stream %u: Encoded HPACK Total Size: %d bytes | Flags: 0x%02X\n", 
-    //        stream->stream_id, pos, flags);
-        
-    pthread_mutex_lock(&session->streams_lock);
+    // TANPA MUTEX LOCK DI SINI KARENA PEMANGGILNYA SUDAH MEMEGANG session->streams_lock
     http2_frame_send(session->fd, session->is_tls, 0x01, flags, stream->stream_id, hpack_buf, (uint32_t)pos);
-    pthread_mutex_unlock(&session->streams_lock);
 
     free(hpack_buf);
 }
 
 void http2_response_flush_active_streams(HTTP2Session *session) {
     if (!session) return;
- 
+
     uint32_t active_ids[256];
     int active_count = 0;
- 
-    // 1. Kumpulkan stream aktif khusus file statis under lock
+
     pthread_mutex_lock(&session->streams_lock);
     for (int i = 0; i < HTTP2_STREAM_BUCKETS; i++) {
         HTTP2Stream *curr = session->streams_hash[i];
         while (curr != NULL) {
             bool has_file = (curr->is_sending_file && curr->file_fd >= 0 && curr->state != HTTP2_STATE_CLOSED);
+            bool has_fcgi = (curr->fcgi_h_ptr > 0 || curr->fcgi_g_ptr > curr->fcgi_g_sent || curr->is_fcgi_active);
 
-            if (has_file && active_count < 256) {
+            if ((has_file || has_fcgi) && active_count < 256) {
                 active_ids[active_count] = curr->stream_id;
                 active_count++;
             }
@@ -322,43 +298,96 @@ void http2_response_flush_active_streams(HTTP2Session *session) {
         }
     }
     pthread_mutex_unlock(&session->streams_lock);
- 
-    // 2. Iterasi stream aktif untuk file statis
+
     for (int k = 0; k < active_count; k++) {
         uint32_t target_sid = active_ids[k];
 
+        pthread_mutex_lock(&session->streams_lock);
+        HTTP2Stream *st = http2_stream_find_unlocked(session, target_sid);
+        if (st) {
+            
+            // --- TAHAP 1: KIRIM HEADER MENGGUNAKAN FLAG 0x04 (END_HEADERS) ---
+            if (st->fcgi_h_ptr > 0 && !st->fcgi_header_sent) {
+                st->fcgi_header_parsed = true;
+                
+                fprintf(stderr, "[H2-FLUSH] Stream %u | Header Size: %zu bytes\n", target_sid, st->fcgi_h_ptr);
+
+                // Flag 0x04 = END_HEADERS wajib agar klien HTTP/2 langsung memproses header
+                http2_response_send_complex_header(session, st, (char *)st->fcgi_header_buf, 0x04);
+                st->fcgi_header_sent = true;
+            }
+
+            // --- TAHAP 2: POMPA BODY DATA ---
+            if (st->fcgi_header_sent && (st->fcgi_g_ptr > st->fcgi_g_sent || !st->is_fcgi_active)) {
+                size_t bytes_to_send = (st->fcgi_g_ptr > st->fcgi_g_sent) ? (st->fcgi_g_ptr - st->fcgi_g_sent) : 0;
+                unsigned char *send_ptr = st->fcgi_gather_buf + st->fcgi_g_sent;
+
+                uint32_t max_allowed = HTTP2_MAX_FRAME_SIZE;
+                if ((int32_t)max_allowed > session->out_window_size) max_allowed = (uint32_t)session->out_window_size;
+                if ((int32_t)max_allowed > st->out_window_size) max_allowed = (uint32_t)st->out_window_size;
+                if (bytes_to_send > max_allowed) bytes_to_send = max_allowed;
+
+                bool is_stream_finished = (!st->is_fcgi_active && (st->fcgi_g_sent + bytes_to_send >= st->fcgi_g_ptr));
+                uint8_t flags = is_stream_finished ? 0x01 : 0x00; // 0x01 = END_STREAM
+
+                if (bytes_to_send > 0 || is_stream_finished) {
+                    fprintf(stderr, "[H2-FLUSH] Stream %u | Body Chunk Size: %zu bytes (Total Sent: %zu/%zu)\n", 
+                            target_sid, bytes_to_send, st->fcgi_g_sent + bytes_to_send, st->fcgi_g_ptr);
+
+                    http2_frame_send(session->fd, session->is_tls, 0x00, flags, target_sid, send_ptr, (uint32_t)bytes_to_send);
+
+                    if (bytes_to_send > 0) {
+                        session->out_window_size -= (int32_t)bytes_to_send;
+                        st->out_window_size -= (int32_t)bytes_to_send;
+                        st->fcgi_g_sent += bytes_to_send;
+                    }
+
+                    if (is_stream_finished) {
+                        st->state = HTTP2_STATE_CLOSED;
+                        st->is_fcgi_active = false;
+                        if (st->fpm_fd >= 0) {
+                            close(st->fpm_fd);
+                            st->fpm_fd = -1;
+                        }
+                    }
+                }
+            }
+        }
+        pthread_mutex_unlock(&session->streams_lock);
+
+        // --- PENANGANAN B: FILE STATIS (Tetap) ---
         int file_fd = -1;
         off_t offset = 0;
         off_t total_size = 0;
         int32_t conn_win = 0;
         int32_t stream_win = 0;
-        bool valid = false;
+        bool valid_file = false;
  
         pthread_mutex_lock(&session->streams_lock);
-        HTTP2Stream *st = http2_stream_find_unlocked(session, target_sid);
+        st = http2_stream_find_unlocked(session, target_sid);
         if (st && st->is_sending_file && st->file_fd >= 0 && st->state != HTTP2_STATE_CLOSED) {
             file_fd = st->file_fd;
             offset = st->file_offset;
             total_size = st->file_size;
             conn_win = session->out_window_size;
             stream_win = st->out_window_size;
-            valid = true;
+            valid_file = true;
         }
         pthread_mutex_unlock(&session->streams_lock);
  
-        if (!valid || file_fd < 0 || offset >= total_size) continue;
+        if (!valid_file || file_fd < 0 || offset >= total_size) continue;
         if (conn_win <= 0 || stream_win <= 0) continue;
  
         off_t bytes_remaining = total_size - offset;
-        uint32_t max_allowed = HTTP2_MAX_FRAME_SIZE; 
-        if ((int32_t)max_allowed > conn_win) max_allowed = (uint32_t)conn_win;
-        if ((int32_t)max_allowed > stream_win) max_allowed = (uint32_t)stream_win;
-        if ((off_t)max_allowed > bytes_remaining) max_allowed = (uint32_t)bytes_remaining;
+        uint32_t max_allowed_file = HTTP2_MAX_FRAME_SIZE; 
+        if ((int32_t)max_allowed_file > conn_win) max_allowed_file = (uint32_t)conn_win;
+        if ((int32_t)max_allowed_file > stream_win) max_allowed_file = (uint32_t)stream_win;
+        if ((off_t)max_allowed_file > bytes_remaining) max_allowed_file = (uint32_t)bytes_remaining;
  
-        if (max_allowed == 0) continue;
+        if (max_allowed_file == 0) continue;
  
-        unsigned char buf[HTTP2_MAX_FRAME_SIZE];
-        ssize_t n_read = pread(file_fd, buf, max_allowed, offset);
+        unsigned char file_buf[HTTP2_MAX_FRAME_SIZE];
+        ssize_t n_read = pread(file_fd, file_buf, max_allowed_file, offset);
  
         if (n_read <= 0) {
             pthread_mutex_lock(&session->streams_lock);
@@ -373,8 +402,8 @@ void http2_response_flush_active_streams(HTTP2Session *session) {
             continue;
         }
  
-        uint8_t flags = (offset + n_read >= total_size) ? 0x01 : 0x00;
-        http2_frame_send(session->fd, session->is_tls, 0x00, flags, target_sid, buf, (uint32_t)n_read);
+        uint8_t file_flags = (offset + n_read >= total_size) ? 0x01 : 0x00;
+        http2_frame_send(session->fd, session->is_tls, 0x00, file_flags, target_sid, file_buf, (uint32_t)n_read);
  
         pthread_mutex_lock(&session->streams_lock);
         session->out_window_size -= (int32_t)n_read;

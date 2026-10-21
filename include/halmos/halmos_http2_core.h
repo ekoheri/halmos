@@ -95,6 +95,7 @@ typedef struct {
  */
 
 #define GATHER_BUF_SIZE 65536
+#define FCGI_HEADER_BUF_SIZE 4096
  
 typedef struct HTTP2Stream {
     uint32_t stream_id;
@@ -127,6 +128,10 @@ typedef struct HTTP2Stream {
     unsigned char fcgi_gather_buf[GATHER_BUF_SIZE];
     size_t fcgi_g_ptr;
     size_t fcgi_g_sent;
+
+    char fcgi_header_buf[FCGI_HEADER_BUF_SIZE];
+    size_t fcgi_h_ptr;              // Penunjuk ukuran data header yang terkumpul
+    bool fcgi_header_parsed;        // Penanda apakah header sudah selesai diparsing & dikirim
     
     struct HTTP2Stream *node_next; // Point ke stream aktif lainnya
 } HTTP2Stream;
