@@ -197,8 +197,8 @@ static bool halmos_fcgi_fsm_step_http2(HalmosFCGISession *session) {
                 payload[read_bytes] = '\0'; // Aman dicetak sebagai string
 
                 // --- TAMBAHAN DEBUG MENTAH FPM ---
-                fprintf(stderr, "[FCGI-RAW] Received %d bytes from FPM:\n%.*s\n--- END RAW ---\n", 
-                        read_bytes, (int)read_bytes, payload);
+                //fprintf(stderr, "[FCGI-RAW] Received %d bytes from FPM:\n%.*s\n--- END RAW ---\n", 
+                //        read_bytes, (int)read_bytes, payload);
 
                 if (stream) {
                     int payload_offset = 0;
@@ -270,8 +270,8 @@ static bool halmos_fcgi_fsm_step_http2(HalmosFCGISession *session) {
             }
             stream->is_fcgi_active = false;
             
-            fprintf(stderr, "[FCGI-FSM] Stream %u Done | Header: %zu bytes | Body: %zu bytes\n", 
-                    stream->stream_id, stream->fcgi_h_ptr, stream->fcgi_g_ptr);
+            //fprintf(stderr, "[FCGI-FSM] Stream %u Done | Header: %zu bytes | Body: %zu bytes\n", 
+            //        stream->stream_id, stream->fcgi_h_ptr, stream->fcgi_g_ptr);
         }
         pthread_mutex_unlock(&session->lock);
         return false; 

@@ -6,6 +6,7 @@
 #include "halmos_log.h"
 #include "halmos_ws_system.h"
 #include "halmos_http_utils.h"
+
 #include "halmos_fcgi_proto.h"
 #include "halmos_fcgi_poller.h"
 #include "halmos_fcgi_session.h"
@@ -83,10 +84,8 @@ void route_websocket_upgrade(HTTP2Session *session, HTTP2Stream *stream, Request
 void route_fastcgi_backend(HTTP2Session *session, HTTP2Stream *stream, RequestHeader *req, int backend_type) {
     (void)backend_type;
 
-    int request_id = 1;
-
     // 1. Buat Sesi FSM Async FastCGI baru (menyesuaikan parameter HTTP/2 Session)
-    HalmosFCGISession *fcgi_sess = halmos_fcgi_session_create(session->fd, session->is_tls, NULL);
+    HalmosFCGISession *fcgi_sess = halmos_fcgi_session_create(session->fd, session->is_tls, NULL, req, backend_type);
     if (!fcgi_sess) {
         write_log_error_code(ERR_PROTO_H2_FCGI_ACQ, req->uri ? req->uri : "/");
         http2_response_send_header(session, stream, 502);
@@ -105,44 +104,24 @@ void route_fastcgi_backend(HTTP2Session *session, HTTP2Stream *stream, RequestHe
         fcgi_sess->h2_stream = stream;   // Pointer langsung ke stream terkait!
     }
 
-    // 2. Hubungkan ke PHP-FPM menggunakan modul proto
+    int request_id = 1;
     unsigned char gather_buf[65536];
     int g_ptr = 0;
+    fcgi_proto_begin_request(gather_buf, &g_ptr, request_id);
     
-    const char *fpm_target = "127.0.0.1";
-    int fpm_port = 9000;
-
-    int fpm_sock = fcgi_proto_begin_request(fpm_target, fpm_port, gather_buf, &g_ptr, request_id);
-    if (fpm_sock < 0) {
-        fprintf(stderr, "[H2-MANAGER_DEBUG] ERROR: fcgi_proto_begin_request failed, returned fpm_sock=%d\n", fpm_sock);
-        halmos_fcgi_session_destroy(fcgi_sess);
-        http2_response_send_header(session, stream, 502);
-        http2_response_send_data(session, stream, "Bad Gateway", 11, true);
-        stream->state = 4;
-        return;
-    }
-
-    // Set socket non-blocking
-    int flags = fcntl(fpm_sock, F_GETFL, 0);
-    if (flags != -1) {
-        fcntl(fpm_sock, F_SETFL, flags | O_NONBLOCK);
-    }
-
-    fcgi_sess->fpm_fd = fpm_sock;
-
     // 3. Bangun Environment Variables (PARAMS)
     fcgi_proto_build_params(req, session->fd, req->content_length, gather_buf, &g_ptr, request_id);
 
     // Kirim Header PARAMS terlebih dahulu ke PHP-FPM
     ssize_t total_sent = 0;
     while (total_sent < g_ptr) {
-        ssize_t sent = send(fpm_sock, gather_buf + total_sent, (size_t)(g_ptr - total_sent), MSG_NOSIGNAL);
+        ssize_t sent = send(fcgi_sess->fpm_fd, gather_buf + total_sent, (size_t)(g_ptr - total_sent), MSG_NOSIGNAL);
         if (sent < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 usleep(1000);
                 continue;
             } else {
-                fprintf(stderr, "[H2-MANAGER_DEBUG] ERROR: send PARAMS to PHP-FPM failed: %s\n", strerror(errno));
+                //fprintf(stderr, "[H2-MANAGER_DEBUG] ERROR: send PARAMS to PHP-FPM failed: %s\n", strerror(errno));
                 break;
             }
         }
@@ -163,13 +142,13 @@ void route_fastcgi_backend(HTTP2Session *session, HTTP2Stream *stream, RequestHe
 
             size_t chunk_sent = 0;
             while (chunk_sent < (size_t)g_ptr) {
-                ssize_t sent = send(fpm_sock, gather_buf + chunk_sent, (size_t)g_ptr - chunk_sent, MSG_NOSIGNAL);
+                ssize_t sent = send(fcgi_sess->fpm_fd, gather_buf + chunk_sent, (size_t)g_ptr - chunk_sent, MSG_NOSIGNAL);
                 if (sent < 0) {
                     if (errno == EAGAIN || errno == EWOULDBLOCK) {
                         usleep(1000);
                         continue;
                     }
-                    fprintf(stderr, "[H2-MANAGER_DEBUG] ERROR: send STDIN chunk failed: %s\n", strerror(errno));
+                    //fprintf(stderr, "[H2-MANAGER_DEBUG] ERROR: send STDIN chunk failed: %s\n", strerror(errno));
                     break;
                 }
                 chunk_sent += sent;
@@ -184,7 +163,7 @@ void route_fastcgi_backend(HTTP2Session *session, HTTP2Stream *stream, RequestHe
     
     size_t eof_sent = 0;
     while (eof_sent < (size_t)g_ptr) {
-        ssize_t sent = send(fpm_sock, gather_buf + eof_sent, (size_t)g_ptr - eof_sent, MSG_NOSIGNAL);
+        ssize_t sent = send(fcgi_sess->fpm_fd, gather_buf + eof_sent, (size_t)g_ptr - eof_sent, MSG_NOSIGNAL);
         if (sent < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 usleep(1000);
@@ -197,14 +176,14 @@ void route_fastcgi_backend(HTTP2Session *session, HTTP2Stream *stream, RequestHe
 
     // 5. Hubungkan stream HTTP/2 dengan sesi & fpm_fd
     pthread_mutex_lock(&session->streams_lock);
-    stream->fpm_fd = fpm_sock;
+    stream->fpm_fd = fcgi_sess->fpm_fd;
     stream->is_fcgi_active = true;
     pthread_mutex_unlock(&session->streams_lock);
 
     // 6. Daftarkan fpm_sock ke Epoll Upstream Poller
-    fprintf(stderr, "[H2-MANAGER_DEBUG] About to call poller_add with fpm_sock=%d, fcgi_sess=%p\n", fpm_sock, (void*)fcgi_sess);
-    if (!halmos_fcgi_poller_add(fpm_sock, fcgi_sess, EPOLLIN)) {
-        fprintf(stderr, "[H2-MANAGER_DEBUG] ERROR: halmos_fcgi_poller_add returned false for fd=%d\n", fpm_sock);
+    //fprintf(stderr, "[H2-MANAGER_DEBUG] About to call poller_add with fpm_sock=%d, fcgi_sess=%p\n", fpm_sock, (void*)fcgi_sess);
+    if (!halmos_fcgi_poller_add(fcgi_sess->fpm_fd, fcgi_sess, EPOLLIN)) {
+        //fprintf(stderr, "[H2-MANAGER_DEBUG] ERROR: halmos_fcgi_poller_add returned false for fd=%d\n", fpm_sock);
     }
 
     write_log_access("HTTP/2", req->client_ip, req->method, req->uri, 200, 0);

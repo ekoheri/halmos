@@ -19,20 +19,20 @@ void core_conn_t_clear_write_buf(halmos_conn_t *conn) {
 }
 
 int core_conn_t_init(void) {
-    if (g_max_fd == 0) {
-        //write_log_error("[ERR] Invalid g_max_fd (0) for connection system initialization");
+    if (g_core_max_fd == 0) {
+        //write_log_error("[ERR] Invalid g_core_max_fd (0) for connection system initialization");
         write_log_error_code(ERR_CORE_INVALID_MAX_FD);
         return -1;
     }
  
-    g_connections = calloc(g_max_fd, sizeof(halmos_conn_t));
+    g_connections = calloc(g_core_max_fd, sizeof(halmos_conn_t));
     if (!g_connections) {
-        //write_log_error("[ERR] Out of memory allocating %u connection slots", g_max_fd);
-        write_log_error_code(ERR_CORE_SLOT_MEM, g_max_fd);
+        //write_log_error("[ERR] Out of memory allocating %u connection slots", g_core_max_fd);
+        write_log_error_code(ERR_CORE_SLOT_MEM, g_core_max_fd);
         return -1;
     }
  
-    for (uint32_t i = 0; i < g_max_fd; i++) {
+    for (uint32_t i = 0; i < g_core_max_fd; i++) {
         g_connections[i].fd = (int)i;
         atomic_init(&g_connections[i].generation, 0);
         atomic_init(&g_connections[i].active, false);
@@ -49,7 +49,7 @@ int core_conn_t_init(void) {
         }
     }
  
-    write_log("[CORE] Connection system initialized with %u dynamic slots + io_locks", g_max_fd);
+    write_log("[CORE] Connection system initialized with %u dynamic slots + io_locks", g_core_max_fd);
     return 0;
 }
  
@@ -62,7 +62,7 @@ void core_conn_t_destroy(void) {
         // pembersihan akhir dipindah ke sini. Ini teardown single-threaded
         // (dipanggil saat server benar-benar berhenti), jadi tidak perlu
         // io_lock per-slot lagi di titik ini.
-        for (uint32_t i = 0; i < g_max_fd; i++) {
+        for (uint32_t i = 0; i < g_core_max_fd; i++) {
             if (g_connections[i].ssl) {
                 SSL_shutdown(g_connections[i].ssl);
                 SSL_free(g_connections[i].ssl);
@@ -78,7 +78,7 @@ void core_conn_t_destroy(void) {
             }
         }
  
-        for (uint32_t i = 0; i < g_max_fd; i++) {
+        for (uint32_t i = 0; i < g_core_max_fd; i++) {
             pthread_mutex_destroy(&g_connections[i].io_lock);
         }
         free(g_connections);
@@ -88,12 +88,12 @@ void core_conn_t_destroy(void) {
 }
  
 halmos_conn_t* core_conn_t_get(int fd) {
-    if (fd < 0 || (uint32_t)fd >= g_max_fd || !g_connections) return NULL;
+    if (fd < 0 || (uint32_t)fd >= g_core_max_fd || !g_connections) return NULL;
     return &g_connections[fd];
 }
  
 uint32_t core_conn_t_activate(int fd) {
-    if (fd < 0 || (uint32_t)fd >= g_max_fd || !g_connections) return 0;
+    if (fd < 0 || (uint32_t)fd >= g_core_max_fd || !g_connections) return 0;
  
     halmos_conn_t *conn = &g_connections[fd];
     
@@ -121,7 +121,7 @@ uint32_t core_conn_t_activate(int fd) {
 }
  
 void core_conn_t_deactivate(int fd) {
-    if (fd < 0 || (uint32_t)fd >= g_max_fd || !g_connections) return;
+    if (fd < 0 || (uint32_t)fd >= g_core_max_fd || !g_connections) return;
  
     halmos_conn_t *conn = &g_connections[fd];
     
@@ -143,7 +143,7 @@ void core_conn_t_deactivate(int fd) {
 }
  
 bool core_conn_t_is_valid(int fd, uint32_t expected_generation) {
-    if (fd < 0 || (uint32_t)fd >= g_max_fd || !g_connections) return false;
+    if (fd < 0 || (uint32_t)fd >= g_core_max_fd || !g_connections) return false;
  
     halmos_conn_t *conn = &g_connections[fd];
  

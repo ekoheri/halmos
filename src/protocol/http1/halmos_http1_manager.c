@@ -64,9 +64,8 @@ void http1_session_destroy(void *session) {
     if (s->buffer) free(s->buffer);
     if (s->file_fd >= 0) close(s->file_fd);
 
-    // Tambahkan ini: Bersihkan sesi FCGI jika masih aktif
+    // Bersihkan sesi FCGI jika masih aktif
     if (s->fcgi_sess) {
-        //halmos_fcgi_session_destroy(s->fcgi_sess);
         s->fcgi_sess = NULL;
     }
 
@@ -91,7 +90,7 @@ int http1_manager_session(halmos_conn_t *conn) {
     bool is_tls = (conn->ssl != NULL);
 
     // =========================================================================
-    // 1. STATE: BACA HEADER
+    // 1A. STATE: BACA REQUEST HEADER
     // =========================================================================
     if (session->state == STATE_READ_HEADERS) {
         bool should_retry = false;
@@ -323,9 +322,7 @@ int http1_manager_routing_bridge(halmos_conn_t *conn, HTTP1Session *session) {
     else if (has_extension(session->req.uri, session->req.path_info, config.python.ext)) backend_type = 2;
 
     if (backend_type != -1) {
-        // 1. Buat Sesi FSM Async FastCGI baru
-        int request_id = 1; 
-        HalmosFCGISession *fcgi_sess = halmos_fcgi_session_create(sock_client, is_tls, conn->ssl);
+        HalmosFCGISession *fcgi_sess = halmos_fcgi_session_create(sock_client, is_tls, conn->ssl, &session->req, backend_type);
         if (!fcgi_sess) {
             write_log_error_code(ERR_PROTO_H1_FSM);
             http1_response_send_mem(sock_client, 502, "Bad Gateway", "502 Bad Gateway", false, is_tls);
@@ -333,27 +330,11 @@ int http1_manager_routing_bridge(halmos_conn_t *conn, HTTP1Session *session) {
         }
 
         // 2. Hubungkan ke PHP-FPM menggunakan modul proto yang baru
+        int request_id = 1; 
         unsigned char gather_buf[65536];
         int g_ptr = 0;
         
-        const char *fpm_target = "127.0.0.1";
-        int fpm_port = 9000;
-
-        int fpm_sock = fcgi_proto_begin_request(fpm_target, fpm_port, gather_buf, &g_ptr, request_id);
-        if (fpm_sock < 0) {
-            fprintf(stderr, "[MANAGER_DEBUG] ERROR: fcgi_proto_begin_request failed, returned fpm_sock=%d\n", fpm_sock);
-            halmos_fcgi_session_destroy(fcgi_sess);
-            http1_response_send_mem(sock_client, 502, "Bad Gateway", "502 Bad Gateway", false, is_tls);
-            return 0;
-        }
-
-        // Set non-blocking
-        int flags = fcntl(fpm_sock, F_GETFL, 0);
-        if (flags != -1) {
-            fcntl(fpm_sock, F_SETFL, flags | O_NONBLOCK);
-        }
-
-        fcgi_sess->fpm_fd = fpm_sock;
+        fcgi_proto_begin_request(gather_buf, &g_ptr, request_id);
 
         // 3. Bangun Environment Variables (PARAMS) & STDIN
         fcgi_proto_build_params(&session->req, sock_client, session->req.content_length, gather_buf, &g_ptr, request_id);
@@ -370,27 +351,27 @@ int http1_manager_routing_bridge(halmos_conn_t *conn, HTTP1Session *session) {
         // ==========================================
         ssize_t total_sent = 0;
         while (total_sent < g_ptr) {
-            ssize_t sent = send(fpm_sock, gather_buf + total_sent, g_ptr - total_sent, MSG_NOSIGNAL);
+            ssize_t sent = send(fcgi_sess->fpm_fd, gather_buf + total_sent, g_ptr - total_sent, MSG_NOSIGNAL);
             if (sent < 0) {
                 if (errno == EAGAIN || errno == EWOULDBLOCK) {
                     usleep(1000);
                     continue;
                 } else {
-                    fprintf(stderr, "[MANAGER_DEBUG] ERROR: send to PHP-FPM failed: %s\n", strerror(errno));
+                    //fprintf(stderr, "[MANAGER_DEBUG] ERROR: send to PHP-FPM failed: %s\n", strerror(errno));
                     break;
                 }
             }
             total_sent += sent;
         }
-        fprintf(stderr, "[MANAGER_DEBUG] Sent %zd of %d bytes to PHP-FPM\n", total_sent, g_ptr);
+        //fprintf(stderr, "[MANAGER_DEBUG] Sent %zd of %d bytes to PHP-FPM\n", total_sent, g_ptr);
         // ==========================================
 
         // 4. Daftarkan fpm_sock ke Epoll Upstream Poller
         session->fcgi_sess = fcgi_sess; 
-        fprintf(stderr, "[MANAGER_DEBUG] About to call poller_add with fpm_sock=%d, fcgi_sess=%p\n", fpm_sock, (void*)fcgi_sess);
+        //fprintf(stderr, "[MANAGER_DEBUG] About to call poller_add with fpm_sock=%d, fcgi_sess=%p\n", fpm_sock, (void*)fcgi_sess);
         
-        if (!halmos_fcgi_poller_add(fpm_sock, fcgi_sess, EPOLLIN)) {
-            fprintf(stderr, "[MANAGER_DEBUG] ERROR: halmos_fcgi_poller_add returned false for fd=%d\n", fpm_sock);
+        if (!halmos_fcgi_poller_add(fcgi_sess->fpm_fd, fcgi_sess, EPOLLIN)) {
+            //fprintf(stderr, "[MANAGER_DEBUG] ERROR: halmos_fcgi_poller_add returned false for fd=%d\n", fpm_sock);
         }
 
         // 5. Ubah state HTTP1 session menjadi FCGI_PROCESSING
@@ -409,7 +390,6 @@ int http1_manager_routing_bridge(halmos_conn_t *conn, HTTP1Session *session) {
 
         write_log_access("HTTP/1.1", session->req.client_ip, session->req.method, session->req.uri, 404, 21);
 
-        // Manajer memanggil fungsi murni milik response
         http1_response_send_mem(sock_client, 404, "Not Found", "<h1>404 Not Found</h1>", false, is_tls);
         return 0;
     }

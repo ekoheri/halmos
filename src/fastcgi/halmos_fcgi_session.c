@@ -1,14 +1,19 @@
 #include "halmos_fcgi_session.h"
+#include "halmos_fcgi_upstream.h"
+#include "halmos_http1_header.h"
+
 #include "halmos_log.h"
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 /**
  * Membuat dan menginisialisasi sesi FastCGI baru untuk sebuah request klien.
  */
-HalmosFCGISession* halmos_fcgi_session_create(int sock_client, bool is_tls, SSL *ssl_conn) {
+HalmosFCGISession* halmos_fcgi_session_create(int sock_client, bool is_tls, SSL *ssl_conn, RequestHeader *req, int backend_type) {
     HalmosFCGISession *session = (HalmosFCGISession*)malloc(sizeof(HalmosFCGISession));
     if (!session) {
         return NULL;
@@ -17,7 +22,6 @@ HalmosFCGISession* halmos_fcgi_session_create(int sock_client, bool is_tls, SSL 
     memset(session, 0, sizeof(HalmosFCGISession));
 
     session->sock_client = sock_client;
-    session->fpm_fd = -1; // Belum terhubung ke PHP-FPM
     session->is_tls = is_tls;
     session->ssl_conn = ssl_conn;
     session->state = FCGI_STATE_INIT;
@@ -30,6 +34,32 @@ HalmosFCGISession* halmos_fcgi_session_create(int sock_client, bool is_tls, SSL 
     session->current_padding_len = 0;
     session->bytes_processed_in_record = 0;
     session->last_activity = time(NULL);
+
+    session->fpm_fd = -1; // Belum terhubung ke PHP-FPM
+    // --- 1. PILIH NODE & ACQUIRE KONEKSI DITANGANI DISINI ---
+    const char *target_ip = NULL;
+    int target_port = 0;
+    bool is_unix = false;
+
+    if (halmos_fcgi_upstream_select_node(req, backend_type, &target_ip, &target_port, &is_unix) < 0) {
+        pthread_mutex_destroy(&session->lock);
+        free(session);
+        return NULL; // Gagal pilih node
+    }
+
+    int fpm_sock = halmos_fcgi_upstream_acquire(is_unix ? target_ip : NULL, target_port);
+    if (fpm_sock < 0) {
+        pthread_mutex_destroy(&session->lock);
+        free(session);
+        return NULL; // Gagal acquire dari pool
+    }
+
+    // --- 2. SET NON-BLOCKING ---
+    int flags = fcntl(fpm_sock, F_GETFL, 0);
+    if (flags != -1) {
+        fcntl(fpm_sock, F_SETFL, flags | O_NONBLOCK);
+    }
+    session->fpm_fd = fpm_sock;
 
     // Inisialisasi mutex lokal sesi untuk keamanan konkuren antar thread worker
     if (pthread_mutex_init(&session->lock, NULL) != 0) {
@@ -50,8 +80,10 @@ void halmos_fcgi_session_destroy(HalmosFCGISession *session) {
 
     // Tutup socket PHP-FPM jika masih terbuka
     if (session->fpm_fd != -1) {
-        close(session->fpm_fd);
+        halmos_fcgi_upstream_release(session->fpm_fd);
         session->fpm_fd = -1;
+        //close(session->fpm_fd);
+        //session->fpm_fd = -1;
     }
 
     // Catatan: sock_client dan ssl_conn dikelola oleh manajer HTTP frontend,

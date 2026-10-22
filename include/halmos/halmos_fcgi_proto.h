@@ -41,7 +41,7 @@ typedef struct {
 #define FCGI_RESPONDER           1
 #define FCGI_KEEP_CONN           1
 
-int fcgi_proto_begin_request(const char *target, int port, unsigned char *gather_buf, int *g_ptr, int request_id);
+void fcgi_proto_begin_request(unsigned char *gather_buf, int *g_ptr, int request_id);
 void fcgi_proto_build_params(RequestHeader *req, int sock_client, size_t content_length, unsigned char *gather_buf, int *g_ptr, int request_id);
 size_t fcgi_proto_build_stdin_record(int request_id, const void *data, size_t data_len, unsigned char *out_buf, size_t max_out_len);
 size_t fcgi_proto_build_empty_stdin_record(int request_id, unsigned char *out_buf, size_t max_out_len);

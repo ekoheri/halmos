@@ -57,6 +57,7 @@
 #include "halmos_core_thread_pool.h"
 #include "halmos_sec_traffic.h"
 #include "halmos_sec_tls.h"
+#include "halmos_fcgi_upstream.h"
 #include "halmos_fcgi_poller.h"
 #include "halmos_fcgi_queue.h"
 #include "halmos_fcgi_worker.h"
@@ -228,8 +229,8 @@ int main(int argc, char *argv[]) {
             stop_thread_logger();
             return EXIT_FAILURE;
         }
-        // Mapping FD ke SSL (Ukuran g_queue_capacity + buffer aman)
-        ssl_init_mapping(g_queue_capacity + 2000); 
+        // Mapping FD ke SSL (Ukuran g_core_queue_capacity + buffer aman)
+        ssl_init_mapping(g_core_queue_capacity + 2000); 
         write_log("[CORE] TLS Engine & Mapping ready.");
     }
     
@@ -248,8 +249,10 @@ int main(int argc, char *argv[]) {
         sec_traffic_start_janitor();    
     }
     
+    halmos_fcgi_upstream_init();
+
     // 1. Inisialisasi antrean terlebih dahulu
-    if (!halmos_fcgi_queue_init(g_worker_min, g_worker_max, g_queue_capacity)) {
+    if (!halmos_fcgi_queue_init()) {
         fprintf(stderr, "Failed to initialize FCGI task queue!\n");
         exit(EXIT_FAILURE);
     }
@@ -306,6 +309,9 @@ int main(int argc, char *argv[]) {
     // 2. Hentikan worker yang memproses task, pastikan thread-nya sudah join/mati total
     halmos_fcgi_worker_pool_stop();
     write_log("[CORE] FastCGI Worker Pool stopped.");
+
+    halmos_fcgi_upstream_destroy();
+    write_log("[CORE] FastCGI Upstream Connection Pool destroyed.");
 
     // 3. Stop Worker Thread Pool utama Halmos & Join semua thread
     core_queue_thread_worker_stop();

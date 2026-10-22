@@ -1,4 +1,6 @@
 #include "halmos_fcgi_queue.h"
+#include "halmos_global.h"
+
 #include <stdlib.h>
 #include <stdio.h>
 #include <errno.h>
@@ -21,15 +23,15 @@ static int halmos_fcgi_get_adaptive_timeout(FCGITaskQueue *q) {
     return 60;     // Worker minimal bertahan lebih lama
 }
 
-bool halmos_fcgi_queue_init(int min_limit, int max_limit, int max_queue_size) {
+bool halmos_fcgi_queue_init(void) {
     FCGITaskQueue *q = &global_fcgi_queue;
     q->head = q->tail = NULL;
     q->size = 0;
-    q->max_queue_limit = max_queue_size;
+    q->max_queue_limit = g_fcgi_queue_capacity;
     q->active_workers = 0;
-    q->total_workers = min_limit;
-    q->min_threads_limit = min_limit;
-    q->max_threads_limit = max_limit;
+    q->total_workers = g_worker_min;
+    q->min_threads_limit = g_worker_min;
+    q->max_threads_limit = g_worker_max;
     q->scaling_in_progress = 0;
     q->is_running = 1;
 

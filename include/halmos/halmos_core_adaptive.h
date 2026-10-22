@@ -9,11 +9,12 @@
  * Halmos menolak paradigma konfigurasi statis tradisional di mana administrator 
  * dipaksa menebak-nebak parameter operasional optimal secara manual. Sebaliknya, 
  * web server menganut prinsip "kesadaran empiris mandiri" — mempercayakan telemetri 
- * perangkat keras secara *real-time* sebagai sumber kebenaran tunggal untuk 
+ * perangkat keras secara real-time sebagai sumber kebenaran tunggal untuk 
  * mengatur batasan operasional internal secara dinamis.
  * 
- * Saat diinisialisasi, mesin adaptif ini mengkalibrasi diri di atas tiga pilar 
- * sumber daya utama (CPU, RAM dan File Descriptor/FD) tanpa memerlukan intervensi manual pada berkas konfigurasi:
+ * Saat diinisialisasi, mesin adaptif ini mengkalibrasi dirinya di atas tiga pilar 
+ * sumber daya utama (CPU, RAM dan File Descriptor/FD), tanpa memerlukan intervensi 
+ * manual pada berkas konfigurasi, serta membaginya secara tegas ke dalam domain:
  * 
  * 1. HEURISTIK KONKURENSI BERBASIS CPU (Penskalaan Worker & Event Batch):
  *    - Alasan: Event loop non-blocking I/O mampu menangani banyak deskriptor 
@@ -29,8 +30,6 @@
  *    - Kaitannya dengan MAX_EVENT_BATCH_SIZE: 
  *      Batasan pemrosesan event per siklus (`MAX_EVENT_BATCH_SIZE: 1024`) diselaraskan 
  *      secara langsung dengan batas maksimal worker ini (`g_event_batch_size = min(g_worker_max, 1024)`). 
- *      Angka 1024 adalah batas optimal standar Linux untuk mengambil batch event jaringan 
- *      (misal via epoll_wait) tanpa membebani memori stack CPU atau memicu latency spike.
  * 
  * 2. MANAJEMEN ANGGARAN MEMORI BERBASIS RAM (Cadangan Aman OS & Database):
  *    - Telemetri & Kebijakan Alokasi: Membaca memori sistem via `sysinfo()` dan 
@@ -40,30 +39,68 @@
  *        * total_ram_mb      = (si.totalram * si.mem_unit) / (1024 * 1024)
  *        * reserved_ram_mb   = clamp(total_ram_mb / 4, 512, 4096)
  *        * available_for_web = total_ram_mb - reserved_ram_mb
- *    - Alokasi Proporsional Backend Berdasarkan Jumlah yang Aktif:
- *        * 3 Backend (PHP/Python/Rust): 50% / 30% / 20% dari available_for_web
- *        * 2 Backend (Misal PHP/Python): 60% / 40% dari available_for_web
- *        * 1 Backend Aktif: 100% dari available_for_web
- *    - Batas Maksimum Worker per Backend Berdasarkan RAM:
- *        * max_php_by_ram    = php_budget_ram / php_mem_budget
- *        * max_python_by_ram = python_budget_ram / python_mem_budget
- *        * max_rust_by_ram   = rust_budget_ram / rust_mem_budget
+ *    - Alokasi Proporsional Backend & Upstream Buffer (`g_fcgi_upstream_slots` & `g_fcgi_queue_capacity`):
+ *        * Menghasilkan kuota slot paralel aman untuk PHP, Rust, dan Python berdasarkan 
+ *          anggaran RAM bersih agar proses anak FPM tidak memicu *OOM Killer*.
+ *        * `g_fcgi_queue_capacity`: Buffer antrean tunggu yang menampung request HTTP 
+ *          tatkala seluruh slot upstream/FPM sibuk, mencegah penolakan koneksi mentah (ECONNREFUSED).
  * 
- * 3. PENYELARASAN FILE DESCRIPTOR (FD) & KAPASITAS ANTREAN:
+ * 3. PENYELARASAN FILE DESCRIPTOR (FD) & ANTREAN FRONTEND (`g_core_max_fd` & `g_core_queue_capacity`):
  *    - Telemetri: Membaca batasan proses secara jujur (`RLIMIT_NOFILE` / ulimit) 
  *      menggunakan `getrlimit()` tanpa mencoba memodifikasi kernel secara paksa.
- *    - Rumus Dasar & Komputasi:
- *        * g_max_fd          = max(64, rlim_cur)
- *        * sisa_fd           = (g_max_fd > g_worker_max) ? (g_max_fd - g_worker_max) : 0
- *        * g_queue_capacity  = (sisa_fd > 0) ? (sisa_fd * 60) / 100 : 256
- *    - Pengaman (Guardrails): Kapasitas antrean tugas (*Task Queue*) dibatasi 
- *      oleh plafon internal (`MAX_QUEUE_CAPACITY: 4096`) dengan batas bawah (floor) 256:
- *        * g_queue_capacity  = clamp(g_queue_capacity, 256, MAX_QUEUE_CAPACITY)
+ *    - Rumus Dasar & Komputasi Core FD:
+ *        * g_core_max_fd     = clamp(rlim_cur, 64, UINT32_MAX)  // (Ditangani jika unlimited)
+ *    - Integrasi Antar Pilar (CPU, RAM, & FD) pada Queue Frontend:
+ *        * sisa_fd           = (g_core_max_fd > (uint32_t)g_worker_max) ? (g_core_max_fd - (uint32_t)g_worker_max) : 0
+ *        * g_core_queue_capacity = clamp((sisa_fd * 60) / 100, 256, MAX_QUEUE_CAPACITY)
+ *    - Epistemologi Antrean: Meskipun dihitung dari sisa FD, kapasitas antrean ini 
+ *      secara dinamis dikoreksi oleh kapasitas CPU (`g_worker_max` sebagai pengurang) 
+ *      dan divalidasi selaras dengan batas aman RAM backend (`g_fcgi_upstream_slots`) 
+ *      untuk menampung gelombang request masuk secara aman.
  * 
  * 4. FCGI QUOTA MAPPING (ALOKASI KUOTA WORKER BACKEND):
  *    - php_quota           = is_php_active ? php.max_children : 0
  *    - sisa_jatah          = max(0, g_worker_max - php_quota)
  *    - Python/Rust Quota   = Didistribusikan proporsional dari sisa_jatah berdasarkan rasio RAM.
+ *    - g_fcgi_upstream_slots = Total keseluruhan slot upstream yang diizinkan aktif.
+ * 
+ * --------------------------------------------------------------------------
+ * REPRESENTASI HIERARKI PILAR & ALUR SUMBER DAYA (TREE VIEW):
+ * --------------------------------------------------------------------------
+ * [ PILAR FISIK / HARD CONSTRAINTS ]
+ *  ├── 1. CPU (Core Count)
+ *  │    └── Menentukan: WORKER THREAD POOL
+ *  │         ├── g_worker_min        (Baseline thread siaga, misal: Core Count * 4)
+ *  │         └── g_worker_max        (Plafon pekerja aktif, misal: Core Count * 64, maks 1024)
+ *  │
+ *  ├── 2. RAM (Memory Budget & Available RAM)
+ *  │    └── Menentukan: BACKEND / FASTCGI UPSTREAM SLOTS
+ *  │         ├── g_fcgi_upstream_slots (Total slot aman untuk PHP + Rust + Python)
+ *  │         │    ├── php_quota        (Dibatasi max_children * RAM budget PHP per process)
+ *  │         │    ├── rust_quota       (Dibatasi RAM budget Rust per process)
+ *  │         │    └── python_quota     (Dibatasi RAM budget Python per process)
+ *  │         └── g_fcgi_queue_capacity (Buffer antrean tunggu saat slot backend FPM penuh)
+ *  │              ├── Formula        : Dihitung proporsional dari sisa kapasitas worker/slot aktif
+ *  │              └── Penjelasan     : Menampung request HTTP yang sudah lolos dari frontend 
+ *  │                                   tetapi harus mengantre karena seluruh proses anak FPM (PHP/Rust/Python) 
+ *  │                                   sedang sibuk melayani request lain, mencegah server menolak koneksi secara mentah (ECONNREFUSED).
+ *  │
+ *  └── 3. FILE DESCRIPTOR / FD (ulimit -n)
+ *       └── Menentukan: CORE / FRONTEND NETWORK CAPACITY
+ *            ├── g_core_max_fd       (Pintu gerbang epoll klien, hasil olahan ulimit sistem)
+ *            │    ├── Sumber         : Dibaca langsung dari sistem via getrlimit(RLIMIT_NOFILE)
+ *            │    └── Penjelasan     : Bukan sekadar salinan mentah ulimit, melainkan telah divalidasi:
+ *            │                         jika 'unlimited' dikunci ke plafon aman (misal 65536), 
+ *            │                         dan jika terlalu kecil dinaikkan ke batas minimal aman (minimal 64).
+ *            └── g_core_queue_capacity (Buffer antrean HTTP request gelombang masuk)
+ *                 ├── Sumber Bahan Baku (FD)   : Berasal dari g_core_max_fd (kapasitas total socket ulimit)
+ *                 ├── Faktor Koreksi (CPU)     : Dikurangi oleh g_worker_max (kapasitas pekerja aktif saat itu)
+ *                 ├── Pagar Pengaman (RAM)     : Dibatasi secara sistemik agar tidak membanjiri g_fcgi_upstream_slots
+ *                 ├── Formula Penyelaras       : Clamp( (g_core_max_fd - g_worker_max) * 60%, 256, MAX_QUEUE_CAPACITY )
+ *                 └── Penjelasan Integrasi     : Meskipun dihitung dari sisa FD, angka ini *secara tidak langsung ditentukan oleh CPU dan RAM*. 
+ *                                                Kapasitas CPU (`g_worker_max`) menentukan seberapa banyak slot yang sedang dikerjakan, 
+ *                                                sementara kapasitas RAM (`g_fcgi_upstream_slots`) menentukan batas akhir seberapa jauh 
+ *                                                antrean ini boleh meloloskan request ke backend tanpa memicu kolaps memori.
  * ========================================================================== */
 
 #define MAX_EVENT_BATCH_SIZE 1024

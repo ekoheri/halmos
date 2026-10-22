@@ -22,7 +22,7 @@ static int get_adaptive_timeout(TaskQueue *q);
 
 void core_queue_thread_worker_start(void) {
     // Inisialisasi struct antrean global
-    init_queue(&global_queue, g_worker_min, g_worker_max, g_queue_capacity);
+    init_queue(&global_queue, g_worker_min, g_worker_max, g_core_queue_capacity);
 
     int initial_workers = g_worker_min;
     

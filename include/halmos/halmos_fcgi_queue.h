@@ -49,7 +49,7 @@ extern FCGITaskQueue global_fcgi_queue;
 /**
  * Menginisialisasi global task queue dengan batas min/max worker dan kapasitas antrean.
  */
-bool halmos_fcgi_queue_init(int min_limit, int max_limit, int max_queue_size);
+bool halmos_fcgi_queue_init(void);
 
 /**
  * Menghancurkan antrean dan membersihkan seluruh memori task yang tersisa secara elegan.

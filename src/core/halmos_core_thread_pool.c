@@ -38,7 +38,6 @@ void *core_thread_pool_worker(void *arg) {
         // === AMBIL POINTER KONEKSI ===
         halmos_conn_t *conn = core_conn_t_get(event_item.fd);
  
-        // === VALIDASI KRITIS STALE CONNECTION (GENERATION CHECK) ===
         // Mencegah Race Condition jika socket sudah di-close / di-recycle 
         if (!conn || !core_conn_t_is_valid(event_item.fd, event_item.generation)) {
             write_log("[WORKER] Stale event detected on FD %d (Gen: %u). Dropping task.", 
@@ -77,43 +76,26 @@ void *core_thread_pool_worker(void *arg) {
         // 2. PROSES REQUEST (Dispatcher Utama)
         // Sepanjang fungsi ini, I/O terproteksi oleh conn->io_lock
         int status = http_bridge_dispatch(sock_client, event_item.events);
- 
-        // --- DEBUG TRACE ---
-        //fprintf(stderr, "[DEBUG-WORKER] FD: %d | Events: 0x%X | Dispatch Status: %d\n", 
-        //        sock_client, event_item.events, status);
-        //fflush(stderr);
 
-        // 3. EVALUASI HASIL DISPATCH
-        // Status 1 (generik EPOLLIN|EPOLLOUT) dipertahankan apa adanya untuk
-        // http1_manager_session/http2_manager_session. Status 2/3 datang dari
-        // titik-titik di bridge (peek TLS, SSL_accept handshake, protocol
-        // retry) yang butuh rearm spesifik supaya tidak busy-loop di
-        // edge-triggered epoll.
         if (status == 1) {
             // Status 1: Keep-Alive atau SSL Handshake butuh data lagi (EAGAIN)
             // Rearm harus dilakukan SAAT MASIH TERKUNCI agar tidak berlomba dengan cleanup.
-            // fprintf(stderr, "[DEBUG-WORKER] FD: %d -> Status 1 (Keep-Alive/Selesai). Rearm EPOLLIN\n", sock_client);
 
-            //event_loop_rearm_epoll(sock_client);
             core_event_loop_rearm_epoll_ex(sock_client, EPOLLIN);
             core_conn_t_unlock(conn); // Lepaskan kunci setelah selesai mengatur state
         } else if (status == 2) {
             // Status 2: Butuh BACA lagi saja
-            // fprintf(stderr, "[DEBUG-WORKER] FD: %d -> Status 2 (WANT_READ). Rearm EPOLLIN\n", sock_client);
             core_event_loop_rearm_epoll_ex(sock_client, EPOLLIN);
             core_conn_t_unlock(conn);
         } else if (status == 3) {
-            // fprintf(stderr, "[DEBUG-WORKER] FD: %d -> Status 3 (WANT_WRITE). Rearm EPOLLOUT\n", sock_client);
-            // Status 3: Butuh TULIS lagi saja
+             // Status 3: Butuh TULIS lagi saja
             core_event_loop_rearm_epoll_ex(sock_client, EPOLLOUT);
             core_conn_t_unlock(conn);
         } else if (status == 4) {
-            // --- TAMBAHAN UNTUK HTTP/2 FILE STREAMING / WRITE BACKLOG ---
-            // fprintf(stderr, "[DEBUG-WORKER] FD: %d -> Status 4 (WANT_WRITE). Rearm EPOLLIN | EPOLLOUT\n", sock_client);
+            // --- Status 4 : untuk HTTP/2 digunakan untuk file streaning/write backlog
             core_event_loop_rearm_epoll_ex(sock_client, EPOLLIN | EPOLLOUT);
             core_conn_t_unlock(conn);
         } else {
-            // fprintf(stderr, "[DEBUG-WORKER] FD: %d -> Status %d (Close/Error). Cleaning up...\n", sock_client, status);
             // Status 0 atau -1: Koneksi selesai atau Error
             // Lepaskan kunci TERLEBIH DAHULU, biarkan fungsi cleanup yang mengakuisisi kunci 
             // agar tidak terjadi deadlock saat cleanup mencoba mengunci ulang.

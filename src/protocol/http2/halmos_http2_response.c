@@ -288,7 +288,27 @@ void http2_response_flush_active_streams(HTTP2Session *session) {
         HTTP2Stream *curr = session->streams_hash[i];
         while (curr != NULL) {
             bool has_file = (curr->is_sending_file && curr->file_fd >= 0 && curr->state != HTTP2_STATE_CLOSED);
+            
+            /*
+            Program awalnya begini!
+            Satu baris program ini, memicu browser muter-muter ketika 
+            mengakses halaman PHP? Kenapa? Karena walaupun statusnya 
+            sudah HTTP2_STATE_CLOSED, masih dianggap has_fcgi= true.
+            Akhirnya server akan terus mengirim data ke browser, 
+            sampai browsernya muter-muter (alias mblenger!)
+
             bool has_fcgi = (curr->fcgi_h_ptr > 0 || curr->fcgi_g_ptr > curr->fcgi_g_sent || curr->is_fcgi_active);
+            
+            Lalu aku update seperti dibawah, dan browser sudah lancar, walaupin di refresh 100
+            */
+            bool has_fcgi = (curr->state != HTTP2_STATE_CLOSED && 
+                 (curr->fcgi_h_ptr > 0 || curr->fcgi_g_ptr > curr->fcgi_g_sent || curr->is_fcgi_active));
+            
+            // [DEBUG] Pantau stream apa saja yang terdeteksi aktif
+            //if (curr->fcgi_h_ptr > 0 || curr->is_fcgi_active) {
+            //  fprintf(stderr, "[H2-DEBUG-SCAN] Stream %u | State: %d | has_fcgi: %d | h_ptr: %zu | g_ptr: %zu | g_sent: %zu\n",
+            //      curr->stream_id, curr->state, has_fcgi, curr->fcgi_h_ptr, curr->fcgi_g_ptr, curr->fcgi_g_sent);
+            //}
 
             if ((has_file || has_fcgi) && active_count < 256) {
                 active_ids[active_count] = curr->stream_id;
@@ -310,7 +330,7 @@ void http2_response_flush_active_streams(HTTP2Session *session) {
             if (st->fcgi_h_ptr > 0 && !st->fcgi_header_sent) {
                 st->fcgi_header_parsed = true;
                 
-                fprintf(stderr, "[H2-FLUSH] Stream %u | Header Size: %zu bytes\n", target_sid, st->fcgi_h_ptr);
+                //fprintf(stderr, "[H2-FLUSH] Stream %u | Header Size: %zu bytes\n", target_sid, st->fcgi_h_ptr);
 
                 // Flag 0x04 = END_HEADERS wajib agar klien HTTP/2 langsung memproses header
                 http2_response_send_complex_header(session, st, (char *)st->fcgi_header_buf, 0x04);
@@ -331,8 +351,8 @@ void http2_response_flush_active_streams(HTTP2Session *session) {
                 uint8_t flags = is_stream_finished ? 0x01 : 0x00; // 0x01 = END_STREAM
 
                 if (bytes_to_send > 0 || is_stream_finished) {
-                    fprintf(stderr, "[H2-FLUSH] Stream %u | Body Chunk Size: %zu bytes (Total Sent: %zu/%zu)\n", 
-                            target_sid, bytes_to_send, st->fcgi_g_sent + bytes_to_send, st->fcgi_g_ptr);
+                    //fprintf(stderr, "[H2-FLUSH] Stream %u | Body Chunk Size: %zu bytes (Total Sent: %zu/%zu)\n", 
+                    //        target_sid, bytes_to_send, st->fcgi_g_sent + bytes_to_send, st->fcgi_g_ptr);
 
                     http2_frame_send(session->fd, session->is_tls, 0x00, flags, target_sid, send_ptr, (uint32_t)bytes_to_send);
 
@@ -343,6 +363,7 @@ void http2_response_flush_active_streams(HTTP2Session *session) {
                     }
 
                     if (is_stream_finished) {
+                       //fprintf(stderr, "[H2-CLOSE] Stream %u selesai sepenuhnya. Menutup stream.\n", target_sid);
                         st->state = HTTP2_STATE_CLOSED;
                         st->is_fcgi_active = false;
                         if (st->fpm_fd >= 0) {
@@ -431,7 +452,11 @@ bool http2_response_has_active_streams(HTTP2Session *session) {
         HTTP2Stream *curr = session->streams_hash[i];
         while (curr != NULL) {
             bool has_file = (curr->is_sending_file && curr->file_fd >= 0 && curr->state != HTTP2_STATE_CLOSED);
-            bool has_fcgi = curr->is_fcgi_active;
+            
+            // bool has_fcgi = curr->is_fcgi_active;
+            // Ini kasusnya sama dengan yang aku tulis di funsgi atas itu!
+            // harus ditambahi curr->state != HTTP2_STATE_CLOSED
+            bool has_fcgi = (curr->state != HTTP2_STATE_CLOSED && curr->is_fcgi_active);
 
             if (has_file || has_fcgi) {
                 has_active = true;

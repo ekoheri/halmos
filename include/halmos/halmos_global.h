@@ -8,12 +8,18 @@
 #include <stdint.h>
 
 // --- Penampung Hasil Adaptive ---
-extern uint32_t g_max_fd;       // Dynamic FD capacity untuk core connection table
-extern int g_event_batch_size;  // Untuk epoll_wait
-extern int g_fcgi_pool_size;    // Untuk FastCGI connection pool
-extern int g_worker_max;        // Untuk Thread Worker max
-extern int g_worker_min;        // Untuk Thread Worker min
-extern int g_queue_capacity;    // Untuk Task Queue limit
+// --- 1. DOMAIN CORE / FRONTEND (Klien & Epoll) ---
+extern uint32_t g_core_max_fd;       // Maksimal FD untuk epoll client
+extern int g_core_queue_capacity;    // Kapasitas Task Queue untuk HTTP request masuk
+
+// --- 2. DOMAIN WORKER THREAD POOL (Shared Workers) ---
+extern int g_worker_min;             // Minimal thread pekerja
+extern int g_worker_max;             // Maksimal thread pekerja (berdasarkan core CPU)
+extern int g_event_batch_size;       // Ukuran batch epoll_wait
+
+// --- 3. DOMAIN BACKEND / FASTCGI UPSTREAM ---
+extern int g_fcgi_upstream_slots;    // Total slot koneksi paralel ke FPM (PHP+Rust+Python)
+extern int g_fcgi_queue_capacity;    // Batas antrean khusus jika jatah backend penuh
 
 // Deklarasikan variabel global untuk :
 // 1. menyimpan konfigurasi

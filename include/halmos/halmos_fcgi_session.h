@@ -1,6 +1,7 @@
 #ifndef HALMOS_FCGI_SESSION_H
 #define HALMOS_FCGI_SESSION_H
 
+#include "halmos_http1_header.h"
 #include <stdbool.h>
 #include <pthread.h>
 #include <time.h>
@@ -47,7 +48,7 @@ typedef struct {
 } HalmosFCGISession;
 
 // Prototip fungsi manajemen sesi
-HalmosFCGISession* halmos_fcgi_session_create(int sock_client, bool is_tls, SSL *ssl_conn);
+HalmosFCGISession* halmos_fcgi_session_create(int sock_client, bool is_tls, SSL *ssl_conn, RequestHeader *req, int backend_type);
 void halmos_fcgi_session_destroy(HalmosFCGISession *session);
 void halmos_fcgi_session_set_state(HalmosFCGISession *session, FCGI_AsyncState new_state);
 

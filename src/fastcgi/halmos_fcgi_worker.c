@@ -30,9 +30,11 @@ int halmos_fcgi_spawn_detached_worker(pthread_t *out_tid, void *(*routine)(void 
 }
 
 bool halmos_fcgi_worker_pool_init(void) {
-    int min_workers = g_fcgi_pool_size;
+    // Menggunakan baseline worker minimum dari pilar CPU
+    int min_workers = g_worker_min;
     if (min_workers < 2) min_workers = 2;
     
+    // Menggunakan plafon worker maksimum dari pilar CPU
     int max_workers = g_worker_max;
     if (max_workers < min_workers) max_workers = min_workers * 2;
 
@@ -54,7 +56,6 @@ bool halmos_fcgi_worker_pool_init(void) {
 
 void halmos_fcgi_worker_pool_stop(void) {
     fcgi_worker_pool.running = false;
-    //halmos_fcgi_queue_destroy();
 }
 
 void* halmos_fcgi_worker_routine(void *arg) {

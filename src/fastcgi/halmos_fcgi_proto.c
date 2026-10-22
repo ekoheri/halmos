@@ -24,32 +24,7 @@ static int fcgi_proto_add_pair(unsigned char* dest, const char *name, const char
 
 /* --- PROTOCOL BUILDER FUNCTIONS (STATELESS) --- */
 
-int fcgi_proto_begin_request(const char *target, int port, unsigned char *gather_buf, int *g_ptr, int request_id) {
-    // Membuka socket TCP ke PHP-FPM upstream
-    struct sockaddr_in serv_addr;
-    int fpm_sock = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
-    if (fpm_sock < 0) return -1;
-
-    memset(&serv_addr, 0, sizeof(serv_addr));
-    serv_addr.sin_family = AF_INET;
-    serv_addr.sin_port = htons(port);
-    if (inet_pton(AF_INET, target, &serv_addr.sin_addr) <= 0) {
-        close(fpm_sock);
-        return -1;
-    }
-
-    if (connect(fpm_sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
-        close(fpm_sock);
-        return -1;
-    }
-
-    // --- TAMBAHKAN KODE INI AGAR SOCKET NON-BLOCKING UNTUK EPOLL ---
-    int flags = fcntl(fpm_sock, F_GETFL, 0);
-    if (flags != -1) {
-        fcntl(fpm_sock, F_SETFL, flags | O_NONBLOCK);
-    }
-    // -------------------------------------------------------------
-
+void fcgi_proto_begin_request(unsigned char *gather_buf, int *g_ptr, int request_id) {
     FCGI_Header *h = (FCGI_Header*)&gather_buf[*g_ptr];
     memset(h, 0, sizeof(FCGI_Header));
     h->version = FCGI_VERSION_1;
@@ -64,8 +39,6 @@ int fcgi_proto_begin_request(const char *target, int port, unsigned char *gather
     gather_buf[(*g_ptr)++] = FCGI_KEEP_CONN; // Keep Conn Flag
     memset(&gather_buf[*g_ptr], 0, 5); 
     *g_ptr += 5;
-
-    return fpm_sock; // Sekarang socket sudah non-blocking dan aman untuk epoll!
 }
 
 void fcgi_proto_build_params(RequestHeader *req, int sock_client, size_t content_length, unsigned char *gather_buf, int *g_ptr, int request_id) {

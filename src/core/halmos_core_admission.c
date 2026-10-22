@@ -1,5 +1,5 @@
 #include "halmos_core_admission.h"
-#include "halmos_global.h" // Mengambil semua variabel global termasuk g_queue_capacity
+#include "halmos_global.h" // Mengambil semua variabel global termasuk g_core_queue_capacity
 #include "halmos_log.h" 
 
 #include <stdio.h>
@@ -165,7 +165,7 @@ bool core_admission_evaluate(AdmissionController *controller, size_t current_que
     if (!controller) return true;
 
     // 1. Ambil kapasitas antrean adaptif dengan fallback pengaman
-    size_t adaptive_max_queue = (size_t)g_queue_capacity;
+    size_t adaptive_max_queue = (size_t)g_core_queue_capacity;
     if (adaptive_max_queue == 0) adaptive_max_queue = 256; 
 
     // Cek kapasitas fisik antrean (Batas keras 95%)
