@@ -248,10 +248,10 @@ int main(int argc, char *argv[]) {
         sec_traffic_start_janitor();    
     }
     
-
-    if (!halmos_fcgi_queue_init()) {
-        fprintf(stderr, "[FATAL] Failed to initialize FastCGI Queue!\n");
-        return 1;
+    // 1. Inisialisasi antrean terlebih dahulu
+    if (!halmos_fcgi_queue_init(g_worker_min, g_worker_max, g_queue_capacity)) {
+        fprintf(stderr, "Failed to initialize FCGI task queue!\n");
+        exit(EXIT_FAILURE);
     }
 
     if (!halmos_fcgi_poller_init()) {
@@ -296,6 +296,9 @@ int main(int argc, char *argv[]) {
     
     write_log("[CORE] Shutdown signal caught. Cleaning up resources...");
     
+    halmos_fcgi_queue_destroy();
+    write_log("[CORE] FastCGI Queue cleaned up.");
+
     // 1. Hentikan FastCGI Worker Pool TERLEBIH DAHULU (Bangunkan thread yang menunggu di queue)
     halmos_fcgi_poller_cleanup();
     write_log("[CORE] FastCGI Poller cleaned up.");
@@ -303,10 +306,6 @@ int main(int argc, char *argv[]) {
     // 2. Hentikan worker yang memproses task, pastikan thread-nya sudah join/mati total
     halmos_fcgi_worker_pool_stop();
     write_log("[CORE] FastCGI Worker Pool stopped.");
-
-    // 3. Baru hancurkan wadah antreannya setelah dipastikan tidak ada worker yang pakai
-    halmos_fcgi_queue_destroy();
-    write_log("[CORE] FastCGI Queue cleaned up.");
 
     // 3. Stop Worker Thread Pool utama Halmos & Join semua thread
     core_queue_thread_worker_stop();

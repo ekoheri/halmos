@@ -154,25 +154,25 @@ void* halmos_fcgi_poller_routine(void *arg) {
             uint32_t revents = g_epoll_events[i].events;
             fprintf(stderr, "[FCGI_POLLER_ROUTINE] Event triggered! session=%p, revents=0x%x\n", (void*)session, revents);
 
-            // 1. Jika terjadi error atau HUP, hapus dari epoll DULU agar tidak looping/storm
-            // 1. Jika terjadi error atau HUP
-            if (revents & (EPOLLERR | EPOLLHUP)) {
-                fprintf(stderr, "[FCGI_POLLER_ROUTINE] -> PHP-FPM error/HUP detected. Removing fd and pushing DISCONNECT.\n");
-                
-                if (session->fpm_fd != -1) {
-                    halmos_fcgi_poller_del(session->fpm_fd); // <--- Memanggil fungsi yang sudah ada
-                }
-                
-                halmos_fcgi_queue_push(session, FCGI_TASK_DISCONNECT);
-            } 
-            else if (revents & (EPOLLIN | EPOLLPRI)) {
+            // 1. Prioritaskan pembacaan data jika ada EPOLLIN atau EPOLLPRI
+            if (revents & (EPOLLIN | EPOLLPRI)) {
                 fprintf(stderr, "[FCGI_POLLER_ROUTINE] -> PHP-FPM ready to read. Pushing FCGI_TASK_PROCESS_READ.\n");
                 
                 if (session->fpm_fd != -1) {
-                    halmos_fcgi_poller_del(session->fpm_fd); // <--- Memanggil fungsi yang sudah ada
+                    halmos_fcgi_poller_del(session->fpm_fd);
                 }
 
                 halmos_fcgi_queue_push(session, FCGI_TASK_PROCESS_READ);
+            } 
+            // 2. Tangani HUP/ERR hanya jika tidak ada data tersisa atau terjadi error murni
+            else if (revents & (EPOLLERR | EPOLLHUP)) {
+                fprintf(stderr, "[FCGI_POLLER_ROUTINE] -> PHP-FPM error/HUP detected. Removing fd and pushing DISCONNECT.\n");
+                
+                if (session->fpm_fd != -1) {
+                    halmos_fcgi_poller_del(session->fpm_fd);
+                }
+                
+                halmos_fcgi_queue_push(session, FCGI_TASK_DISCONNECT);
             }
         }
     }

@@ -68,6 +68,10 @@ static bool halmos_fcgi_fsm_step_http1(HalmosFCGISession *session) {
     
     if (n_head < 8) {
         pthread_mutex_unlock(&session->lock);
+        // WAJIB RE-ARM KE EPOLL AGAR SISA BYTES BISA DIBACA BERIKUTNYA
+        if (session->fpm_fd != -1) {
+            halmos_fcgi_poller_add(session->fpm_fd, session, EPOLLIN);
+        }
         return true;
     }
 
@@ -166,6 +170,10 @@ static bool halmos_fcgi_fsm_step_http2(HalmosFCGISession *session) {
     
     if (n_head < 8) {
         pthread_mutex_unlock(&session->lock);
+        // WAJIB RE-ARM KE EPOLL AGAR SISA BYTES BISA DIBACA BERIKUTNYA
+        if (session->fpm_fd != -1) {
+            halmos_fcgi_poller_add(session->fpm_fd, session, EPOLLIN);
+        }
         return true;
     }
 
