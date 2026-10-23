@@ -249,7 +249,10 @@ int main(int argc, char *argv[]) {
         sec_traffic_start_janitor();    
     }
     
-    halmos_fcgi_upstream_init();
+    if (!fcgi_upstream_start()) {
+        fprintf(stderr, "Failed to create upstream backend or connect to backend socket!\n");
+        exit(EXIT_FAILURE);
+    }
 
     // 1. Inisialisasi antrean terlebih dahulu
     if (!fcgi_queue_start()) {
@@ -258,13 +261,13 @@ int main(int argc, char *argv[]) {
     }
 
     if (!fcgi_event_loop_start()) {
-        fprintf(stderr, "[FATAL] Failed to initialize FastCGI Async Poller!\n> exit(1);\n");
+        fprintf(stderr, "Failed to initialize FastCGI Async Event Loop!\n> exit(1);\n");
         return 1;
     }
 
     // 2. INTI PERBAIKAN: Inisialisasi Worker Pool FastCGI (misal 4 thread worker)
     if (!fcgi_thread_pool_start()) {
-        fprintf(stderr, "[FATAL] Failed to initialize FCGI worker pool!\n");
+        fprintf(stderr, "Failed to initialize FCGI thread pool!\n");
         return 1;
     }
     
@@ -310,7 +313,7 @@ int main(int argc, char *argv[]) {
     fcgi_thread_pool_stop();
     write_log("[CORE] FastCGI Worker Pool stopped.");
 
-    halmos_fcgi_upstream_destroy();
+    fcgi_upstream_stop();
     write_log("[CORE] FastCGI Upstream Connection Pool destroyed.");
 
     // 3. Stop Worker Thread Pool utama Halmos & Join semua thread

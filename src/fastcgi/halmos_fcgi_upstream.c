@@ -5,6 +5,7 @@
 #include "halmos_fcgi_upstream.h"
 #include "halmos_log.h"
 #include "halmos_global.h"
+#include "halmos_log.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -16,9 +17,10 @@
 #include <errno.h>
 #include <poll.h>
 #include <fcntl.h>
+#include <stdbool.h>
 
 // Definisi instance global upstream manager
-HalmosFCGI_Upstream fcgi_upstream;
+FCGI_Upstream fcgi_upstream;
 
 /*
 [TIANG UTAMA: IDENTITY MAPPER]
@@ -101,6 +103,7 @@ static int create_backend_socket(const char *target, int port, bool is_unix) {
 
             int res = connect(sock, (struct sockaddr *)&addr, sizeof(addr));
             if (res < 0 && errno != EINPROGRESS) {
+                write_log_error_code(ERR_FCGI_BACKEND_SOCK, target ? target : "0.0.0.0", port);
                 close(sock);
                 sock = -1;
             }
@@ -110,13 +113,13 @@ static int create_backend_socket(const char *target, int port, bool is_unix) {
     return sock;
 }
 
-void halmos_fcgi_upstream_init(void) {
+bool fcgi_upstream_start(void) {
     fcgi_upstream.slots = (g_fcgi_upstream_slots > 0) ? g_fcgi_upstream_slots : 128;
-    fcgi_upstream.connections = malloc(sizeof(HalmosFCGI_Conn) * fcgi_upstream.slots);
+    fcgi_upstream.connections = malloc(sizeof(FCGI_Conn) * fcgi_upstream.slots);
 
     if (!fcgi_upstream.connections) {
-        write_log_error("[UPSTREAM] FATAL: Memory allocation failed for upstream connections");
-        exit(EXIT_FAILURE);
+        write_log_error_code(ERR_FCGI_UPSTREAM_MEM);
+        return false;
     }
 
     // Inisialisasi 3 Papan Skor Atomic (PHP, Rust, Python)
@@ -148,11 +151,10 @@ void halmos_fcgi_upstream_init(void) {
         fcgi_upstream.connections[i].target_path[0] = '\0';
         fcgi_upstream.connections[i].is_unix = false;
     }
-
-    write_log("[UPSTREAM] Initialized Multi-Language FPM Upstream Manager (%d slots)", fcgi_upstream.slots);
+    return true;
 }
 
-void halmos_fcgi_upstream_destroy(void) {
+void fcgi_upstream_stop(void) {
     pthread_mutex_lock(&fcgi_upstream.lock);
     for (int i = 0; i < fcgi_upstream.slots; i++) {
         if (fcgi_upstream.connections[i].sockfd != -1) {
@@ -167,7 +169,7 @@ void halmos_fcgi_upstream_destroy(void) {
     write_log("[UPSTREAM] Upstream manager destroyed successfully.");
 }
 
-int halmos_fcgi_upstream_acquire(const char *target, int port) {
+int fcgi_upstream_acquire(const char *target, int port) {
     bool is_unix = (port == 0 || port == -1);
     int idx = get_backend_index(target, port);
     int final_sock = -1;
@@ -243,7 +245,7 @@ int halmos_fcgi_upstream_acquire(const char *target, int port) {
     return final_sock;
 }
 
-void halmos_fcgi_upstream_release(int sockfd) {
+void fcgi_upstream_release(int sockfd) {
     if (sockfd < 0) return;
 
     pthread_mutex_lock(&fcgi_upstream.lock);
@@ -265,6 +267,7 @@ void halmos_fcgi_upstream_release(int sockfd) {
             if (healthy) {
                 fcgi_upstream.connections[i].in_use = false;
             } else {
+                write_log_warn_code(WARN_FCGI_BACKEND_DEAD, sockfd);
                 close(sockfd);
                 fcgi_upstream.connections[i].sockfd = -1;
                 fcgi_upstream.connections[i].in_use = false;
@@ -282,7 +285,7 @@ void halmos_fcgi_upstream_release(int sockfd) {
     close(sockfd);
 }
 
-int halmos_fcgi_upstream_select_node(RequestHeader *req, int backend_type, const char **out_ip, int *out_port, bool *out_is_unix) {
+int fcgi_upstream_select_node(RequestHeader *req, int backend_type, const char **out_ip, int *out_port, bool *out_is_unix) {
     UpstreamGroup *live_group;
     BackendGroup  *cfg_group;
     VHostEntry *vh = req ? req->vhost_context : NULL;  

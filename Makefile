@@ -81,6 +81,17 @@ tsan: reall
 	@echo "$(GREEN)[TSan] Build berhasil disiapkan dengan ThreadSanitizer!$(NC)"
 	@echo "Jalankan 'sudo ./bin/halmos' atau 'make debug' untuk analisis data race."
 
+# ---------------------------------------------------------
+# RELEASE: Mode Optimal untuk Production
+# ---------------------------------------------------------
+release: CFLAGS = -Wall -Wextra -O3 -Wno-format-truncation -I$(INC_DIR) -I$(INC_DIR)/halmos -DVERSION=\"$(VERSION)\" -D_GNU_SOURCE
+release: LDFLAGS = -lpthread -lm -lssl -lcrypto -ljson-c -s
+release: clean-build $(TARGET)
+	@echo "$(GREEN)==================================================$(NC)"
+	@echo "$(GREEN) [SUCCESS] Halmos v$(VERSION) Release Build Optimal!$(NC)"
+	@echo " Binari siap production: $(TARGET)"
+	@echo "$(GREEN)==================================================$(NC)"
+
 # Internal helper untuk hapus build lama saat mengaktifkan Sanitizer
 reall: clean-build all
 

@@ -97,17 +97,17 @@ typedef enum {
     ERR_SEC_SLOT_MAP        = 4004,
 
     // --- 5. FASTCGI (5000-5999) ---
-    //fastcgi/fcgi_session.c
-    ERR_FCGI_NO_NODES       = 5000,
-    ERR_FCGI_FETCH_POOL     = 5001,
-    //fastcgi/fcgi_pool.c
-    ERR_FCGI_MEM_ALLOC      = 5002,
-    //fastcgi/fcgi_proto.c
-    ERR_FCGI_RCV_TIMEO      = 5003,
-    ERR_FCGI_TIMEOUT        = 5004,
-    ERR_FCGI_CONN_LOST      = 5005,
-    ERR_FCGI_DESYNC         = 5006,
-    ERR_FCGI_PHP_STDERR     = 5007,
+    //fastcgi/fcgi_upstream.c & fcgi subsystem
+    ERR_FCGI_UPSTREAM_MEM   = 5000, // Gagal alokasi memori untuk slot upstream
+    ERR_FCGI_BACKEND_SOCK   = 5001, // Gagal membuat atau connect socket ke backend (PHP/Rust/Python)
+
+    ERR_FCGI_QUEUE_INIT     = 5002, // Gagal inisialisasi mutex atau cond queue FastCGI
+    ERR_FCGI_QUEUE_MEM      = 5003, // Gagal alokasi memori task baru di queue
+
+    //fastcgi/fcgi_event_loop.c
+    ERR_FCGI_EPOLL_CREATE   = 5004, // Gagal membuat epoll instance untuk FCGI event loop
+    ERR_FCGI_EPOLL_MEM      = 5005, // Gagal alokasi memori event batch epoll FCGI
+    ERR_FCGI_EPOLL_ADD      = 5006, // Gagal menambahkan FPM FD ke epoll event loop
 
     // ==========================================
     // KELOMPOK WARNING (Murni Perilaku / Aksi User)
@@ -124,7 +124,11 @@ typedef enum {
     WARN_PROTO_WS_UNMASKED    = 9005,
     WARN_PROTO_WS_PAYLOAD_SZ  = 9006,
     WARN_PROTO_WS_JSON_ERR    = 9007,
-    WARN_PROTO_WS_IPC_JSON    = 9008, 
+    WARN_PROTO_WS_IPC_JSON    = 9008,
+    
+    //fastcgi/fcgi_upstream.c & fcgi subsystem
+    WARN_FCGI_BACKEND_DEAD  = 9009, // Socket backend terdeteksi mati/unhealthy saat health check
+    WARN_FCGI_QUEUE_FULL    = 9010, // Antrean task FastCGI penuh, task ditolak
     //security/traffic.c
     WARN_SEC_RATE_LIMIT       = 9500
 

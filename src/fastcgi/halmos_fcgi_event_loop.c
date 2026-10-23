@@ -16,18 +16,16 @@ static FCGI_AsyncEventLoop upstream_poller;
 static struct epoll_event *g_epoll_events = NULL;
 
 bool fcgi_event_loop_start(void) {
-    //fprintf(stderr, "[FCGI_POLLER_DEBUG] Initializing upstream epoll poller (batch size: %d)...\n", g_event_batch_size);
-    
     upstream_poller.epoll_fd = epoll_create1(EPOLL_CLOEXEC);
     if (upstream_poller.epoll_fd == -1) {
-        //fprintf(stderr, "[FCGI_POLLER_DEBUG] ERROR: Failed to create epoll fd: %s\n", strerror(errno));
+        write_log_error_code(ERR_FCGI_EPOLL_CREATE, strerror(errno));
         return false;
     }
 
     // Alokasikan memori epoll_event secara dinamis berdasarkan nilai adaptif g_event_batch_size
     g_epoll_events = (struct epoll_event*)malloc(sizeof(struct epoll_event) * g_event_batch_size);
     if (!g_epoll_events) {
-        //fprintf(stderr, "[FCGI_POLLER_DEBUG] ERROR: Failed to allocate memory for g_epoll_events!\n");
+        write_log_error_code(ERR_FCGI_EPOLL_MEM);
         close(upstream_poller.epoll_fd);
         upstream_poller.epoll_fd = -1;
         return false;
@@ -37,7 +35,6 @@ bool fcgi_event_loop_start(void) {
 
     // Luncurkan thread mandiri untuk poller upstream
     if (pthread_create(&upstream_poller.event_thread, NULL, fcgi_event_loop_run, NULL) != 0) {
-        //fprintf(stderr, "[FCGI_POLLER_DEBUG] ERROR: Failed to create poller thread: %s\n", strerror(errno));
         free(g_epoll_events);
         g_epoll_events = NULL;
         close(upstream_poller.epoll_fd);
@@ -45,12 +42,10 @@ bool fcgi_event_loop_start(void) {
         return false;
     }
 
-    //fprintf(stderr, "[FCGI_POLLER_DEBUG] Upstream poller initialized & thread started successfully.\n");
     return true;
 }
 
 void fcgi_event_loop_stop(void) {
-    //fprintf(stderr, "[FCGI_POLLER_DEBUG] Cleaning up upstream poller...\n");
     upstream_poller.running = false;
     
     if (upstream_poller.epoll_fd != -1) {
@@ -66,8 +61,6 @@ void fcgi_event_loop_stop(void) {
         free(g_epoll_events);
         g_epoll_events = NULL;
     }
-
-    //fprintf(stderr, "[FCGI_POLLER_DEBUG] Poller thread joined and cleaned up.\n");
 }
 
 bool fcgi_event_loop_add(int fpm_fd, FCGI_Session *session, uint32_t events) {
@@ -76,29 +69,15 @@ bool fcgi_event_loop_add(int fpm_fd, FCGI_Session *session, uint32_t events) {
     ev.events = events;
     ev.data.ptr = session; // Kaitkan event dengan pointer sesi FSM
 
-    // --- DEBUG TAMBAHAN UNTUK MELACAK PENYEBAB EINVAL ---
-    //fprintf(stderr, "[POLLER_DIAG] halmos_fcgi_poller_add called: upstream_epoll_fd=%d, fpm_fd=%d, session=%p, events=0x%x\n", 
-    //        upstream_poller.epoll_fd, fpm_fd, (void*)session, events);
-
-    if (upstream_poller.epoll_fd < 0) {
-        //fprintf(stderr, "[POLLER_DIAG] ERROR: upstream_poller.epoll_fd is invalid (%d)!\n", upstream_poller.epoll_fd);
+    if (upstream_poller.epoll_fd < 0 || fpm_fd < 0 || !session) {
+        return false;
     }
     
-    if (fpm_fd < 0) {
-        //fprintf(stderr, "[POLLER_DIAG] ERROR: fpm_fd is invalid (%d)!\n", fpm_fd);
-    }
-
-    if (!session) {
-        //fprintf(stderr, "[POLLER_DIAG] ERROR: session pointer is NULL!\n");
-    }
-    // ----------------------------------------------------
-
     if (epoll_ctl(upstream_poller.epoll_fd, EPOLL_CTL_ADD, fpm_fd, &ev) < 0) {
-        //fprintf(stderr, "[POLLER_DIAG] ERROR: epoll_ctl(EPOLL_CTL_ADD) failed! errno=%d (%s)\n", errno, strerror(errno));
+        write_log_error_code(ERR_FCGI_EPOLL_ADD, fpm_fd, strerror(errno));
         return false;
     }
 
-    //fprintf(stderr, "[POLLER_DIAG] SUCCESS: fpm_fd=%d successfully added to epoll.\n", fpm_fd);
     return true;
 }
 

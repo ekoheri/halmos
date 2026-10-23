@@ -41,13 +41,13 @@ FCGI_Session* fcgi_session_create(int sock_client, bool is_tls, SSL *ssl_conn, R
     int target_port = 0;
     bool is_unix = false;
 
-    if (halmos_fcgi_upstream_select_node(req, backend_type, &target_ip, &target_port, &is_unix) < 0) {
+    if (fcgi_upstream_select_node(req, backend_type, &target_ip, &target_port, &is_unix) < 0) {
         pthread_mutex_destroy(&session->lock);
         free(session);
         return NULL; // Gagal pilih node
     }
 
-    int fpm_sock = halmos_fcgi_upstream_acquire(is_unix ? target_ip : NULL, target_port);
+    int fpm_sock = fcgi_upstream_acquire(is_unix ? target_ip : NULL, target_port);
     if (fpm_sock < 0) {
         pthread_mutex_destroy(&session->lock);
         free(session);
@@ -80,7 +80,7 @@ void fcgi_session_destroy(FCGI_Session *session) {
 
     // Tutup socket PHP-FPM jika masih terbuka
     if (session->fpm_fd != -1) {
-        halmos_fcgi_upstream_release(session->fpm_fd);
+        fcgi_upstream_release(session->fpm_fd);
         session->fpm_fd = -1;
         //close(session->fpm_fd);
         //session->fpm_fd = -1;

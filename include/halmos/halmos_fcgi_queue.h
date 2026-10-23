@@ -44,30 +44,13 @@ typedef struct {
 // Deklarasi variabel global queue (jika diperlukan secara global seperti di core)
 extern FCGI_TaskQueue global_fcgi_queue;
 
-// --- 4. PROTOTIPE FUNGSI INTERFACE ---
 
-/**
- * Menginisialisasi global task queue dengan batas min/max worker dan kapasitas antrean.
- */
 bool fcgi_queue_start(void);
 
-/**
- * Menghancurkan antrean dan membersihkan seluruh memori task yang tersisa secara elegan.
- */
 void fcgi_queue_stop(void);
 
-/**
- * Memasukkan task baru ke dalam antrean (Enqueue) secara thread-safe.
- * Dilengkapi dengan logika UPSCALING jika antrean melebihi ambang batas.
- */
 bool fcgi_queue_push(FCGI_Session *session, FCGI_TaskType type);
 
-/**
- * Mengambil task dari antrean (Dequeue) secara thread-safe dengan timeout adaptif.
- * Dilengkapi dengan logika DOWNSCALING (terminasi mandiri detached worker jika idle).
- * 
- * @return Pointer ke FCGI_Task yang harus dieksekusi, atau NULL jika worker harus keluar.
- */
 FCGI_Task* fcgi_queue_pop(struct timeval *arrival);
 
 void fcgi_queue_broadcast(void);

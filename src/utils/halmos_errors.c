@@ -87,17 +87,17 @@ static const ErrorMapping ERROR_TABLE[] = {
     { ERR_SEC_LOAD_CERT,       "Failed to load TLS certificate file: %s" },
     { ERR_SEC_LOAD_KEY,        "Failed to load TLS private key file: %s" },
     { ERR_SEC_SLOT_MAP,        "Security mapping failed: FD %d has no active connection slot" },
-    //fastcgi/fcgi_session.c
-    { ERR_FCGI_NO_NODES,       "No backend nodes configured for FastCGI backend type %d" },
-    { ERR_FCGI_FETCH_POOL,     "Failed to acquire connection from FPM pool for URI: %s"},
-    //fastcgi/fcgi_pool.c
-    { ERR_FCGI_MEM_ALLOC,      "FastCGI Pool fatal: Memory allocation failed" },
-    //fastcgi/fcgi_proto.c
-    { ERR_FCGI_RCV_TIMEO,      "FastCGI socket setsockopt SO_RCVTIMEO failed: %s" },
-    { ERR_FCGI_TIMEOUT,        "FastCGI timeout: Backend unresponsive for 30s at URI: %s" },
-    { ERR_FCGI_CONN_LOST,      "FastCGI connection lost or header malformed" },
-    { ERR_FCGI_DESYNC,         "FastCGI protocol desync or timeout. Closing backend socket connection" },
-    { ERR_FCGI_PHP_STDERR,     "PHP-FPM stderr message: %s" },
+    //fastcgi/fcgi_upstream.c
+    { ERR_FCGI_UPSTREAM_MEM,   "FATAL: Memory allocation failed for upstream connections" },
+    { ERR_FCGI_BACKEND_SOCK,   "Failed to create or connect backend socket for target: %s (Port: %d)" },
+ 
+    { ERR_FCGI_QUEUE_INIT,     "FATAL: Failed to initialize FastCGI task queue synchronization primitives" },
+    { ERR_FCGI_QUEUE_MEM,      "Failed to allocate memory for new FastCGI task item" },
+    
+    //fastcgi/fcgi_event_loop.c
+    { ERR_FCGI_EPOLL_CREATE,   "FastCGI event loop epoll_create1 failed: %s" },
+    { ERR_FCGI_EPOLL_MEM,      "Failed to allocate memory for FastCGI epoll events batch" },
+    { ERR_FCGI_EPOLL_ADD,      "FastCGI epoll_ctl(EPOLL_CTL_ADD) failed for fpm_fd %d: %s" },
 
     // --- WARNING ---
     //protocol/http_utils.c
@@ -113,6 +113,10 @@ static const ErrorMapping ERROR_TABLE[] = {
     { WARN_PROTO_WS_PAYLOAD_SZ,"WebSocket FD %d payload size limit exceeded (%zu bytes)" },
     { WARN_PROTO_WS_JSON_ERR,  "Malformed JSON payload on WebSocket FD %d (Stream ID %u)" },
     { WARN_PROTO_WS_IPC_JSON,  "Malformed internal JSON received in WebSocket IPC" },
+    //fastcgi/fcgi_upstream.c & fcgi subsystem
+    { WARN_FCGI_BACKEND_DEAD,  "Upstream backend socket %d detected unhealthy/disconnected, cleaning up slot" },
+    //fastcgi/fcgi_queue.c
+    { WARN_FCGI_QUEUE_FULL,    "FastCGI task queue capacity reached (%d/%d)! Rejecting incoming task" },
     //security/traffic.c
     { WARN_SEC_RATE_LIMIT,     "Rate limit exceeded for client IP: %s (Limit: %d req/sec)" }
 };

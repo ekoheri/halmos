@@ -1,5 +1,6 @@
 #include "halmos_fcgi_queue.h"
 #include "halmos_global.h"
+#include "halmos_log.h"
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -35,9 +36,19 @@ bool fcgi_queue_start(void) {
     q->scaling_in_progress = 0;
     q->is_running = 1;
 
-    if (pthread_mutex_init(&q->lock, NULL) != 0) return false;
-    if (pthread_cond_init(&q->not_empty, NULL) != 0) return false;
-    if (pthread_cond_init(&q->exit_cond, NULL) != 0) return false;
+    // PERUBAHAN: Berikan error code jika gagal inisialisasi primitif sinkronisasi
+    if (pthread_mutex_init(&q->lock, NULL) != 0) {
+        write_log_error_code(ERR_FCGI_QUEUE_INIT);
+        return false;
+    }
+    if (pthread_cond_init(&q->not_empty, NULL) != 0) {
+        write_log_error_code(ERR_FCGI_QUEUE_INIT);
+        return false;
+    }
+    if (pthread_cond_init(&q->exit_cond, NULL) != 0) {
+        write_log_error_code(ERR_FCGI_QUEUE_INIT);
+        return false;
+    }
 
     return true;
 }
@@ -81,12 +92,14 @@ bool fcgi_queue_push(FCGI_Session *session, FCGI_TaskType type) {
     pthread_mutex_lock(&q->lock);
 
     if (!q->is_running || q->size >= q->max_queue_limit) {
+        write_log_warn_code(WARN_FCGI_QUEUE_FULL, q->size, q->max_queue_limit);
         pthread_mutex_unlock(&q->lock);
         return false;
     }
 
     FCGI_Task *new_task = malloc(sizeof(FCGI_Task));
     if (!new_task) {
+        write_log_error_code(ERR_FCGI_QUEUE_MEM);
         pthread_mutex_unlock(&q->lock);
         return false;
     }

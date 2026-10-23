@@ -13,6 +13,7 @@
 #include <stdatomic.h>
 #include <pthread.h>
 #include <time.h>
+#include <stdbool.h>
 
 /* Individual connection slot status */
 typedef struct {
@@ -21,7 +22,7 @@ typedef struct {
     char target_path[108];   // Untuk AF_UNIX (max path length sun_path)
     bool is_unix;            // Flag pembeda jenis socket
     bool in_use;
-} HalmosFCGI_Conn;
+} FCGI_Conn;
 
 /* Grouping untuk Load Balancing Round-Robin */
 typedef struct {
@@ -31,7 +32,7 @@ typedef struct {
 
 /* Global Upstream Manager (Bersih dari istilah pool) */
 typedef struct {
-    HalmosFCGI_Conn *connections;
+    FCGI_Conn *connections;
     int slots;
     
     /* --- Jatah Adaptive (Atomic per Backend) --- */
@@ -52,16 +53,16 @@ typedef struct {
     int current_idle_count;
 
     pthread_mutex_t lock;
-} HalmosFCGI_Upstream;
+} FCGI_Upstream;
 
 /* Instance global upstream manager */
-extern HalmosFCGI_Upstream fcgi_upstream;
+extern FCGI_Upstream fcgi_upstream;
 
 /* Fungsi-fungsi manajemen upstream */
-void halmos_fcgi_upstream_init(void);
-void halmos_fcgi_upstream_destroy(void);
-int halmos_fcgi_upstream_acquire(const char *target, int port);
-void halmos_fcgi_upstream_release(int sockfd);
-int halmos_fcgi_upstream_select_node(RequestHeader *req, int backend_type, const char **out_ip, int *out_port, bool *out_is_unix);
+bool fcgi_upstream_start(void);
+void fcgi_upstream_stop(void);
+int fcgi_upstream_acquire(const char *target, int port);
+void fcgi_upstream_release(int sockfd);
+int fcgi_upstream_select_node(RequestHeader *req, int backend_type, const char **out_ip, int *out_port, bool *out_is_unix);
 
 #endif // HALMOS_FCGI_UPSTREAM_H

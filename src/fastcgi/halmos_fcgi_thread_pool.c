@@ -16,20 +16,6 @@
 
 static FCGI_WorkerPool fcgi_worker_pool;
 
-bool fcgi_thread_pool_is_running(void) {
-    return fcgi_worker_pool.running;
-}
-
-
-int fcgi_thread_pool_spawn_detached(pthread_t *out_tid, void *(*routine)(void *), void *arg) {
-    pthread_attr_t attr;
-    pthread_attr_init(&attr);
-    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-    int ret = pthread_create(out_tid, &attr, routine, arg);
-    pthread_attr_destroy(&attr);
-    return ret;
-}
-
 bool fcgi_thread_pool_start(void) {
     // Menggunakan baseline worker minimum dari pilar CPU
     int min_workers = g_worker_min;
@@ -47,6 +33,9 @@ bool fcgi_thread_pool_start(void) {
         pthread_t tid;
         if (fcgi_thread_pool_spawn_detached(&tid, fcgi_thread_pool_worker, &global_fcgi_queue) != 0) {
             fcgi_worker_pool.running = false;
+            //Pemanggilan fcgi_queue_stop() didalam loop ini
+            // berfungsi sebagai pengaman darurat (abort/cleanup) 
+            // jika pembuatan thread gagal di tengah jalan saat server dinyalakan.
             fcgi_queue_stop();
             return false;
         }
@@ -95,4 +84,17 @@ void* fcgi_thread_pool_worker(void *arg) {
     }
 
     return NULL;
+}
+
+bool fcgi_thread_pool_is_running(void) {
+    return fcgi_worker_pool.running;
+}
+
+int fcgi_thread_pool_spawn_detached(pthread_t *out_tid, void *(*routine)(void *), void *arg) {
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    int ret = pthread_create(out_tid, &attr, routine, arg);
+    pthread_attr_destroy(&attr);
+    return ret;
 }

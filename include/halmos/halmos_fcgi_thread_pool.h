@@ -19,7 +19,6 @@ void* fcgi_thread_pool_worker(void *arg);
 
 bool fcgi_thread_pool_is_running(void);
 
-// Helper untuk spawn detached worker
 int fcgi_thread_pool_spawn_detached(pthread_t *out_tid, void *(*routine)(void *), void *arg);
 
 #endif // HALMOS_FCGI_THREAD_POOL_H
