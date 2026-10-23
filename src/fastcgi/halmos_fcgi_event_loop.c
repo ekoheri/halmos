@@ -1,4 +1,4 @@
-#include "halmos_fcgi_poller.h"
+#include "halmos_fcgi_event_loop.h"
 #include "halmos_fcgi_queue.h"
 #include "halmos_log.h"
 #include "halmos_global.h" 
@@ -10,12 +10,12 @@
 #include <string.h>
 
 // Variabel global state poller upstream
-static FCGIAsyncPoller upstream_poller;
+static FCGI_AsyncEventLoop upstream_poller;
 
 // Pointer array events yang dialokasikan secara dinamis berdasarkan g_event_batch_size
 static struct epoll_event *g_epoll_events = NULL;
 
-bool halmos_fcgi_poller_init(void) {
+bool fcgi_event_loop_start(void) {
     //fprintf(stderr, "[FCGI_POLLER_DEBUG] Initializing upstream epoll poller (batch size: %d)...\n", g_event_batch_size);
     
     upstream_poller.epoll_fd = epoll_create1(EPOLL_CLOEXEC);
@@ -36,7 +36,7 @@ bool halmos_fcgi_poller_init(void) {
     upstream_poller.running = true;
 
     // Luncurkan thread mandiri untuk poller upstream
-    if (pthread_create(&upstream_poller.poller_thread, NULL, halmos_fcgi_poller_routine, NULL) != 0) {
+    if (pthread_create(&upstream_poller.event_thread, NULL, fcgi_event_loop_run, NULL) != 0) {
         //fprintf(stderr, "[FCGI_POLLER_DEBUG] ERROR: Failed to create poller thread: %s\n", strerror(errno));
         free(g_epoll_events);
         g_epoll_events = NULL;
@@ -49,7 +49,7 @@ bool halmos_fcgi_poller_init(void) {
     return true;
 }
 
-void halmos_fcgi_poller_cleanup(void) {
+void fcgi_event_loop_stop(void) {
     //fprintf(stderr, "[FCGI_POLLER_DEBUG] Cleaning up upstream poller...\n");
     upstream_poller.running = false;
     
@@ -59,7 +59,7 @@ void halmos_fcgi_poller_cleanup(void) {
     }
 
     // Tunggu thread poller selesai
-    pthread_join(upstream_poller.poller_thread, NULL);
+    pthread_join(upstream_poller.event_thread, NULL);
 
     // Bebaskan memori alokasi dinamis event batch
     if (g_epoll_events) {
@@ -70,7 +70,7 @@ void halmos_fcgi_poller_cleanup(void) {
     //fprintf(stderr, "[FCGI_POLLER_DEBUG] Poller thread joined and cleaned up.\n");
 }
 
-bool halmos_fcgi_poller_add(int fpm_fd, HalmosFCGISession *session, uint32_t events) {
+bool fcgi_event_loop_add(int fpm_fd, FCGI_Session *session, uint32_t events) {
     struct epoll_event ev;
     memset(&ev, 0, sizeof(ev));
     ev.events = events;
@@ -102,7 +102,7 @@ bool halmos_fcgi_poller_add(int fpm_fd, HalmosFCGISession *session, uint32_t eve
     return true;
 }
 
-bool halmos_fcgi_poller_mod(int fpm_fd, uint32_t events) {
+bool fcgi_event_loop_mod(int fpm_fd, uint32_t events) {
     struct epoll_event ev;
     memset(&ev, 0, sizeof(ev));
     ev.events = events;
@@ -116,7 +116,7 @@ bool halmos_fcgi_poller_mod(int fpm_fd, uint32_t events) {
     return true;
 }
 
-bool halmos_fcgi_poller_del(int fpm_fd) {
+bool fcgi_event_loop_del(int fpm_fd) {
     //fprintf(stderr, "[FCGI_POLLER_DEBUG] Deleting fpm_fd=%d from epoll\n", fpm_fd);
     
     if (epoll_ctl(upstream_poller.epoll_fd, EPOLL_CTL_DEL, fpm_fd, NULL) < 0) {
@@ -133,7 +133,7 @@ bool halmos_fcgi_poller_del(int fpm_fd) {
     return true;
 }
 
-void* halmos_fcgi_poller_routine(void *arg) {
+void* fcgi_event_loop_run(void *arg) {
     (void)arg;
 
     //fprintf(stderr, "[FCGI_POLLER_ROUTINE] Poller worker thread running loop (adaptive batch size: %d)...\n", g_event_batch_size);
@@ -148,7 +148,7 @@ void* halmos_fcgi_poller_routine(void *arg) {
         }
 
         for (int i = 0; i < n; i++) {
-            HalmosFCGISession *session = (HalmosFCGISession*)g_epoll_events[i].data.ptr;
+            FCGI_Session *session = (FCGI_Session*)g_epoll_events[i].data.ptr;
             if (!session) continue;
 
             uint32_t revents = g_epoll_events[i].events;
@@ -159,20 +159,20 @@ void* halmos_fcgi_poller_routine(void *arg) {
                 //fprintf(stderr, "[FCGI_POLLER_ROUTINE] -> PHP-FPM ready to read. Pushing FCGI_TASK_PROCESS_READ.\n");
                 
                 if (session->fpm_fd != -1) {
-                    halmos_fcgi_poller_del(session->fpm_fd);
+                    fcgi_event_loop_del(session->fpm_fd);
                 }
 
-                halmos_fcgi_queue_push(session, FCGI_TASK_PROCESS_READ);
+                fcgi_queue_push(session, FCGI_TASK_PROCESS_READ);
             } 
             // 2. Tangani HUP/ERR hanya jika tidak ada data tersisa atau terjadi error murni
             else if (revents & (EPOLLERR | EPOLLHUP)) {
                 //fprintf(stderr, "[FCGI_POLLER_ROUTINE] -> PHP-FPM error/HUP detected. Removing fd and pushing DISCONNECT.\n");
                 
                 if (session->fpm_fd != -1) {
-                    halmos_fcgi_poller_del(session->fpm_fd);
+                    fcgi_event_loop_del(session->fpm_fd);
                 }
                 
-                halmos_fcgi_queue_push(session, FCGI_TASK_DISCONNECT);
+                fcgi_queue_push(session, FCGI_TASK_DISCONNECT);
             }
         }
     }

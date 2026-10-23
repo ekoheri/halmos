@@ -7,13 +7,13 @@
 #include <unistd.h>
 #include <sys/sysinfo.h>
 
-FCGITaskQueue global_fcgi_queue;
+FCGI_TaskQueue global_fcgi_queue;
 
-extern void* halmos_fcgi_worker_routine(void *arg);
-extern int halmos_fcgi_spawn_detached_worker(pthread_t *out_tid, void *(*routine)(void *), void *arg);
+extern void* fcgi_thread_pool_worker(void *arg);
+extern int fcgi_thread_pool_spawn_detached(pthread_t *out_tid, void *(*routine)(void *), void *arg);
 
 // Timeout adaptif yang lebih aman (tidak terlalu ekstrem turun ke 0)
-static int halmos_fcgi_get_adaptive_timeout(FCGITaskQueue *q) {
+static int halmos_fcgi_get_adaptive_timeout(FCGI_TaskQueue *q) {
     // Karena fungsi ini dipanggil saat q->head == NULL (antrean kosong), 
     // kita bisa memberikan timeout idle standar yang sehat (misal 30 detik) 
     // atau mendasarkannya pada total_workers vs min_threads.
@@ -23,8 +23,8 @@ static int halmos_fcgi_get_adaptive_timeout(FCGITaskQueue *q) {
     return 60;     // Worker minimal bertahan lebih lama
 }
 
-bool halmos_fcgi_queue_init(void) {
-    FCGITaskQueue *q = &global_fcgi_queue;
+bool fcgi_queue_start(void) {
+    FCGI_TaskQueue *q = &global_fcgi_queue;
     q->head = q->tail = NULL;
     q->size = 0;
     q->max_queue_limit = g_fcgi_queue_capacity;
@@ -42,8 +42,8 @@ bool halmos_fcgi_queue_init(void) {
     return true;
 }
 
-void halmos_fcgi_queue_destroy(void) {
-    FCGITaskQueue *q = &global_fcgi_queue;
+void fcgi_queue_stop(void) {
+    FCGI_TaskQueue *q = &global_fcgi_queue;
     pthread_mutex_lock(&q->lock);
     q->is_running = 0;
     pthread_cond_broadcast(&q->not_empty);
@@ -54,17 +54,17 @@ void halmos_fcgi_queue_destroy(void) {
     pthread_mutex_unlock(&q->lock);
 
     pthread_mutex_lock(&q->lock);
-    FCGITask *curr = q->head;
+    FCGI_Task *curr = q->head;
     q->head = q->tail = NULL;
     q->size = 0;
     pthread_mutex_unlock(&q->lock);
 
     while (curr) {
-        FCGITask *tmp = curr;
+        FCGI_Task *tmp = curr;
         curr = curr->next;
         
         if (tmp->session) {
-            halmos_fcgi_session_destroy(tmp->session);
+            fcgi_session_destroy(tmp->session);
             tmp->session = NULL;
         }
         
@@ -76,8 +76,8 @@ void halmos_fcgi_queue_destroy(void) {
     pthread_cond_destroy(&q->exit_cond);
 }
 
-bool halmos_fcgi_queue_push(HalmosFCGISession *session, FCGI_TaskType type) {
-    FCGITaskQueue *q = &global_fcgi_queue;
+bool fcgi_queue_push(FCGI_Session *session, FCGI_TaskType type) {
+    FCGI_TaskQueue *q = &global_fcgi_queue;
     pthread_mutex_lock(&q->lock);
 
     if (!q->is_running || q->size >= q->max_queue_limit) {
@@ -85,7 +85,7 @@ bool halmos_fcgi_queue_push(HalmosFCGISession *session, FCGI_TaskType type) {
         return false;
     }
 
-    FCGITask *new_task = malloc(sizeof(FCGITask));
+    FCGI_Task *new_task = malloc(sizeof(FCGI_Task));
     if (!new_task) {
         pthread_mutex_unlock(&q->lock);
         return false;
@@ -125,7 +125,7 @@ bool halmos_fcgi_queue_push(HalmosFCGISession *session, FCGI_TaskType type) {
     // Spawn di luar lock mutex queue
     if (should_spawn) {
         pthread_t tid;
-        if (halmos_fcgi_spawn_detached_worker(&tid, halmos_fcgi_worker_routine, q) != 0) {
+        if (fcgi_thread_pool_spawn_detached(&tid, fcgi_thread_pool_worker, q) != 0) {
             pthread_mutex_lock(&q->lock);
             q->total_workers--; // Kembalikan jika gagal
             pthread_mutex_unlock(&q->lock);
@@ -139,8 +139,8 @@ bool halmos_fcgi_queue_push(HalmosFCGISession *session, FCGI_TaskType type) {
     return true;
 }
 
-FCGITask* halmos_fcgi_queue_pop(struct timeval *arrival) {
-    FCGITaskQueue *q = &global_fcgi_queue;
+FCGI_Task* fcgi_queue_pop(struct timeval *arrival) {
+    FCGI_TaskQueue *q = &global_fcgi_queue;
     pthread_mutex_lock(&q->lock);
 
     struct timespec ts;
@@ -189,7 +189,7 @@ FCGITask* halmos_fcgi_queue_pop(struct timeval *arrival) {
         return NULL;
     }
 
-    FCGITask *tmp = q->head;
+    FCGI_Task *tmp = q->head;
     if (arrival) *arrival = tmp->arrival_time;
 
     q->head = q->head->next;
@@ -200,8 +200,8 @@ FCGITask* halmos_fcgi_queue_pop(struct timeval *arrival) {
     return tmp;
 }
 
-void halmos_fcgi_queue_broadcast(void) {
-    FCGITaskQueue *q = &global_fcgi_queue;
+void fcgi_queue_broadcast(void) {
+    FCGI_TaskQueue *q = &global_fcgi_queue;
     pthread_mutex_lock(&q->lock);
     pthread_cond_broadcast(&q->not_empty);
     pthread_mutex_unlock(&q->lock);

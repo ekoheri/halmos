@@ -14,17 +14,17 @@ typedef enum {
 } FCGI_TaskType;
 
 // --- 2. STRUKTUR SIMPUL TASK ---
-typedef struct FCGITask {
+typedef struct FCGI_Task {
     FCGI_TaskType type;         // Jenis tugas yang harus dikerjakan worker
-    HalmosFCGISession *session; // Pointer ke sesi FSM terkait
+    FCGI_Session *session; // Pointer ke sesi FSM terkait
     struct timeval arrival_time;// Waktu tugas masuk antrean (untuk metrik/wait time)
-    struct FCGITask *next;      // Pointer ke task berikutnya dalam linked list
-} FCGITask;
+    struct FCGI_Task *next;      // Pointer ke task berikutnya dalam linked list
+} FCGI_Task;
 
 // --- 3. STRUKTUR TASK QUEUE (ADAPTIVE & THREAD-SAFE) ---
 typedef struct {
-    FCGITask *head;             // Elemen pertama dalam antrean
-    FCGITask *tail;             // Elemen terakhir dalam antrean
+    FCGI_Task *head;             // Elemen pertama dalam antrean
+    FCGI_Task *tail;             // Elemen terakhir dalam antrean
     int size;                   // Jumlah total task yang sedang mengantre (menggantikan count)
     int max_queue_limit;        // Batas kapasitas maksimal antrean
     
@@ -39,37 +39,37 @@ typedef struct {
     pthread_mutex_t lock;       // Mutex pengaman akses konkuren
     pthread_cond_t not_empty;   // Condition variable untuk worker tidur/bangun
     pthread_cond_t exit_cond;   // Condition variable untuk sinkronisasi shutdown
-} FCGITaskQueue;
+} FCGI_TaskQueue;
 
 // Deklarasi variabel global queue (jika diperlukan secara global seperti di core)
-extern FCGITaskQueue global_fcgi_queue;
+extern FCGI_TaskQueue global_fcgi_queue;
 
 // --- 4. PROTOTIPE FUNGSI INTERFACE ---
 
 /**
  * Menginisialisasi global task queue dengan batas min/max worker dan kapasitas antrean.
  */
-bool halmos_fcgi_queue_init(void);
+bool fcgi_queue_start(void);
 
 /**
  * Menghancurkan antrean dan membersihkan seluruh memori task yang tersisa secara elegan.
  */
-void halmos_fcgi_queue_destroy(void);
+void fcgi_queue_stop(void);
 
 /**
  * Memasukkan task baru ke dalam antrean (Enqueue) secara thread-safe.
  * Dilengkapi dengan logika UPSCALING jika antrean melebihi ambang batas.
  */
-bool halmos_fcgi_queue_push(HalmosFCGISession *session, FCGI_TaskType type);
+bool fcgi_queue_push(FCGI_Session *session, FCGI_TaskType type);
 
 /**
  * Mengambil task dari antrean (Dequeue) secara thread-safe dengan timeout adaptif.
  * Dilengkapi dengan logika DOWNSCALING (terminasi mandiri detached worker jika idle).
  * 
- * @return Pointer ke FCGITask yang harus dieksekusi, atau NULL jika worker harus keluar.
+ * @return Pointer ke FCGI_Task yang harus dieksekusi, atau NULL jika worker harus keluar.
  */
-FCGITask* halmos_fcgi_queue_pop(struct timeval *arrival);
+FCGI_Task* fcgi_queue_pop(struct timeval *arrival);
 
-void halmos_fcgi_queue_broadcast(void);
+void fcgi_queue_broadcast(void);
 
 #endif // HALMOS_FCGI_QUEUE_H

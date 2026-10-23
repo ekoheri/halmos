@@ -58,9 +58,9 @@
 #include "halmos_sec_traffic.h"
 #include "halmos_sec_tls.h"
 #include "halmos_fcgi_upstream.h"
-#include "halmos_fcgi_poller.h"
+#include "halmos_fcgi_event_loop.h"
 #include "halmos_fcgi_queue.h"
-#include "halmos_fcgi_worker.h"
+#include "halmos_fcgi_thread_pool.h"
 #include "halmos_http_route.h"
 #include "halmos_http_vhost.h"
 #include "halmos_ws_system.h"
@@ -252,18 +252,18 @@ int main(int argc, char *argv[]) {
     halmos_fcgi_upstream_init();
 
     // 1. Inisialisasi antrean terlebih dahulu
-    if (!halmos_fcgi_queue_init()) {
+    if (!fcgi_queue_start()) {
         fprintf(stderr, "Failed to initialize FCGI task queue!\n");
         exit(EXIT_FAILURE);
     }
 
-    if (!halmos_fcgi_poller_init()) {
+    if (!fcgi_event_loop_start()) {
         fprintf(stderr, "[FATAL] Failed to initialize FastCGI Async Poller!\n> exit(1);\n");
         return 1;
     }
 
     // 2. INTI PERBAIKAN: Inisialisasi Worker Pool FastCGI (misal 4 thread worker)
-    if (!halmos_fcgi_worker_pool_init()) {
+    if (!fcgi_thread_pool_start()) {
         fprintf(stderr, "[FATAL] Failed to initialize FCGI worker pool!\n");
         return 1;
     }
@@ -299,15 +299,15 @@ int main(int argc, char *argv[]) {
     
     write_log("[CORE] Shutdown signal caught. Cleaning up resources...");
     
-    halmos_fcgi_queue_destroy();
+    fcgi_queue_stop();
     write_log("[CORE] FastCGI Queue cleaned up.");
 
     // 1. Hentikan FastCGI Worker Pool TERLEBIH DAHULU (Bangunkan thread yang menunggu di queue)
-    halmos_fcgi_poller_cleanup();
-    write_log("[CORE] FastCGI Poller cleaned up.");
+    fcgi_event_loop_stop();
+    write_log("[CORE] FastCGI Event Loop cleaned up.");
 
     // 2. Hentikan worker yang memproses task, pastikan thread-nya sudah join/mati total
-    halmos_fcgi_worker_pool_stop();
+    fcgi_thread_pool_stop();
     write_log("[CORE] FastCGI Worker Pool stopped.");
 
     halmos_fcgi_upstream_destroy();

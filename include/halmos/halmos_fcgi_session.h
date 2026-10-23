@@ -45,11 +45,11 @@ typedef struct {
     time_t last_activity;
 
     pthread_mutex_t lock;       // Mutex pengaman thread-safe lokal sesi
-} HalmosFCGISession;
+} FCGI_Session;
 
 // Prototip fungsi manajemen sesi
-HalmosFCGISession* halmos_fcgi_session_create(int sock_client, bool is_tls, SSL *ssl_conn, RequestHeader *req, int backend_type);
-void halmos_fcgi_session_destroy(HalmosFCGISession *session);
-void halmos_fcgi_session_set_state(HalmosFCGISession *session, FCGI_AsyncState new_state);
+FCGI_Session* fcgi_session_create(int sock_client, bool is_tls, SSL *ssl_conn, RequestHeader *req, int backend_type);
+void fcgi_session_destroy(FCGI_Session *session);
+void fcgi_session_set_state(FCGI_Session *session, FCGI_AsyncState new_state);
 
 #endif // HALMOS_FCGI_SESSION_H

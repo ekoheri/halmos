@@ -1,9 +1,9 @@
-#include "halmos_fcgi_worker.h"
+#include "halmos_fcgi_thread_pool.h"
 #include "halmos_fcgi_fsm.h"
 #include "halmos_global.h"
 #include "halmos_core_conn_table.h"
 #include "halmos_fcgi_queue.h"
-#include "halmos_fcgi_poller.h"
+#include "halmos_fcgi_event_loop.h"
 #include "halmos_log.h"
 
 #include <stdlib.h>
@@ -14,13 +14,14 @@
 #include <sys/socket.h>
 #include <sys/epoll.h>
 
-static FCGIWorkerPool fcgi_worker_pool;
+static FCGI_WorkerPool fcgi_worker_pool;
 
-bool halmos_fcgi_is_running(void) {
+bool fcgi_thread_pool_is_running(void) {
     return fcgi_worker_pool.running;
 }
 
-int halmos_fcgi_spawn_detached_worker(pthread_t *out_tid, void *(*routine)(void *), void *arg) {
+
+int fcgi_thread_pool_spawn_detached(pthread_t *out_tid, void *(*routine)(void *), void *arg) {
     pthread_attr_t attr;
     pthread_attr_init(&attr);
     pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
@@ -29,7 +30,7 @@ int halmos_fcgi_spawn_detached_worker(pthread_t *out_tid, void *(*routine)(void 
     return ret;
 }
 
-bool halmos_fcgi_worker_pool_init(void) {
+bool fcgi_thread_pool_start(void) {
     // Menggunakan baseline worker minimum dari pilar CPU
     int min_workers = g_worker_min;
     if (min_workers < 2) min_workers = 2;
@@ -44,9 +45,9 @@ bool halmos_fcgi_worker_pool_init(void) {
 
     for (int i = 0; i < min_workers; i++) {
         pthread_t tid;
-        if (halmos_fcgi_spawn_detached_worker(&tid, halmos_fcgi_worker_routine, &global_fcgi_queue) != 0) {
+        if (fcgi_thread_pool_spawn_detached(&tid, fcgi_thread_pool_worker, &global_fcgi_queue) != 0) {
             fcgi_worker_pool.running = false;
-            halmos_fcgi_queue_destroy();
+            fcgi_queue_stop();
             return false;
         }
     }
@@ -54,38 +55,38 @@ bool halmos_fcgi_worker_pool_init(void) {
     return true;
 }
 
-void halmos_fcgi_worker_pool_stop(void) {
+void fcgi_thread_pool_stop(void) {
     fcgi_worker_pool.running = false;
 }
 
-void* halmos_fcgi_worker_routine(void *arg) {
-    //FCGITaskQueue *q = (FCGITaskQueue *)arg;
+void* fcgi_thread_pool_worker(void *arg) {
+    //FCGI_TaskQueue *q = (FCGI_TaskQueue *)arg;
     (void)arg;
     while (fcgi_worker_pool.running) {
         struct timeval arrival;
-        FCGITask *task = halmos_fcgi_queue_pop(&arrival);
+        FCGI_Task *task = fcgi_queue_pop(&arrival);
         
         if (!task) {
             break; // Keluar thread jika downscale / shutdown
         }
 
-        HalmosFCGISession *session = task->session;
+        FCGI_Session *session = task->session;
         if (session) {
             if (task->type == FCGI_TASK_PROCESS_READ) {
-                bool active = halmos_fcgi_fsm_step(session);
+                bool active = fcgi_fsm_step(session);
                 if (!active) {
                     // Berikan jeda atau pastikan lock sesi aman sebelum destroy
                     pthread_mutex_lock(&session->lock);
-                    halmos_fcgi_poller_del(session->fpm_fd);
+                    fcgi_event_loop_del(session->fpm_fd);
                     pthread_mutex_unlock(&session->lock);
                     
                     // Jangan langsung destroy jika h2 stream masih butuh flush, 
                     // atau pastikan cleanup dipanggil lewat jalur yang aman.
-                    halmos_fcgi_session_destroy(session);
+                    fcgi_session_destroy(session);
                 }
             } else if (task->type == FCGI_TASK_DISCONNECT) {
-                halmos_fcgi_poller_del(session->fpm_fd);
-                halmos_fcgi_session_destroy(session);
+                fcgi_event_loop_del(session->fpm_fd);
+                fcgi_session_destroy(session);
             }
         }
 

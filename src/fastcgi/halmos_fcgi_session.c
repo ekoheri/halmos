@@ -13,13 +13,13 @@
 /**
  * Membuat dan menginisialisasi sesi FastCGI baru untuk sebuah request klien.
  */
-HalmosFCGISession* halmos_fcgi_session_create(int sock_client, bool is_tls, SSL *ssl_conn, RequestHeader *req, int backend_type) {
-    HalmosFCGISession *session = (HalmosFCGISession*)malloc(sizeof(HalmosFCGISession));
+FCGI_Session* fcgi_session_create(int sock_client, bool is_tls, SSL *ssl_conn, RequestHeader *req, int backend_type) {
+    FCGI_Session *session = (FCGI_Session*)malloc(sizeof(FCGI_Session));
     if (!session) {
         return NULL;
     }
 
-    memset(session, 0, sizeof(HalmosFCGISession));
+    memset(session, 0, sizeof(FCGI_Session));
 
     session->sock_client = sock_client;
     session->is_tls = is_tls;
@@ -73,7 +73,7 @@ HalmosFCGISession* halmos_fcgi_session_create(int sock_client, bool is_tls, SSL 
 /**
  * Membersihkan dan menghancurkan sesi FastCGI, serta menutup file descriptor terkait.
  */
-void halmos_fcgi_session_destroy(HalmosFCGISession *session) {
+void fcgi_session_destroy(FCGI_Session *session) {
     if (!session) return;
 
     pthread_mutex_lock(&session->lock);
@@ -98,7 +98,7 @@ void halmos_fcgi_session_destroy(HalmosFCGISession *session) {
 /**
  * Memperbarui status state FSM sesi dengan aman (thread-safe).
  */
-void halmos_fcgi_session_set_state(HalmosFCGISession *session, FCGI_AsyncState new_state) {
+void fcgi_session_set_state(FCGI_Session *session, FCGI_AsyncState new_state) {
     if (!session) return;
 
     pthread_mutex_lock(&session->lock);

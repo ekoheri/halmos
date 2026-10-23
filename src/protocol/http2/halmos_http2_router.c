@@ -8,7 +8,7 @@
 #include "halmos_http_utils.h"
 
 #include "halmos_fcgi_proto.h"
-#include "halmos_fcgi_poller.h"
+#include "halmos_fcgi_event_loop.h"
 #include "halmos_fcgi_session.h"
 #include "halmos_http_multipart.h"
 
@@ -85,7 +85,7 @@ void route_fastcgi_backend(HTTP2Session *session, HTTP2Stream *stream, RequestHe
     (void)backend_type;
 
     // 1. Buat Sesi FSM Async FastCGI baru (menyesuaikan parameter HTTP/2 Session)
-    HalmosFCGISession *fcgi_sess = halmos_fcgi_session_create(session->fd, session->is_tls, NULL, req, backend_type);
+    FCGI_Session *fcgi_sess = fcgi_session_create(session->fd, session->is_tls, NULL, req, backend_type);
     if (!fcgi_sess) {
         write_log_error_code(ERR_PROTO_H2_FCGI_ACQ, req->uri ? req->uri : "/");
         http2_response_send_header(session, stream, 502);
@@ -182,8 +182,8 @@ void route_fastcgi_backend(HTTP2Session *session, HTTP2Stream *stream, RequestHe
 
     // 6. Daftarkan fpm_sock ke Epoll Upstream Poller
     //fprintf(stderr, "[H2-MANAGER_DEBUG] About to call poller_add with fpm_sock=%d, fcgi_sess=%p\n", fpm_sock, (void*)fcgi_sess);
-    if (!halmos_fcgi_poller_add(fcgi_sess->fpm_fd, fcgi_sess, EPOLLIN)) {
-        //fprintf(stderr, "[H2-MANAGER_DEBUG] ERROR: halmos_fcgi_poller_add returned false for fd=%d\n", fpm_sock);
+    if (!fcgi_event_loop_add(fcgi_sess->fpm_fd, fcgi_sess, EPOLLIN)) {
+        //fprintf(stderr, "[H2-MANAGER_DEBUG] ERROR: fcgi_event_loop_add returned false for fd=%d\n", fpm_sock);
     }
 
     write_log_access("HTTP/2", req->client_ip, req->method, req->uri, 200, 0);

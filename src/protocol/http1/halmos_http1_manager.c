@@ -16,9 +16,9 @@
 #include "halmos_errors.h"
 #include "halmos_ws_system.h"
 
-#include "halmos_fcgi_poller.h"
+#include "halmos_fcgi_event_loop.h"
 #include "halmos_fcgi_proto.h"     // Untuk merakit payload awal (begin_request, params, stdin)
-#include "halmos_fcgi_session.h"   // Untuk membuat objek sesi FSM (HalmosFCGISession)
+#include "halmos_fcgi_session.h"   // Untuk membuat objek sesi FSM (FCGI_Session)
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -322,7 +322,7 @@ int http1_manager_routing_bridge(halmos_conn_t *conn, HTTP1Session *session) {
     else if (has_extension(session->req.uri, session->req.path_info, config.python.ext)) backend_type = 2;
 
     if (backend_type != -1) {
-        HalmosFCGISession *fcgi_sess = halmos_fcgi_session_create(sock_client, is_tls, conn->ssl, &session->req, backend_type);
+        FCGI_Session *fcgi_sess = fcgi_session_create(sock_client, is_tls, conn->ssl, &session->req, backend_type);
         if (!fcgi_sess) {
             write_log_error_code(ERR_PROTO_H1_FSM);
             http1_response_send_mem(sock_client, 502, "Bad Gateway", "502 Bad Gateway", false, is_tls);
@@ -370,7 +370,7 @@ int http1_manager_routing_bridge(halmos_conn_t *conn, HTTP1Session *session) {
         session->fcgi_sess = fcgi_sess; 
         //fprintf(stderr, "[MANAGER_DEBUG] About to call poller_add with fpm_sock=%d, fcgi_sess=%p\n", fpm_sock, (void*)fcgi_sess);
         
-        if (!halmos_fcgi_poller_add(fcgi_sess->fpm_fd, fcgi_sess, EPOLLIN)) {
+        if (!fcgi_event_loop_add(fcgi_sess->fpm_fd, fcgi_sess, EPOLLIN)) {
             //fprintf(stderr, "[MANAGER_DEBUG] ERROR: halmos_fcgi_poller_add returned false for fd=%d\n", fpm_sock);
         }
 

@@ -3,7 +3,7 @@
 #include "halmos_core_conn_table.h"
 #include "halmos_http2_core.h"
 #include "halmos_fcgi_queue.h"
-#include "halmos_fcgi_poller.h"
+#include "halmos_fcgi_event_loop.h"
 #include "halmos_fcgi_proto.h"
 #include "halmos_log.h"
 #include "halmos_http_utils.h"
@@ -54,7 +54,7 @@ static ssize_t worker_smart_send(int fd, const void *buf, size_t len, bool is_tl
 // ==========================================
 // 1. FSM STEP KHUSUS HTTP/1.1 (Logika Asli Langsung Kirim ke Klien)
 // ==========================================
-static bool halmos_fcgi_fsm_step_http1(HalmosFCGISession *session) {
+static bool fcgi_fsm_step_http1(FCGI_Session *session) {
     if (!session || session->fpm_fd == -1) return false;
 
     pthread_mutex_lock(&session->lock);
@@ -70,7 +70,7 @@ static bool halmos_fcgi_fsm_step_http1(HalmosFCGISession *session) {
         pthread_mutex_unlock(&session->lock);
         // WAJIB RE-ARM KE EPOLL AGAR SISA BYTES BISA DIBACA BERIKUTNYA
         if (session->fpm_fd != -1) {
-            halmos_fcgi_poller_add(session->fpm_fd, session, EPOLLIN);
+            fcgi_event_loop_add(session->fpm_fd, session, EPOLLIN);
         }
         return true;
     }
@@ -147,7 +147,7 @@ static bool halmos_fcgi_fsm_step_http1(HalmosFCGISession *session) {
     pthread_mutex_unlock(&session->lock);
 
     if (session->fpm_fd != -1) {
-        halmos_fcgi_poller_add(session->fpm_fd, session, EPOLLIN);
+        fcgi_event_loop_add(session->fpm_fd, session, EPOLLIN);
     }
 
     return true; 
@@ -156,7 +156,7 @@ static bool halmos_fcgi_fsm_step_http1(HalmosFCGISession *session) {
 // ==========================================
 // 2. FSM STEP KHUSUS HTTP/2 (Kerangka / Placeholder Awal)
 // ==========================================
-static bool halmos_fcgi_fsm_step_http2(HalmosFCGISession *session) {
+static bool fcgi_fsm_step_http2(FCGI_Session *session) {
     if (!session || session->fpm_fd == -1) return false;
 
     pthread_mutex_lock(&session->lock);
@@ -172,7 +172,7 @@ static bool halmos_fcgi_fsm_step_http2(HalmosFCGISession *session) {
         pthread_mutex_unlock(&session->lock);
         // WAJIB RE-ARM KE EPOLL AGAR SISA BYTES BISA DIBACA BERIKUTNYA
         if (session->fpm_fd != -1) {
-            halmos_fcgi_poller_add(session->fpm_fd, session, EPOLLIN);
+            fcgi_event_loop_add(session->fpm_fd, session, EPOLLIN);
         }
         return true;
     }
@@ -291,7 +291,7 @@ static bool halmos_fcgi_fsm_step_http2(HalmosFCGISession *session) {
     pthread_mutex_unlock(&session->lock);
 
     if (session->fpm_fd != -1) {
-        halmos_fcgi_poller_add(session->fpm_fd, session, EPOLLIN);
+        fcgi_event_loop_add(session->fpm_fd, session, EPOLLIN);
     }
 
     return true;
@@ -300,12 +300,12 @@ static bool halmos_fcgi_fsm_step_http2(HalmosFCGISession *session) {
 // ==========================================
 // 3. ROUTER UTAMA FSM STEP (Pemanggil Dispatcher)
 // ==========================================
-bool halmos_fcgi_fsm_step(HalmosFCGISession *session) {
+bool fcgi_fsm_step(FCGI_Session *session) {
     if (!session) return false;
     
     if (session->is_http2) {
-        return halmos_fcgi_fsm_step_http2(session);
+        return fcgi_fsm_step_http2(session);
     } else {
-        return halmos_fcgi_fsm_step_http1(session);
+        return fcgi_fsm_step_http1(session);
     }
 }
