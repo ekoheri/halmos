@@ -19,59 +19,61 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 
-// Helper internal pengiriman data ke klien (mendukung TLS / Plaintext)
-static ssize_t worker_smart_send(int fd, const void *buf, size_t len, bool is_tls, SSL *ssl_conn) {
-    if (is_tls && ssl_conn) {
-        size_t total_sent = 0;
-        const char *ptr = (const char*)buf;
-        while (total_sent < len) {
-            ssize_t n = ssl_send(fd, ptr + total_sent, len - total_sent);
-            if (n > 0) {
-                total_sent += n;
-            } else {
-                return -1;
-            }
-        }
-        return total_sent;
-    } else {
-        size_t total_sent = 0;
-        const char *ptr = (const char*)buf;
-        while (total_sent < len) {
-            ssize_t n = send(fd, ptr + total_sent, len - total_sent, MSG_NOSIGNAL);
-            if (n > 0) {
-                total_sent += n;
-            } else if (n < 0) {
-                if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) continue;
-                return -1;
-            } else {
-                return -1;
-            }
-        }
-        return total_sent;
-    }
-}
+// ==========================================
+// 1. FSM STEP KHUSUS HTTP/1.1 (Mengikuti Pola Bersih HTTP/2)
+// ==========================================
+bool fcgi_fsm_step_http1(FCGI_Session *session) {
+    if (!session) return false;
 
-// ==========================================
-// 1. FSM STEP KHUSUS HTTP/1.1 (Logika Asli Langsung Kirim ke Klien)
-// ==========================================
-static bool fcgi_fsm_step_http1(FCGI_Session *session) {
-    if (!session || session->fpm_fd == -1) return false;
+    // --- GUARD MUTLAK ANTI-CRASH & BAD DESCRIPTOR ---
+    pthread_mutex_lock(&session->lock);
+    if (session->fpm_fd < 0 || session->fpm_fd == -99) {
+        pthread_mutex_unlock(&session->lock);
+        return false; 
+    }
+    pthread_mutex_unlock(&session->lock);
+
+    fprintf(stderr, "[DEBUG FSM H1] === START STEP == | session=%p, fpm_fd=%d\n", (void*)session, session ? session->fpm_fd : -99);
+    
+    if (!session || session->fpm_fd == -1 || session->fpm_fd == -99) {
+        fprintf(stderr, "[DEBUG FSM H1] ABORT: session is NULL, fpm_fd == -1, or session already destroyed (-99)\n");
+        return false;
+    }
 
     pthread_mutex_lock(&session->lock);
 
     unsigned char h_buf[8];
     ssize_t n_head = recv(session->fpm_fd, h_buf, 8, 0);
+    
+    fprintf(stderr, "[DEBUG FSM H1] recv header n_head=%zd, fpm_fd=%d\n", n_head, session->fpm_fd);
+
     if (n_head <= 0) {
+        if (n_head < 0) {
+            fprintf(stderr, "[DEBUG FSM H1] ERROR recv header: errno=%d (%s)\n", errno, strerror(errno));
+        } else {
+            fprintf(stderr, "[DEBUG FSM H1] FPM EOF detected (n_head == 0)\n");
+        }
+        
+        session->is_fcgi_active = false;
+        
+        // Hapus dari epoll dengan aman saat koneksi terputus/selesai
+        if (session->fpm_fd != -1 && session->fpm_fd != -99) {
+            fcgi_event_loop_del(session->fpm_fd);
+        }
+        
+        // Dorong task ke antrean agar worker utama memproses pengiriman data ke klien
+        fcgi_queue_push(session, FCGI_TASK_PROCESS_READ);
+
         pthread_mutex_unlock(&session->lock);
         return false; 
     }
     
     if (n_head < 8) {
+        fprintf(stderr, "[DEBUG FSM H1] WARNING: Incomplete header received (n_head < 8). Waiting for more data.\n");
         pthread_mutex_unlock(&session->lock);
-        // WAJIB RE-ARM KE EPOLL AGAR SISA BYTES BISA DIBACA BERIKUTNYA
-        if (session->fpm_fd != -1) {
-            fcgi_event_loop_add(session->fpm_fd, session, EPOLLIN);
-        }
+        
+        // CATATAN: Jangan panggil fcgi_event_loop_add di sini agar tidak terjadi race condition! 
+        // Biarkan poller upstream menangani event masuk berikutnya secara bersih.
         return true;
     }
 
@@ -79,56 +81,96 @@ static bool fcgi_fsm_step_http1(FCGI_Session *session) {
     int clen = (h->contentLengthB1 << 8) | h->contentLengthB0;
     int plen = h->paddingLength;
 
+    fprintf(stderr, "[DEBUG FSM H1] FastCGI Header parsed -> type=%d, content_length=%d, padding_length=%d\n", h->type, clen, plen);
+
     if (h->type == FCGI_STDOUT) {
         if (clen > 0) {
-            char *payload = malloc(clen);
+            char *payload = malloc(clen + 1);
             if (payload) {
                 int read_bytes = 0;
                 while (read_bytes < clen) {
                     ssize_t nr = recv(session->fpm_fd, payload + read_bytes, clen - read_bytes, 0);
-                    if (nr <= 0) break;
+                    if (nr <= 0) {
+                        fprintf(stderr, "[DEBUG FSM H1] ERROR reading STDOUT payload chunk: nr=%zd, errno=%d\n", nr, errno);
+                        break;
+                    }
                     read_bytes += nr;
                 }
+                payload[read_bytes] = '\0';
+                fprintf(stderr, "[DEBUG FSM H1] Successfully read STDOUT payload bytes = %d\n", read_bytes);
 
-                if (!session->header_sent) {
-                    char *delim = strstr(payload, "\r\n\r\n");
-                    if (delim) {
-                        int h_only_len = (delim - payload) + 4;
-                        int body_len = clen - h_only_len;
+                // --- BUFFERING KE HTTP/1 SESSION ---
+                int payload_offset = 0;
 
-                        const char *default_resp = "HTTP/1.1 200 OK\r\nServer: Halmos\r\nTransfer-Encoding: chunked\r\nConnection: keep-alive\r\n\r\n";
-                        worker_smart_send(session->sock_client, default_resp, strlen(default_resp), session->is_tls, session->ssl_conn);
+                if (!session->fcgi_header_parsed) {
+                    size_t space_left = FCGI_HEADER_BUF_SIZE - session->fcgi_h_ptr - 1;
+                    size_t to_copy = (size_t)(read_bytes - payload_offset) < space_left ? (size_t)(read_bytes - payload_offset) : space_left;
 
-                        char chunk_header[32];
-                        int ch_len = snprintf(chunk_header, sizeof(chunk_header), "%X\r\n", h_only_len);
-                        worker_smart_send(session->sock_client, chunk_header, ch_len, session->is_tls, session->ssl_conn);
-                        worker_smart_send(session->sock_client, payload, h_only_len, session->is_tls, session->ssl_conn);
-                        worker_smart_send(session->sock_client, "\r\n", 2, session->is_tls, session->ssl_conn);
+                    if (to_copy > 0) {
+                        memcpy(session->fcgi_header_buf + session->fcgi_h_ptr, payload + payload_offset, to_copy);
+                        session->fcgi_h_ptr += to_copy;
+                        session->fcgi_header_buf[session->fcgi_h_ptr] = '\0';
+                        payload_offset += to_copy;
+                    }
 
-                        if (body_len > 0) {
-                            ch_len = snprintf(chunk_header, sizeof(chunk_header), "%X\r\n", body_len);
-                            worker_smart_send(session->sock_client, chunk_header, ch_len, session->is_tls, session->ssl_conn);
-                            worker_smart_send(session->sock_client, payload + h_only_len, body_len, session->is_tls, session->ssl_conn);
-                            worker_smart_send(session->sock_client, "\r\n", 2, session->is_tls, session->ssl_conn);
+                    char *sep = strstr((char *)session->fcgi_header_buf, "\r\n\r\n");
+                    if (!sep) {
+                        sep = strstr((char *)session->fcgi_header_buf, "\n\n");
+                    }
+
+                    if (sep) {
+                        session->fcgi_header_parsed = true;
+                        size_t header_len_actual = (size_t)(sep - (char *)session->fcgi_header_buf) + (sep[0] == '\r' ? 4 : 2);
+                        fprintf(stderr, "[DEBUG FSM H1] HTTP headers fully parsed from FPM! header_len_actual=%zu\n", header_len_actual);
+                        
+                        if (session->fcgi_h_ptr > header_len_actual) {
+                            size_t spill_len = session->fcgi_h_ptr - header_len_actual;
+                            size_t body_space_left = GATHER_BUF_SIZE - session->fcgi_g_ptr;
+                            
+                            if (spill_len <= body_space_left) {
+                                memcpy(session->fcgi_gather_buf + session->fcgi_g_ptr, session->fcgi_header_buf + header_len_actual, spill_len);
+                                session->fcgi_g_ptr += spill_len;
+                            }
+                            session->fcgi_h_ptr = header_len_actual;
+                            session->fcgi_header_buf[header_len_actual] = '\0';
                         }
 
-                        session->header_sent = true;
+                        if (payload_offset < read_bytes) {
+                            int body_chunk = read_bytes - payload_offset;
+                            size_t body_space_left = GATHER_BUF_SIZE - session->fcgi_g_ptr;
+
+                            if ((size_t)body_chunk <= body_space_left) {
+                                memcpy(session->fcgi_gather_buf + session->fcgi_g_ptr, payload + payload_offset, body_chunk);
+                                session->fcgi_g_ptr += body_chunk;
+                            }
+                        }
                     }
                 } else {
-                    char chunk_header[32];
-                    int ch_len = snprintf(chunk_header, sizeof(chunk_header), "%X\r\n", clen);
-                    worker_smart_send(session->sock_client, chunk_header, ch_len, session->is_tls, session->ssl_conn);
-                    worker_smart_send(session->sock_client, payload, clen, session->is_tls, session->ssl_conn);
-                    worker_smart_send(session->sock_client, "\r\n", 2, session->is_tls, session->ssl_conn);
+                    int body_chunk = read_bytes - payload_offset;
+                    size_t space_left = GATHER_BUF_SIZE - session->fcgi_g_ptr;
+
+                    if (body_chunk > 0 && (size_t)body_chunk <= space_left) {
+                        memcpy(session->fcgi_gather_buf + session->fcgi_g_ptr, payload + payload_offset, body_chunk);
+                        session->fcgi_g_ptr += body_chunk;
+                    }
                 }
 
                 free(payload);
             }
         }
     } else if (h->type == FCGI_END_REQUEST) {
-        if (session->header_sent) {
-            worker_smart_send(session->sock_client, "0\r\n\r\n", 5, session->is_tls, session->ssl_conn);
+        fprintf(stderr, "[DEBUG FSM H1] FCGI_END_REQUEST reached | session=%p, pushing TASK_PROCESS_READ\n", (void*)session);
+        if (!session->fcgi_header_parsed && session->fcgi_h_ptr > 0) {
+            session->fcgi_header_parsed = true;
         }
+        session->is_fcgi_active = false;
+        
+        if (session->fpm_fd != -1 && session->fpm_fd != -99) {
+            fcgi_event_loop_del(session->fpm_fd);
+        }
+
+        fcgi_queue_push(session, FCGI_TASK_PROCESS_READ);
+
         pthread_mutex_unlock(&session->lock);
         return false; 
     }
@@ -142,22 +184,35 @@ static bool fcgi_fsm_step_http1(FCGI_Session *session) {
             if (nr <= 0) break;
             pad_read += nr;
         }
+        fprintf(stderr, "[DEBUG FSM H1] Ignored padding bytes: %d\n", pad_read);
     }
 
     pthread_mutex_unlock(&session->lock);
 
-    if (session->fpm_fd != -1) {
+    // === PERBAIKAN: RE-ARM EPOLL AGAR CHUNK BERIKUTNYA / END_REQUEST TERDETEKSI ===
+    if (session->fpm_fd != -1 && session->fpm_fd != -99) {
         fcgi_event_loop_add(session->fpm_fd, session, EPOLLIN);
+        fprintf(stderr, "[DEBUG FSM H1] Re-armed fpm_fd=%d to epoll for next chunks.\n", session->fpm_fd);
     }
+
+    fprintf(stderr, "[DEBUG FSM H1] === END STEP SUCCESS (waiting next event from poller) ===\n");
 
     return true; 
 }
-
 // ==========================================
 // 2. FSM STEP KHUSUS HTTP/2 (Kerangka / Placeholder Awal)
 // ==========================================
-static bool fcgi_fsm_step_http2(FCGI_Session *session) {
-    if (!session || session->fpm_fd == -1) return false;
+bool fcgi_fsm_step_http2(FCGI_Session *session) {
+    
+    if (!session) return false;
+
+    // --- GUARD MUTLAK ANTI-CRASH & BAD DESCRIPTOR ---
+    pthread_mutex_lock(&session->lock);
+    if (session->fpm_fd < 0 || session->fpm_fd == -99) {
+        pthread_mutex_unlock(&session->lock);
+        return false; 
+    }
+    pthread_mutex_unlock(&session->lock);
 
     pthread_mutex_lock(&session->lock);
 
@@ -297,15 +352,3 @@ static bool fcgi_fsm_step_http2(FCGI_Session *session) {
     return true;
 }
 
-// ==========================================
-// 3. ROUTER UTAMA FSM STEP (Pemanggil Dispatcher)
-// ==========================================
-bool fcgi_fsm_step(FCGI_Session *session) {
-    if (!session) return false;
-    
-    if (session->is_http2) {
-        return fcgi_fsm_step_http2(session);
-    } else {
-        return fcgi_fsm_step_http1(session);
-    }
-}

@@ -94,19 +94,18 @@ bool fcgi_event_loop_mod(int fpm_fd, uint32_t events) {
     }
     return true;
 }
-
 bool fcgi_event_loop_del(int fpm_fd) {
-    //fprintf(stderr, "[FCGI_POLLER_DEBUG] Deleting fpm_fd=%d from epoll\n", fpm_fd);
+    if (fpm_fd < 0) return false;
     
-    if (epoll_ctl(upstream_poller.epoll_fd, EPOLL_CTL_DEL, fpm_fd, NULL) < 0) {
-        // Jika error karena memang sudah tidak ada di epoll (sudah dihapus sebelumnya), 
-        // jangan anggap sebagai error fatal. Cukup return true atau abaikan.
-        if (errno == ENOENT) {
-            //fprintf(stderr, "[FCGI_POLLER_DEBUG] Notice: fpm_fd=%d was already removed from epoll (ignored).\n", fpm_fd);
+    // Berikan struct kosong secara eksplisit untuk mencegah bug pointer dangling di kernel lama
+    struct epoll_event ev;
+    memset(&ev, 0, sizeof(ev));
+    
+    if (epoll_ctl(upstream_poller.epoll_fd, EPOLL_CTL_DEL, fpm_fd, &ev) < 0) {
+        if (errno == ENOENT || errno == EBADF) {
+            // ENOENT = sudah dihapus, EBADF = descriptor sudah ditutup/tidak valid
             return true; 
         }
-        
-        //fprintf(stderr, "[FCGI_POLLER_DEBUG] ERROR: epoll_ctl DEL failed for fd=%d: %s\n", fpm_fd, strerror(errno));
         return false;
     }
     return true;

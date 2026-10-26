@@ -260,10 +260,12 @@ void fcgi_upstream_release(int sockfd) {
             int error = 0;
             socklen_t len = sizeof(error);
             getsockopt(sockfd, SOL_SOCKET, SO_ERROR, &error, &len);
-            
-            char dummy;
-            bool healthy = (error == 0 && recv(sockfd, &dummy, 1, MSG_PEEK | MSG_DONTWAIT) != 0);
 
+            char dummy;
+            ssize_t n = recv(sockfd, &dummy, 1, MSG_PEEK | MSG_DONTWAIT);
+            // Socket sehat jika error == 0, DAN (ada data masuk ATAU error-nya adalah EAGAIN/EWOULDBLOCK karena memang belum ada data)
+            bool healthy = (error == 0 && (n > 0 || (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))));
+            
             if (healthy) {
                 fcgi_upstream.connections[i].in_use = false;
             } else {

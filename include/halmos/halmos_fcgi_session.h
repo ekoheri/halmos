@@ -2,6 +2,8 @@
 #define HALMOS_FCGI_SESSION_H
 
 #include "halmos_http1_header.h"
+#include "halmos_http2_core.h"
+
 #include <stdbool.h>
 #include <pthread.h>
 #include <time.h>
@@ -28,6 +30,15 @@ typedef struct {
     bool is_http2;              // true jika ini berasal dari request HTTP/2, false jika HTTP/1
     uint32_t http2_stream_id;   // ID Stream HTTP/2 yang bersangkutan
     // --------------------------------
+
+    // Field Buffer & State FSM untuk HTTP/1 (Menyamai pola bersih HTTP/2)
+    bool is_fcgi_active;
+    bool fcgi_header_parsed;
+    unsigned char fcgi_header_buf[FCGI_HEADER_BUF_SIZE];
+    size_t fcgi_h_ptr;
+    unsigned char fcgi_gather_buf[GATHER_BUF_SIZE];
+    size_t fcgi_g_ptr;
+    // ----------------------------------------------
 
     void *h2_session; // Menyimpan pointer HTTP2Session
     void *h2_stream;

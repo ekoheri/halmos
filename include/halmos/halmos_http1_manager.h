@@ -42,6 +42,11 @@ typedef struct {
 
     // Pointer ke struktur sesi FSM Async FastCGI yang baru
     FCGI_Session *fcgi_sess;
+
+    char *fcgi_write_buf;      // Buffer gabungan (status + header + body FPM)
+    size_t fcgi_write_len;     // Total panjang data
+    size_t fcgi_write_offset;  // Posisi byte yang sudah sukses terkirim
+    bool is_fcgi_headers_sent; // Penanda apakah header HTTP/1 sudah terkirim
 } HTTP1Session;
 
 void http1_session_destroy(void *session);

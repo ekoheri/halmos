@@ -1,5 +1,6 @@
 #include "halmos_fcgi_session.h"
 #include "halmos_fcgi_upstream.h"
+#include "halmos_fcgi_event_loop.h"
 #include "halmos_http1_header.h"
 
 #include "halmos_log.h"
@@ -74,24 +75,35 @@ FCGI_Session* fcgi_session_create(int sock_client, bool is_tls, SSL *ssl_conn, R
  * Membersihkan dan menghancurkan sesi FastCGI, serta menutup file descriptor terkait.
  */
 void fcgi_session_destroy(FCGI_Session *session) {
+    fprintf(stderr, "[DEBUG TRACE DESTROY] ENTER fcgi_session_destroy for session=%p\n", (void*)session);
     if (!session) return;
 
     pthread_mutex_lock(&session->lock);
 
-    // Tutup socket PHP-FPM jika masih terbuka
-    if (session->fpm_fd != -1) {
-        fcgi_upstream_release(session->fpm_fd);
-        session->fpm_fd = -1;
-        //close(session->fpm_fd);
-        //session->fpm_fd = -1;
+    // GUARD MUTLAK: Jika fpm_fd sudah ditandai -99 (double destroy prevention)
+    if (session->fpm_fd == -99) {
+        fprintf(stderr, "[DEBUG TRACE DESTROY] WARNING: session=%p already marked destroyed (-99)! Aborting double-free.\n", (void*)session);
+        pthread_mutex_unlock(&session->lock);
+        return;
     }
 
-    // Catatan: sock_client dan ssl_conn dikelola oleh manajer HTTP frontend,
-    // jadi jangan ditutup di sini kecuali lifecycle-nya memang dipindahkan ke FastCGI.
+    int target_fd = session->fpm_fd;
+    session->fpm_fd = -99; // Tandai langsung
 
     pthread_mutex_unlock(&session->lock);
-    pthread_mutex_destroy(&session->lock);
 
+    // --- 1. CABUT DARI EPOLL POLLER TERLEBIH DAHULU ---
+    if (target_fd >= 0) {
+        fcgi_event_loop_del(target_fd);
+    }
+
+    // --- 2. LEPASKAN KEMBALI KE UPSTREAM POOL ---
+    if (target_fd >= 0) {
+        fcgi_upstream_release(target_fd);
+    }
+
+    pthread_mutex_destroy(&session->lock);
+    fprintf(stderr, "[DEBUG TRACE DESTROY] FREED memory for session=%p\n", (void*)session);
     free(session);
 }
 
