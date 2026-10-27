@@ -35,6 +35,11 @@ int      g_event_batch_size    = 0;
 int      g_fcgi_upstream_slots = 0;
 int      g_fcgi_queue_capacity = 0;
 
+// --- DOMAIN BACKEND UPSTREAM QUOTA untuk (PHP+Rust+Python) ---
+int g_fcgi_php_quota = 0;
+int g_fcgi_rust_quota = 0;
+int g_fcgi_python_quota = 0;
+
 typedef struct {
     int max_children;
     int backlog;
@@ -213,6 +218,12 @@ void core_adaptive_init(int print_to_terminal) {
         rust_quota   = sisa_jatah;
         python_quota = 0;
     }
+
+    // --- DOMAIN BACKEND UPSTREAM QUOTA untuk (PHP+Rust+Python) ---
+    g_fcgi_php_quota = php_quota;
+    g_fcgi_rust_quota = rust_quota;
+    g_fcgi_python_quota = python_quota;
+    
 
     // --- DOMAIN BACKEND: Hitung total slot upstream & buffer antrean upstream ---
     int total_upstream_slots = php_quota + rust_quota + python_quota;

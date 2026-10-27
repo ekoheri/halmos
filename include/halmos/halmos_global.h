@@ -21,6 +21,11 @@ extern int g_event_batch_size;       // Ukuran batch epoll_wait
 extern int g_fcgi_upstream_slots;    // Total slot koneksi paralel ke FPM (PHP+Rust+Python)
 extern int g_fcgi_queue_capacity;    // Batas antrean khusus jika jatah backend penuh
 
+// --- DOMAIN BACKEND UPSTREAM QUOTA untuk (PHP+Rust+Python) ---
+extern int g_fcgi_php_quota;
+extern int g_fcgi_rust_quota;
+extern int g_fcgi_python_quota;
+
 // Deklarasikan variabel global untuk :
 // 1. menyimpan konfigurasi
 extern Config config;

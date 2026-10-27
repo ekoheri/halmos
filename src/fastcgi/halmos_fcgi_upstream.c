@@ -138,10 +138,14 @@ bool fcgi_upstream_start(void) {
     fcgi_upstream.python_group.node_count = config.python.node_count > 0 ? config.python.node_count : 1;
 
     // Set kuota default awal
-    fcgi_upstream.php_quota = 32;
-    fcgi_upstream.rust_quota = 32;
-    fcgi_upstream.python_quota = 32;
+    fcgi_upstream.php_quota    = g_fcgi_php_quota;
+    fcgi_upstream.rust_quota   = g_fcgi_rust_quota;
+    fcgi_upstream.python_quota = g_fcgi_python_quota;
     fcgi_upstream.current_idle_count = fcgi_upstream.slots;
+
+    // Debug verifikasi singkat
+    fprintf(stderr, "[UPSTREAM_INIT] Loaded quotas from adaptive_init -> PHP: %d, Rust: %d, Python: %d, Total Slots: %d\n",
+            fcgi_upstream.php_quota, fcgi_upstream.rust_quota, fcgi_upstream.python_quota, fcgi_upstream.slots);
 
     pthread_mutex_init(&fcgi_upstream.lock, NULL);
     for (int i = 0; i < fcgi_upstream.slots; i++) {
@@ -247,8 +251,11 @@ int fcgi_upstream_acquire(const char *target, int port) {
 
 void fcgi_upstream_release(int sockfd) {
     if (sockfd < 0) return;
+    fprintf(stderr, "[UPSTREAM_DEBUG] Entering fcgi_upstream_release for sockfd=%d\n", sockfd);
 
     pthread_mutex_lock(&fcgi_upstream.lock);
+    fprintf(stderr, "[UPSTREAM_DEBUG] Locked fcgi_upstream.lock for sockfd=%d\n", sockfd);
+
     for (int i = 0; i < fcgi_upstream.slots; i++) {
         if (fcgi_upstream.connections[i].sockfd == sockfd) {
             int idx = get_backend_index(
@@ -256,35 +263,23 @@ void fcgi_upstream_release(int sockfd) {
                 fcgi_upstream.connections[i].target_port
             );
 
-            // Validasi kesehatan socket sebelum dikembalikan ke slot
-            int error = 0;
-            socklen_t len = sizeof(error);
-            getsockopt(sockfd, SOL_SOCKET, SO_ERROR, &error, &len);
-
-            char dummy;
-            ssize_t n = recv(sockfd, &dummy, 1, MSG_PEEK | MSG_DONTWAIT);
-            // Socket sehat jika error == 0, DAN (ada data masuk ATAU error-nya adalah EAGAIN/EWOULDBLOCK karena memang belum ada data)
-            bool healthy = (error == 0 && (n > 0 || (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))));
-            
-            if (healthy) {
-                fcgi_upstream.connections[i].in_use = false;
-            } else {
-                write_log_warn_code(WARN_FCGI_BACKEND_DEAD, sockfd);
-                close(sockfd);
-                fcgi_upstream.connections[i].sockfd = -1;
-                fcgi_upstream.connections[i].in_use = false;
-            }
+            // Untuk sementara, kita sederhanakan dulu bagian health check 
+            // untuk memastikan apakah fungsi ini sukses sampai selesai atau nyangkut di recv/getsockopt
+            fcgi_upstream.connections[i].in_use = false;
 
             // Kurangi skor aktif atomic backend terkait
             atomic_fetch_sub(&fcgi_upstream.active_counts[idx], 1);
             fcgi_upstream.current_idle_count++;
             
             pthread_mutex_unlock(&fcgi_upstream.lock);
+            fprintf(stderr, "[UPSTREAM_DEBUG] Successfully released sockfd=%d back to pool\n", sockfd);
             return;
         }
     }
+    
     pthread_mutex_unlock(&fcgi_upstream.lock);
     close(sockfd);
+    fprintf(stderr, "[UPSTREAM_DEBUG] Socketfd=%d not found in pool, closed directly.\n", sockfd);
 }
 
 int fcgi_upstream_select_node(RequestHeader *req, int backend_type, const char **out_ip, int *out_port, bool *out_is_unix) {

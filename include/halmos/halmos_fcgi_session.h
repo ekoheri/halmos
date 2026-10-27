@@ -9,6 +9,8 @@
 #include <time.h>
 #include <openssl/ssl.h>
 
+#define MAX_ACTIVE_SESSIONS 4096
+
 // Definisi state FSM untuk Async FastCGI
 typedef enum {
     FCGI_STATE_INIT = 0,
@@ -25,6 +27,7 @@ typedef struct {
     int fpm_fd;                 // Socket upstream PHP-FPM
     bool is_tls;                // Apakah koneksi klien menggunakan TLS
     SSL *ssl_conn;              // Konteks SSL klien (jika TLS aktif untuk HTTP/1)
+    uint32_t client_generation;
     
     // --- TAMBAHAN DUKUNGAN HTTP/2 ---
     bool is_http2;              // true jika ini berasal dari request HTTP/2, false jika HTTP/1
@@ -58,9 +61,17 @@ typedef struct {
     pthread_mutex_t lock;       // Mutex pengaman thread-safe lokal sesi
 } FCGI_Session;
 
+typedef struct {
+    void *sessions[MAX_ACTIVE_SESSIONS];
+    pthread_mutex_t lock;
+} FcgiSessionRegistry;
+
 // Prototip fungsi manajemen sesi
 FCGI_Session* fcgi_session_create(int sock_client, bool is_tls, SSL *ssl_conn, RequestHeader *req, int backend_type);
 void fcgi_session_destroy(FCGI_Session *session);
 void fcgi_session_set_state(FCGI_Session *session, FCGI_AsyncState new_state);
 
+void fcgi_registry_add(void *session);
+void fcgi_registry_remove(void *session);
+bool fcgi_registry_is_valid(void *session); 
 #endif // HALMOS_FCGI_SESSION_H

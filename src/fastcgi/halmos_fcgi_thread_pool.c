@@ -1,8 +1,8 @@
 #include "halmos_fcgi_thread_pool.h"
 #include "halmos_fcgi_fsm.h"
 #include "halmos_global.h"
-//#include "halmos_core_conn_table.h"
 #include "halmos_core_event_loop.h"
+#include "halmos_core_conn_table.h"
 #include "halmos_fcgi_queue.h"
 #include "halmos_fcgi_event_loop.h"
 #include "halmos_log.h"
@@ -64,12 +64,59 @@ void* fcgi_thread_pool_worker(void *arg) {
 
         FCGI_Session *session = task->session;
         if (session) {
-            // === GUARD MUTLAK: CEGAH DOUBLE FREE & STALE SESSION ===
-            // Jika fpm_fd sudah ditandai -99 (sudah hancur/didestroy), abaikan task ini secara total!
+            // === GUARD : CEGAH ACCESS FREED MEMORY LEWAT REGISTRY ===
+            if (!fcgi_registry_is_valid(session)) {
+                // Sesi sudah lenyap / didestruksi oleh thread lain. Abaikan task!
+                free(task);
+                continue;
+            }
+
+            // === 1. AMBIL DAN VALIDASI KONEKSI DARI CONNECTION TABLE ===
+            int client_sock = session->sock_client;
+            uint32_t client_gen = session->client_generation;
+
+            halmos_conn_t *conn = core_conn_t_get(client_sock);
+            if (!conn || !core_conn_t_is_valid(client_sock, client_gen)) {
+                fprintf(stderr, "[FCGI_WORKER_DEBUG] Stale client connection detected on socket %d (Gen: %u). Dropping task type=%d\n", 
+                          client_sock, client_gen, task->type);
+                
+                // HANYA DESTROY JIKA HTTP/2. HTTP/1 DI-HANDLE OLEH HTTP1 MANAGER!
+                if (session->is_http2) {
+                    fcgi_session_destroy(session);
+                } else {
+                    pthread_mutex_lock(&session->lock);
+                    session->fpm_fd = -99;
+                    pthread_mutex_unlock(&session->lock);
+                }
+                
+                free(task);
+                continue;
+            }
+
+            // === 2. AKUISISI KUNCI KONEKSI (Mencegah Cleanup Bersamaan) ===
+            core_conn_t_lock(conn);
+
+            // Double-check setelah dikunci
+            if (!core_conn_t_is_valid(client_sock, client_gen)) {
+                core_conn_t_unlock(conn);
+
+                if (session->is_http2) {
+                    fcgi_session_destroy(session);
+                } else {
+                    pthread_mutex_lock(&session->lock);
+                    session->fpm_fd = -99;
+                    pthread_mutex_unlock(&session->lock);
+                }
+                free(task);
+                continue;
+            }
+
+            // === 3. GUARD MUTLAK: CEGAH DOUBLE FREE & STALE SESSION ===
             pthread_mutex_lock(&session->lock);
             if (session->fpm_fd == -99) {
                 fprintf(stderr, "[FCGI_WORKER_DEBUG] WARNING: Stale session detected (fpm_fd == -99). Dropping task type=%d\n", task->type);
                 pthread_mutex_unlock(&session->lock);
+                core_conn_t_unlock(conn);
                 free(task);
                 continue;
             }
@@ -98,15 +145,11 @@ void* fcgi_thread_pool_worker(void *arg) {
                     if (target_fd != -99 && target_fd != -1) {
                         fprintf(stderr, "[FCGI_WORKER_DEBUG] Removing fpm_fd=%d from upstream epoll poller\n", target_fd);
                         fcgi_event_loop_del(target_fd);
-                        //session->fpm_fd = -1;
                         if (!is_h2) {
                             session->fpm_fd = -1; // Hanya untuk HTTP/1 yang diserahkan ke HTTP/1 Manager
                         }
                     }
                     
-                    // Ambil socket client dari session/conn untuk membangunkan core event loop
-                    // (Pastikan struct FCGI_Session menyimpan sock_client, atau ambil dari relasi conn)
-                    int client_sock = session->sock_client; 
                     pthread_mutex_unlock(&session->lock);
                     
                     if (is_h2) {
@@ -116,7 +159,6 @@ void* fcgi_thread_pool_worker(void *arg) {
                         fprintf(stderr, "[FCGI_WORKER_DEBUG] HTTP/1 FastCGI session handed over to HTTP/1 manager for flushing (session=%p, client_sock=%d)\n", (void*)session, client_sock);
                         
                         // === KUNCI UTAMA: BANGUNKAN CORE EVENT LOOP CLIENT SOCKET ===
-                        // Paksa core event loop untuk mengeksekusi state STATE_FCGI_PROCESSING di worker utama / event loop
                         if (client_sock > 0) {
                             core_event_loop_rearm_epoll_ex(client_sock, EPOLLOUT | EPOLLIN);
                         }
@@ -138,6 +180,9 @@ void* fcgi_thread_pool_worker(void *arg) {
                     fcgi_session_destroy(session);
                 }
             }
+
+            // === 4. LEPASKAN KUNCI KONEKSI ===
+            core_conn_t_unlock(conn);
         }
 
         free(task);
