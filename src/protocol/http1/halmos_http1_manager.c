@@ -485,6 +485,7 @@ void http1_session_destroy(void *session) {
 
     // Bersihkan sesi FCGI jika masih aktif
     if (s->fcgi_sess) {
+        fcgi_session_destroy(s->fcgi_sess);
         s->fcgi_sess = NULL;
     }
 
