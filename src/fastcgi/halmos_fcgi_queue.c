@@ -75,7 +75,7 @@ void fcgi_queue_stop(void) {
         curr = curr->next;
         
         if (tmp->session) {
-            fcgi_session_destroy(tmp->session);
+           fcgi_session_release(tmp->session);
             tmp->session = NULL;
         }
         
@@ -104,6 +104,10 @@ bool fcgi_queue_push(FCGI_Session *session, FCGI_TaskType type) {
         return false;
     }
 
+    // --- TAMBAHAN UNTUK ATOMIC REFERENCE COUNTING ---
+    fcgi_session_acquire(session); // Naikkan ref_count karena session masuk ke antrean worker
+    // ------------------------------------------------
+    
     new_task->type = type;
     new_task->session = session;
     gettimeofday(&new_task->arrival_time, NULL);

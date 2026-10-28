@@ -61,9 +61,6 @@ bool fcgi_fsm_step_http1(FCGI_Session *session) {
             fcgi_event_loop_del(session->fpm_fd);
         }
         
-        // Dorong task ke antrean agar worker utama memproses pengiriman data ke klien
-        fcgi_queue_push(session, FCGI_TASK_PROCESS_READ);
-
         pthread_mutex_unlock(&session->lock);
         return false; 
     }
@@ -168,9 +165,6 @@ bool fcgi_fsm_step_http1(FCGI_Session *session) {
         if (session->fpm_fd != -1 && session->fpm_fd != -99) {
             fcgi_event_loop_del(session->fpm_fd);
         }
-
-        // HAPUS BARIS INI (Redundan karena worker pool sudah langsung menangani transisi lewat return false)
-        // fcgi_queue_push(session, FCGI_TASK_PROCESS_READ);
 
         pthread_mutex_unlock(&session->lock);
         return false; 

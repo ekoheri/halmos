@@ -62,19 +62,20 @@ void* fcgi_thread_pool_worker(void *arg) {
             break; 
         }
 
-        // Menggunakan struktur task asli bawaan repo (mengakses task->session langsung)
         FCGI_Session *session = task->session;
         FCGI_TaskType task_type = task->type;
         
         free(task); 
 
-        if (!session || !fcgi_registry_is_valid(session)) {
+        if (!session) {
             continue;
         }
 
         pthread_mutex_lock(&session->lock);
         if (session->fpm_fd == -99) {
             pthread_mutex_unlock(&session->lock);
+            // Lepaskan kepemilikan task worker dari session
+            fcgi_session_release(session);
             continue;
         }
 
@@ -84,28 +85,18 @@ void* fcgi_thread_pool_worker(void *arg) {
 
         halmos_conn_t *conn = core_conn_t_get(sock_c);
         if (!conn) {
-            if (is_h2) {
-                fcgi_session_destroy(session);
-            } else {
-                pthread_mutex_lock(&session->lock);
-                session->fpm_fd = -99;
-                pthread_mutex_unlock(&session->lock);
-            }
+            // Ganti session_destroy dengan session_release
+            fcgi_session_release(session);
             continue;
         }
 
         core_conn_t_lock(conn);
 
-        // --- TAMBAHAN PENGAMAN QA: Validasi ulang registry untuk mencegah UAF ---
-        if (!fcgi_registry_is_valid(session)) {
-            core_conn_t_unlock(conn);
-            continue;
-        }
-
         pthread_mutex_lock(&session->lock);
         if (session->fpm_fd == -99) {
             pthread_mutex_unlock(&session->lock);
             core_conn_t_unlock(conn);
+            fcgi_session_release(session);
             continue;
         }
         pthread_mutex_unlock(&session->lock);
@@ -125,15 +116,12 @@ void* fcgi_thread_pool_worker(void *arg) {
                 int target_fd = session->fpm_fd;
                 if (target_fd != -99 && target_fd != -1) {
                     fcgi_event_loop_del(target_fd);
-                    /* PERBAIKAN QA: Baris yang mengubah session->fpm_fd = -1 DIHAPUS 
-                     * agar fcgi_session_destroy nanti bisa merilis fpm_fd kembali ke upstream pool!
-                     */
                 }
 
                 pthread_mutex_unlock(&session->lock);
                 
                 if (is_h2) {
-                    fcgi_session_destroy(session);
+                    fcgi_session_release(session);
                 } else {
                     if (sock_c > 0) {
                         core_event_loop_rearm_epoll_ex(sock_c, EPOLLOUT | EPOLLIN);
@@ -150,11 +138,14 @@ void* fcgi_thread_pool_worker(void *arg) {
             pthread_mutex_unlock(&session->lock);
             
             if (is_h2) {
-                fcgi_session_destroy(session);
+                fcgi_session_release(session);
             }
         }
 
         core_conn_t_unlock(conn);
+
+        // --- PENTING: Lepaskan referensi yang dipegang oleh worker task ini ---
+        fcgi_session_release(session);
     }
 
     fprintf(stderr, "[FCGI_WORKER_DEBUG] Worker thread routine terminated (tid=%lu)\n", (unsigned long)pthread_self());

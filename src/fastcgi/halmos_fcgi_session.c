@@ -12,11 +12,10 @@
 #include <fcntl.h>
 #include <unistd.h>
 
-static FcgiSessionRegistry fcgi_registry = { .lock = PTHREAD_MUTEX_INITIALIZER };
-
 /**
  * Membuat dan menginisialisasi sesi FastCGI baru untuk sebuah request klien.
  */
+
 FCGI_Session* fcgi_session_create(int sock_client, bool is_tls, SSL *ssl_conn, RequestHeader *req, int backend_type) {
     fprintf(stderr, "[FCGI_SESSION_DEBUG] ENTER fcgi_session_create for client_sock=%d, backend_type=%d\n", sock_client, backend_type);
 
@@ -35,19 +34,14 @@ FCGI_Session* fcgi_session_create(int sock_client, bool is_tls, SSL *ssl_conn, R
         return NULL;
     }
 
-    // --- DAFTARKAN KE REGISTRY ---
-    fcgi_registry_add(session);
+    // --- ATOMIC REFERENCE COUNTING ---
+    // Set awal ref_count = 1 (dipegang oleh pembuat / HTTP1 Manager)
+    atomic_init(&session->ref_count, 1);
+
+    // CATATAN: fcgi_registry_add(session) DIHAPUS karena sudah digantikan ref_count!
 
     session->sock_client = sock_client;
     
-    // --- AMBIL GENERASI DARI CONNECTION TABLE ---
-    halmos_conn_t *conn = core_conn_t_get(sock_client);
-    if (conn) {
-        session->client_generation = conn->generation;
-    } else {
-        session->client_generation = 0; 
-    }
-
     session->is_tls = is_tls;
     session->ssl_conn = ssl_conn;
     session->state = FCGI_STATE_INIT;
@@ -89,55 +83,10 @@ FCGI_Session* fcgi_session_create(int sock_client, bool is_tls, SSL *ssl_conn, R
     }
     session->fpm_fd = fpm_sock;
 
-    fprintf(stderr, "[FCGI_SESSION_DEBUG] SUCCESS: Created FCGI session=%p with fpm_fd=%d\n", (void*)session, fpm_sock);
+    fprintf(stderr, "[FCGI_SESSION_DEBUG] SUCCESS: Created FCGI session=%p with fpm_fd=%d, ref_count=1\n", (void*)session, fpm_sock);
     return session;
 }
 
-/**
- * Membersihkan dan menghancurkan sesi FastCGI, serta menutup file descriptor terkait.
- */
-void fcgi_session_destroy(FCGI_Session *session) {
-    fprintf(stderr, "[DEBUG TRACE DESTROY] ENTER fcgi_session_destroy for session=%p\n", (void*)session);
-    if (!session) return;
-
-    pthread_mutex_lock(&session->lock);
-
-    // GUARD MUTLAK: Jika fpm_fd sudah ditandai -99 (double destroy prevention)
-    if (session->fpm_fd == -99) {
-        fprintf(stderr, "[DEBUG TRACE DESTROY] WARNING: session=%p already marked destroyed (-99)! Aborting double-free.\n", (void*)session);
-        pthread_mutex_unlock(&session->lock);
-        return;
-    }
-
-    int target_fd = session->fpm_fd;
-    session->fpm_fd = -99; // Tandai langsung di dalam lock
-
-    // Simpan data penting sebelum mutex dihancurkan
-    // (jika ada pointer lain yang perlu diamankan)
-
-    pthread_mutex_unlock(&session->lock);
-
-    // --- 1. CABUT DARI EPOLL POLLER ---
-    if (target_fd >= 0) {
-        fcgi_event_loop_del(target_fd);
-    }
-
-    // --- 2. LEPASKAN KEMBALI KE UPSTREAM POOL ---
-    if (target_fd >= 0) {
-        fcgi_upstream_release(target_fd);
-    }
-
-    // --- 3. PASTIKAN TIDAK ADA WORKER LAIN YANG MASIH MEMEGANG POINTER INI ---
-    // Berikan jeda atau pastikan task worker sudah benar-benar selesai menggunakan session ini
-    // sebelum memanggil pthread_mutex_destroy dan free(session).
-    
-    // --- CABUT DARI REGISTRY SEBELUM DI-FREE ---
-    fcgi_registry_remove(session);
-
-    pthread_mutex_destroy(&session->lock);
-    fprintf(stderr, "[DEBUG TRACE DESTROY] FREED memory for session=%p\n", (void*)session);
-    free(session);
-}
 /**
  * Memperbarui status state FSM sesi dengan aman (thread-safe).
  */
@@ -150,43 +99,35 @@ void fcgi_session_set_state(FCGI_Session *session, FCGI_AsyncState new_state) {
     pthread_mutex_unlock(&session->lock);
 }
 
-// Daftarkan sesi baru
-void fcgi_registry_add(void *session) {
-    if (!session) return;
-    pthread_mutex_lock(&fcgi_registry.lock);
-    for (int i = 0; i < MAX_ACTIVE_SESSIONS; i++) {
-        if (fcgi_registry.sessions[i] == NULL) {
-            fcgi_registry.sessions[i] = session;
-            break;
-        }
-    }
-    pthread_mutex_unlock(&fcgi_registry.lock);
+// Menambah referensi secara atomik
+FCGI_Session* fcgi_session_acquire(FCGI_Session *session) {
+    if (!session) return NULL;
+    atomic_fetch_add(&session->ref_count, 1);
+    return session;
 }
 
-// Hapus sesi dari registry saat akan di-free
-void fcgi_registry_remove(void *session) {
+// Mengurangi referensi secara atomik. Jika 0, memori dibebaskan secara aman.
+void fcgi_session_release(FCGI_Session *session) {
     if (!session) return;
-    pthread_mutex_lock(&fcgi_registry.lock);
-    for (int i = 0; i < MAX_ACTIVE_SESSIONS; i++) {
-        if (fcgi_registry.sessions[i] == session) {
-            fcgi_registry.sessions[i] = NULL;
-            break;
-        }
-    }
-    pthread_mutex_unlock(&fcgi_registry.lock);
-}
 
-// Cek apakah sesi benar-benar masih hidup dan terdaftar
-bool fcgi_registry_is_valid(void *session) {
-    if (!session) return false;
-    bool valid = false;
-    pthread_mutex_lock(&fcgi_registry.lock);
-    for (int i = 0; i < MAX_ACTIVE_SESSIONS; i++) {
-        if (fcgi_registry.sessions[i] == session) {
-            valid = true;
-            break;
+    // Jika ref_count turun dari 1 ke 0, tidak ada lagi yang memegang sesi ini.
+    if (atomic_fetch_sub(&session->ref_count, 1) == 1) {
+        fprintf(stderr, "[DEBUG TRACE RELEASE] Ref count zero, freeing session=%p\n", (void*)session);
+
+        // 1. Bersihkan fpm_fd dan kembalikan ke upstream pool
+        pthread_mutex_lock(&session->lock);
+        int target_fd = session->fpm_fd;
+        if (target_fd != -99 && target_fd != -1) {
+            fcgi_event_loop_del(target_fd);
+            fcgi_upstream_release(target_fd);
+            session->fpm_fd = -99;
         }
+        pthread_mutex_unlock(&session->lock);
+
+        // 2. Hancurkan mutex
+        pthread_mutex_destroy(&session->lock);
+
+        // 3. Bebaskan memori
+        free(session);
     }
-    pthread_mutex_unlock(&fcgi_registry.lock);
-    return valid;
 }

@@ -241,7 +241,7 @@ int http1_manager_session(halmos_conn_t *conn) {
                 session->fcgi_write_buf = malloc(session->fcgi_write_len);
                 if (!session->fcgi_write_buf) {
                     fprintf(stderr, "[HTTP1_FCGI_DEBUG] ERROR: Failed to allocate fcgi_write_buf!\n");
-                    fcgi_session_destroy(fs);
+                    fcgi_session_release(fs);
                     session->fcgi_sess = NULL;
                     return 0;
                 }
@@ -262,7 +262,7 @@ int http1_manager_session(halmos_conn_t *conn) {
                         session->fcgi_write_len, total_body_len);
 
                 // Tutup soket backend FPM & bersihkan fs
-                fcgi_session_destroy(fs);
+                fcgi_session_release(fs);
                 session->fcgi_sess = NULL;
             }
 
@@ -485,7 +485,7 @@ void http1_session_destroy(void *session) {
 
     // Bersihkan sesi FCGI jika masih aktif
     if (s->fcgi_sess) {
-        fcgi_session_destroy(s->fcgi_sess);
+        fcgi_session_release(s->fcgi_sess);
         s->fcgi_sess = NULL;
     }
 

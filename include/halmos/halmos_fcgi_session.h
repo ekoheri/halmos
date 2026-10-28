@@ -8,8 +8,7 @@
 #include <pthread.h>
 #include <time.h>
 #include <openssl/ssl.h>
-
-#define MAX_ACTIVE_SESSIONS 4096
+#include <stdatomic.h>
 
 // Definisi state FSM untuk Async FastCGI
 typedef enum {
@@ -27,21 +26,21 @@ typedef struct {
     int fpm_fd;                 // Socket upstream PHP-FPM
     bool is_tls;                // Apakah koneksi klien menggunakan TLS
     SSL *ssl_conn;              // Konteks SSL klien (jika TLS aktif untuk HTTP/1)
-    uint32_t client_generation;
+
+    // --- ATOMIC REFERENCE COUNTING ---
+    atomic_int ref_count;
     
-    // --- TAMBAHAN DUKUNGAN HTTP/2 ---
+    // --- DUKUNGAN HTTP/2 ---
     bool is_http2;              // true jika ini berasal dari request HTTP/2, false jika HTTP/1
     uint32_t http2_stream_id;   // ID Stream HTTP/2 yang bersangkutan
-    // --------------------------------
 
-    // Field Buffer & State FSM untuk HTTP/1 (Menyamai pola bersih HTTP/2)
+    // Field Buffer & State FSM untuk HTTP/1
     bool is_fcgi_active;
     bool fcgi_header_parsed;
     unsigned char fcgi_header_buf[FCGI_HEADER_BUF_SIZE];
     size_t fcgi_h_ptr;
     unsigned char fcgi_gather_buf[GATHER_BUF_SIZE];
     size_t fcgi_g_ptr;
-    // ----------------------------------------------
 
     void *h2_session; // Menyimpan pointer HTTP2Session
     void *h2_stream;
@@ -61,17 +60,10 @@ typedef struct {
     pthread_mutex_t lock;       // Mutex pengaman thread-safe lokal sesi
 } FCGI_Session;
 
-typedef struct {
-    void *sessions[MAX_ACTIVE_SESSIONS];
-    pthread_mutex_t lock;
-} FcgiSessionRegistry;
-
 // Prototip fungsi manajemen sesi
 FCGI_Session* fcgi_session_create(int sock_client, bool is_tls, SSL *ssl_conn, RequestHeader *req, int backend_type);
-void fcgi_session_destroy(FCGI_Session *session);
 void fcgi_session_set_state(FCGI_Session *session, FCGI_AsyncState new_state);
+FCGI_Session* fcgi_session_acquire(FCGI_Session *session);
+void fcgi_session_release(FCGI_Session *session);
 
-void fcgi_registry_add(void *session);
-void fcgi_registry_remove(void *session);
-bool fcgi_registry_is_valid(void *session); 
 #endif // HALMOS_FCGI_SESSION_H
