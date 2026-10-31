@@ -2,6 +2,7 @@
 #include "halmos_global.h"
 #include "halmos_core_conn_table.h"
 #include "halmos_http2_core.h"
+#include "halmos_http2_response.h"
 #include "halmos_fcgi_queue.h"
 #include "halmos_fcgi_event_loop.h"
 #include "halmos_fcgi_proto.h"
@@ -210,10 +211,29 @@ bool fcgi_fsm_step_http1(FCGI_Session *session) {
             char *payload = malloc(clen + 1);
             if (payload) {
                 int read_bytes = 0;
+                int retry_count = 0;
                 while (read_bytes < clen) {
                     ssize_t nr = recv(session->fpm_fd, payload + read_bytes, clen - read_bytes, 0);
-                    if (nr <= 0) break;
-                    read_bytes += nr;
+                    if (nr > 0) {
+                        read_bytes += nr;
+                        retry_count = 0; // Reset retry counter jika sukses membaca data
+                    } else if (nr == 0) {
+                        // EOF dari backend PHP-FPM
+                        break;
+                    } else {
+                        // nr < 0
+                        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                            retry_count++;
+                            if (retry_count > 50) { // Mencegah infinite busy-loop
+                                break;
+                            }
+                            usleep(1000); // Beri nafas 1ms agar kernel sempat menyiapkan data berikutnya
+                            continue;
+                        } else {
+                            // Error riil pada socket
+                            break;
+                        }
+                    }
                 }
                 payload[read_bytes] = '\0';
 
@@ -294,15 +314,38 @@ bool fcgi_fsm_step_http2(FCGI_Session *session) {
             char *payload = malloc(clen + 1);
             if (payload) {
                 int read_bytes = 0;
+                int retry_count = 0;
                 while (read_bytes < clen) {
                     ssize_t nr = recv(session->fpm_fd, payload + read_bytes, clen - read_bytes, 0);
-                    if (nr <= 0) break;
-                    read_bytes += nr;
+                    if (nr > 0) {
+                        read_bytes += nr;
+                        retry_count = 0; // Reset counter retry jika berhasil membaca data
+                    } else if (nr == 0) {
+                        // EOF dari backend
+                        break;
+                    } else {
+                        // nr < 0
+                        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                            // Data belum siap sepenuhnya di socket non-blocking, berikan sedikit nafas atau retry
+                            retry_count++;
+                            if (retry_count > 50) { // Mencegah infinite busy-loop
+                                break;
+                            }
+                            usleep(1000); // Tunggu 1ms sebelum coba recv lagi
+                            continue;
+                        } else {
+                            // Error riil pada socket
+                            break;
+                        }
+                    }
                 }
                 payload[read_bytes] = '\0';
 
                 if (stream) {                    
                     handle_payload_http2(stream, payload, read_bytes);
+                    if (session->h2_session) {
+                        http2_response_flush_active_streams(session->h2_session);
+                    }
                 }
                 free(payload);
             }
