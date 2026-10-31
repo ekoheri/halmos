@@ -20,54 +20,47 @@
 #include <netinet/tcp.h>
 
 static void handle_payload(bool *header_parsed, 
-                                     size_t *h_ptr, char *h_buf_target, 
-                                     size_t *g_ptr, unsigned char *g_buf_target, 
-                                     const char *payload, int read_bytes) {
+                           size_t *h_ptr, char *h_buf_target, 
+                           size_t *g_ptr, unsigned char *g_buf_target, 
+                           const char *payload, int read_bytes) {
     int payload_offset = 0;
 
+    // 1. Jika header belum selesai di-parsing, isi dulu buffer header
     if (!(*header_parsed)) {
         size_t space_left = FCGI_HEADER_BUF_SIZE - (*h_ptr) - 1;
-        size_t to_copy = (size_t)(read_bytes - payload_offset) < space_left ? (size_t)(read_bytes - payload_offset) : space_left;
+        size_t to_copy = (size_t)read_bytes < space_left ? (size_t)read_bytes : space_left;
 
         if (to_copy > 0) {
-            memcpy(h_buf_target + (*h_ptr), payload + payload_offset, to_copy);
+            memcpy(h_buf_target + (*h_ptr), payload, to_copy);
             (*h_ptr) += to_copy;
             h_buf_target[*h_ptr] = '\0';
             payload_offset += to_copy;
         }
 
+        // Cari delimiter pemisah header dan body (\r\n\r\n atau \n\n)
         char *sep = strstr(h_buf_target, "\r\n\r\n");
-        if (!sep) {
-            sep = strstr(h_buf_target, "\n\n");
-        }
+        if (!sep) sep = strstr(h_buf_target, "\n\n");
 
         if (sep) {
             *header_parsed = true;
-            size_t header_len_actual = (size_t)(sep - h_buf_target) + (sep[0] == '\r' ? 4 : 2);
+            size_t header_len = (size_t)(sep - h_buf_target) + (sep[0] == '\r' ? 4 : 2);
             
-            if ((*h_ptr) > header_len_actual) {
-                size_t spill_len = (*h_ptr) - header_len_actual;
-                size_t body_space_left = GATHER_BUF_SIZE - (*g_ptr);
-                
-                if (spill_len <= body_space_left) {
-                    memcpy(g_buf_target + (*g_ptr), h_buf_target + header_len_actual, spill_len);
+            // Jika ada sisa byte di h_buf yang sebenarnya sudah masuk wilayah body (spillover)
+            if ((*h_ptr) > header_len) {
+                size_t spill_len = (*h_ptr) - header_len;
+                size_t body_space = GATHER_BUF_SIZE - (*g_ptr);
+                if (spill_len <= body_space) {
+                    memcpy(g_buf_target + (*g_ptr), h_buf_target + header_len, spill_len);
                     (*g_ptr) += spill_len;
                 }
-                *h_ptr = header_len_actual;
-                h_buf_target[header_len_actual] = '\0';
-            }
-
-            if (payload_offset < read_bytes) {
-                int body_chunk = read_bytes - payload_offset;
-                size_t body_space_left = GATHER_BUF_SIZE - (*g_ptr);
-
-                if ((size_t)body_chunk <= body_space_left) {
-                    memcpy(g_buf_target + (*g_ptr), payload + payload_offset, body_chunk);
-                    (*g_ptr) += body_chunk;
-                }
+                *h_ptr = header_len;
+                h_buf_target[header_len] = '\0';
             }
         }
-    } else {
+    }
+
+    // 2. Sisa payload (atau seluruh payload jika header sudah lama parsed) langsung masuk ke body gather buffer
+    if (payload_offset < read_bytes) {
         int body_chunk = read_bytes - payload_offset;
         size_t space_left = GATHER_BUF_SIZE - (*g_ptr);
 

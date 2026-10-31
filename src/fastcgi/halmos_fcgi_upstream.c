@@ -185,6 +185,7 @@ int fcgi_upstream_acquire(const char *target, int port) {
     else               target_quota = fcgi_upstream.python_quota;
 
     // --- BAGIAN 1: TRY REUSE (Cek jatah backend spesifik secara atomic & health check) ---
+    // --- BAGIAN 1: TRY REUSE (Cek jatah backend spesifik secara atomic & health check) ---
     if (atomic_load(&fcgi_upstream.active_counts[idx]) < target_quota) {
         pthread_mutex_lock(&fcgi_upstream.lock);
         for (int i = 0; i < fcgi_upstream.slots; i++) {
@@ -195,17 +196,45 @@ int fcgi_upstream_acquire(const char *target, int port) {
 
                 if (belongs) {
                     /*
-                    [TIANG UTAMA: CONNECTION HEALTH - struct pollfd pfd]
-                    POLLRDHUP mendeteksi jika backend (FPM) memutus koneksi sepihak.
+                    [PERBAIKAN TIANG UTAMA: CONNECTION HEALTH - struct pollfd pfd]
+                    Poll dengan timeout 0 akan mengembalikan 0 jika socket idle (sehat & tidak ada event).
+                    Jika mengembalikan > 0 atau mendeteksi flag error, berarti socket terputus/bermasalah.
                     */
-                    struct pollfd pfd = { .fd = fcgi_upstream.connections[i].sockfd, .events = POLLIN | POLLRDHUP };
-                    if (poll(&pfd, 1, 0) == 0) {
+                    struct pollfd pfd = { .fd = fcgi_upstream.connections[i].sockfd, .events = POLLIN | POLLRDHUP | POLLERR | POLLHUP };
+                    int poll_res = poll(&pfd, 1, 0);
+
+                    // Cek apakah socket benar-benar sehat (poll_res == 0 berarti idle/normal, 
+                    // atau jika ada event POLLIN, pastikan bukan EOF/disconnect dari backend)
+                    bool is_healthy = false;
+                    if (poll_res == 0) {
+                        // Timeout 0 dan tidak ada event -> Koneksi idle dan sehat di dalam pool
+                        is_healthy = true;
+                    } else if (poll_res > 0) {
+                        // Jika ada event, cek apakah itu error atau EOF (hanya peer yang tutup, atau data sampah)
+                        if (pfd.revents & (POLLERR | POLLHUP | POLLRDHUP)) {
+                            is_healthy = false;
+                        } else if (pfd.revents & POLLIN) {
+                            // Jika ada data masuk padahal socket harusnya idle, lakukan pengecekan tambahan 
+                            // atau anggap stale connection untuk keamanan. Biasanya backend FPM tidak mengirim 
+                            // data secara spontan ke socket idle tanpa request aktif.
+                            char dummy;
+                            ssize_t n = recv(fcgi_upstream.connections[i].sockfd, &dummy, 1, MSG_PEEK | MSG_DONTWAIT);
+                            if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
+                                is_healthy = false;
+                            } else {
+                                is_healthy = true; // Masih ada data buffer yang belum dibaca atau aman
+                            }
+                        }
+                    }
+
+                    if (is_healthy) {
                         fcgi_upstream.connections[i].in_use = true;
                         final_sock = fcgi_upstream.connections[i].sockfd;
                         atomic_fetch_add(&fcgi_upstream.active_counts[idx], 1);
                         fcgi_upstream.current_idle_count--;
                         break;
                     } else {
+                        // Tutup socket yang terbukti rusak/terputus
                         close(fcgi_upstream.connections[i].sockfd);
                         fcgi_upstream.connections[i].sockfd = -1;
                     }
@@ -216,32 +245,50 @@ int fcgi_upstream_acquire(const char *target, int port) {
     }
 
     // --- BAGIAN 2: CREATE BARU JIKA PERLU ---
+    // --- BAGIAN 2: CREATE BARU JIKA PERLU ---
     if (final_sock == -1) {
+        // Pembuatan socket jaringan dilakukan di luar mutex (non-blocking / connect async)
         final_sock = create_backend_socket(target, port, is_unix);
+        
         if (final_sock != -1) {
             pthread_mutex_lock(&fcgi_upstream.lock);
             
+            // Validasi ulang kuota di dalam mutex untuk mencegah over-allocation
             if (atomic_load(&fcgi_upstream.active_counts[idx]) < target_quota) {
+                int assigned_slot = -1;
+                
+                // Cari slot kosong yang tersedia
                 for (int i = 0; i < fcgi_upstream.slots; i++) {
                     if (fcgi_upstream.connections[i].sockfd == -1) {
-                        fcgi_upstream.connections[i].sockfd = final_sock;
-                        fcgi_upstream.connections[i].in_use = true;
-                        fcgi_upstream.connections[i].is_unix = is_unix;
-                        fcgi_upstream.connections[i].target_port = port;
-                        if (is_unix && target) {
-                            strncpy(fcgi_upstream.connections[i].target_path, target, sizeof(fcgi_upstream.connections[i].target_path) - 1);
-                            fcgi_upstream.connections[i].target_path[sizeof(fcgi_upstream.connections[i].target_path) - 1] = '\0';
-                        }
-                        
-                        atomic_fetch_add(&fcgi_upstream.active_counts[idx], 1);
-                        fcgi_upstream.current_idle_count--;
+                        assigned_slot = i;
                         break;
                     }
                 }
+
+                if (assigned_slot != -1) {
+                    fcgi_upstream.connections[assigned_slot].sockfd = final_sock;
+                    fcgi_upstream.connections[assigned_slot].in_use = true;
+                    fcgi_upstream.connections[assigned_slot].is_unix = is_unix;
+                    fcgi_upstream.connections[assigned_slot].target_port = port;
+                    if (is_unix && target) {
+                        strncpy(fcgi_upstream.connections[assigned_slot].target_path, target, sizeof(fcgi_upstream.connections[assigned_slot].target_path) - 1);
+                        fcgi_upstream.connections[assigned_slot].target_path[sizeof(fcgi_upstream.connections[assigned_slot].target_path) - 1] = '\0';
+                    }
+                    
+                    // Update counter secara konsisten di dalam mutex
+                    atomic_fetch_add(&fcgi_upstream.active_counts[idx], 1);
+                    fcgi_upstream.current_idle_count--;
+                } else {
+                    // Jika ternyata slot penuh (edge case), tutup socket yang baru dibuat
+                    close(final_sock);
+                    final_sock = -1;
+                }
             } else {
+                // Kuota penuh, batalkan dan tutup socket
                 close(final_sock);
                 final_sock = -1;
             }
+            
             pthread_mutex_unlock(&fcgi_upstream.lock);
         }
     }
@@ -251,11 +298,10 @@ int fcgi_upstream_acquire(const char *target, int port) {
 
 void fcgi_upstream_release(int sockfd) {
     if (sockfd < 0) return;
-    fprintf(stderr, "[UPSTREAM_DEBUG] Entering fcgi_upstream_release for sockfd=%d\n", sockfd);
 
     pthread_mutex_lock(&fcgi_upstream.lock);
-    fprintf(stderr, "[UPSTREAM_DEBUG] Locked fcgi_upstream.lock for sockfd=%d\n", sockfd);
 
+    bool found = false;
     for (int i = 0; i < fcgi_upstream.slots; i++) {
         if (fcgi_upstream.connections[i].sockfd == sockfd) {
             int idx = get_backend_index(
@@ -263,23 +309,23 @@ void fcgi_upstream_release(int sockfd) {
                 fcgi_upstream.connections[i].target_port
             );
 
-            // Untuk sementara, kita sederhanakan dulu bagian health check 
-            // untuk memastikan apakah fungsi ini sukses sampai selesai atau nyangkut di recv/getsockopt
             fcgi_upstream.connections[i].in_use = false;
 
-            // Kurangi skor aktif atomic backend terkait
+            // Kurangi penghitung aktif dan kembalikan slot idle
             atomic_fetch_sub(&fcgi_upstream.active_counts[idx], 1);
             fcgi_upstream.current_idle_count++;
             
-            pthread_mutex_unlock(&fcgi_upstream.lock);
-            fprintf(stderr, "[UPSTREAM_DEBUG] Successfully released sockfd=%d back to pool\n", sockfd);
-            return;
+            found = true;
+            break;
         }
     }
     
     pthread_mutex_unlock(&fcgi_upstream.lock);
-    close(sockfd);
-    fprintf(stderr, "[UPSTREAM_DEBUG] Socketfd=%d not found in pool, closed directly.\n", sockfd);
+
+    // Jika socket tidak ditemukan di dalam pool, tutup secara langsung di luar mutex
+    if (!found) {
+        close(sockfd);
+    }
 }
 
 int fcgi_upstream_select_node(RequestHeader *req, int backend_type, const char **out_ip, int *out_port, bool *out_is_unix) {

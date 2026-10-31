@@ -133,7 +133,6 @@ void* fcgi_thread_pool_worker(void *arg) {
             int target_fd = session->fpm_fd;
             if (target_fd != -99 && target_fd != -1) {
                 fcgi_event_loop_del(target_fd);
-                session->fpm_fd = -1;
             }
             pthread_mutex_unlock(&session->lock);
             
@@ -152,7 +151,7 @@ void* fcgi_thread_pool_worker(void *arg) {
 
     fprintf(stderr, "[FCGI_WORKER_DEBUG] Worker thread routine terminated (tid=%lu)\n", (unsigned long)pthread_self());
     return NULL;
-}
+}   
 
 bool fcgi_thread_pool_is_running(void) {
     return fcgi_worker_pool.running;
