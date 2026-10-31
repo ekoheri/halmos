@@ -37,7 +37,20 @@
 #include <stddef.h>
 #include <sys/epoll.h>
 
+// Helper 1A: Menangani State Membaca Header HTTP
+static int handle_read_headers_state(halmos_conn_t *conn, HTTP1Session *session, int sock_client, bool is_tls);
+
+// Helper 1B: Menangani State Membaca Body Request
+static int handle_read_body_state(halmos_conn_t *conn, HTTP1Session *session, int sock_client, bool is_tls) ;
+
+// Helper 2: Menangani routimg (ke websocket, fastCGI, file statis)
 static int http1_manager_routing_bridge(halmos_conn_t *conn, HTTP1Session *session);
+
+// Helper 3: Menangani State Pemrosesan & Pengiriman FastCGI
+static int handle_fcgi_processing_state(halmos_conn_t *conn, HTTP1Session *session, int sock_client, bool is_tls);
+
+// Helper 4: Menangani State Pengiriman File Statis
+static int handle_static_file_state(halmos_conn_t *conn, HTTP1Session *session, int sock_client, bool is_tls);
 
 int http1_manager_session(halmos_conn_t *conn) {
     if (!conn->protocol_session) {
@@ -59,141 +72,16 @@ int http1_manager_session(halmos_conn_t *conn) {
     // 1A. STATE: BACA REQUEST HEADER
     // =========================================================================
     if (session->state == STATE_READ_HEADERS) {
-        bool should_retry = false;
-        bool connection_closed = false;
-
-        while (1) {
-            if (session->buf_len >= session->buf_capacity - 1) {
-                size_t new_cap = session->buf_capacity * 2;
-                char *new_buf = realloc(session->buffer, new_cap);
-                if (!new_buf) return -1;
-                
-                if (new_buf != session->buffer) {
-                    ptrdiff_t diff = new_buf - session->buffer;
-                    if (session->req.uri)          session->req.uri += diff;
-                    if (session->req.directory)    session->req.directory += diff;
-                    if (session->req.query_string) session->req.query_string += diff;
-                    if (session->req.host)         session->req.host += diff;
-                    if (session->req.content_type) session->req.content_type += diff;
-                    if (session->req.cookie_data)  session->req.cookie_data += diff;
-                    if (session->req.body_data)    session->req.body_data = (void*)((char*)session->req.body_data + diff);
-                    if (session->req.path_info)    session->req.path_info += diff;
-                }
-                session->buffer = new_buf;
-                session->buf_capacity = new_cap;
-            }
-
-            size_t to_read = session->buf_capacity - session->buf_len - 1;
-            ssize_t n = is_tls ? SSL_read(conn->ssl, session->buffer + session->buf_len, (int)to_read)
-                               : recv(sock_client, session->buffer + session->buf_len, to_read, 0);
-            
-            if (n > 0) {
-                session->buf_len += n;
-                session->buffer[session->buf_len] = '\0';
-                
-                if (strstr(session->buffer, "\r\n\r\n") != NULL) {
-                    break; 
-                }
-            } else if (n < 0) {
-                if (is_tls) {
-                     int err = SSL_get_error(conn->ssl, (int)n);
-                     if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
-                         should_retry = true;
-                     }
-                } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                     should_retry = true;
-                }
-                break;
-            } else { // n == 0
-                connection_closed = true;
-                break;
-            }
-        }
-
-        if (connection_closed && session->buf_len == 0) return 0;
-
-        if (strstr(session->buffer, "\r\n\r\n") == NULL) {
-            if (connection_closed) return 0;
-            if (should_retry) return 2; // WANT_READ (EPOLLIN)
-            return -1;
-        }
-
-        session->req.is_tls = is_tls;
-        
-        struct sockaddr_storage addr;
-        socklen_t addr_len = sizeof(addr);
-        if (getpeername(sock_client, (struct sockaddr*)&addr, &addr_len) == 0) {
-            if (addr.ss_family == AF_INET) {
-                struct sockaddr_in *s_addr = (struct sockaddr_in *)&addr;
-                inet_ntop(AF_INET, &s_addr->sin_addr, session->req.client_ip, sizeof(session->req.client_ip));
-            } else if (addr.ss_family == AF_INET6) {
-                struct sockaddr_in6 *s_addr = (struct sockaddr_in6 *)&addr;
-                inet_ntop(AF_INET6, &s_addr->sin6_addr, session->req.client_ip, sizeof(session->req.client_ip));
-            }
-        }
-
-        if (!http1_parser_parse_header(session->buffer, session->buf_len, &session->req) || !session->req.is_valid) {
-            http1_response_send_mem(sock_client, 400, "Bad Request", "400 Bad Request", false, is_tls);
-            return 0;
-        }
-
-        if (session->req.content_length > 0) {
-            session->state = STATE_READ_BODY;
-        } else {
-            session->state = STATE_HANDLE_REQUEST;
-        }
+        int res = handle_read_headers_state(conn, session, sock_client, is_tls);
+        if (res <= 0 || res == 2) return res;
     }
 
     // =========================================================================
     // 1B. STATE: BACA BODY REQUEST
     // =========================================================================
     if (session->state == STATE_READ_BODY) {
-        size_t header_len = (char*)session->req.body_data - session->buffer;
-        session->req.body_length = session->buf_len - header_len;
-
-        while (session->req.body_length < (size_t)session->req.content_length) {
-            if (session->buf_len >= session->buf_capacity - 1) {
-                size_t new_cap = session->buf_capacity * 2;
-                char *new_buf = realloc(session->buffer, new_cap);
-                if (!new_buf) return -1;
-
-                if (new_buf != session->buffer) {
-                    ptrdiff_t diff = new_buf - session->buffer;
-                    if (session->req.uri)          session->req.uri += diff;
-                    if (session->req.directory)    session->req.directory += diff;
-                    if (session->req.query_string) session->req.query_string += diff;
-                    if (session->req.host)         session->req.host += diff;
-                    if (session->req.content_type) session->req.content_type += diff;
-                    if (session->req.cookie_data)  session->req.cookie_data += diff;
-                    if (session->req.body_data)    session->req.body_data = (void*)((char*)session->req.body_data + diff);
-                    if (session->req.path_info)    session->req.path_info += diff;
-                }
-                session->buffer = new_buf;
-                session->buf_capacity = new_cap;
-            }
-
-            size_t to_read = session->buf_capacity - session->buf_len - 1;
-            ssize_t n = is_tls ? SSL_read(conn->ssl, session->buffer + session->buf_len, (int)to_read)
-                               : recv(sock_client, session->buffer + session->buf_len, to_read, 0);
-
-            if (n > 0) {
-                session->buf_len += n;
-                session->buffer[session->buf_len] = '\0';
-                session->req.body_length = session->buf_len - header_len;
-            } else if (n < 0) {
-                if (is_tls) {
-                    int err = SSL_get_error(conn->ssl, (int)n);
-                    if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) return 2;
-                } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                    return 2;
-                }
-                return -1;
-            } else {
-                return 0;
-            }
-        }
-
-        session->state = STATE_HANDLE_REQUEST;
+        int res = handle_read_body_state(conn, session, sock_client, is_tls);
+        if (res <= 0 || res == 2) return res;
     }
         
     // =========================================================================
@@ -204,170 +92,188 @@ int http1_manager_session(halmos_conn_t *conn) {
     }
 
     // =========================================================================
-    // 3. STATE: PEMROSESAN FASTCGI BERBASIS FSM (Langkah 2 - Flush Output ke Client)
+    // 3. STATE: PEMROSESAN FASTCGI BERBASIS FSM
     // =========================================================================
     if (session->state == STATE_FCGI_PROCESSING) {
-        fprintf(stderr, "[HTTP1_FCGI_DEBUG] ENTER STATE_FCGI_PROCESSING | session=%p, fcgi_sess=%p\n", (void*)session, (void*)session->fcgi_sess);
-
-        // Jika FSM di backend FastCGI belum menandai pengumpulan data selesai,
-        // tetap minta core event loop menunggu event berikutnya (EPOLLIN=2)
-        if (session->fcgi_sess != NULL && session->fcgi_sess->is_fcgi_active) {
-            fprintf(stderr, "[HTTP1_FCGI_DEBUG] FCGI upstream task still active. Returning 2 (EPOLLIN)\n");
-            return 2;
-        }
-
-        FCGI_Session *fs = session->fcgi_sess;
-        if (fs != NULL) {
-            fprintf(stderr, "[HTTP1_FCGI_DEBUG] FCGI upstream complete. fcgi_h_ptr=%zu, fcgi_g_ptr=%zu\n", fs->fcgi_h_ptr, fs->fcgi_g_ptr);
-
-            // Allocation buffer pengiriman hanya dilakukan SEKALI SAJA
-            if (session->fcgi_write_buf == NULL) {
-                // --- UBAH DI BAGIAN INI ---
-                size_t h_len = fs->fcgi_h_ptr;
-                size_t g_len = fs->fcgi_g_ptr;
-                size_t total_body_len = h_len + g_len;
-
-                // Gunakan snprintf untuk menyisipkan total_body_len ke dalam Content-Length
-                char status_ok[256];
-                int status_len = snprintf(status_ok, sizeof(status_ok),
-                                          "HTTP/1.1 200 OK\r\n"
-                                          "Server: Halmos-Savage/2.1\r\n"
-                                          "Connection: keep-alive\r\n"
-                                          "Content-Length: %zu\r\n\r\n", 
-                                          total_body_len);
-                // ---------------------------
-
-                session->fcgi_write_len = status_len + total_body_len;
-                session->fcgi_write_buf = malloc(session->fcgi_write_len);
-                if (!session->fcgi_write_buf) {
-                    fprintf(stderr, "[HTTP1_FCGI_DEBUG] ERROR: Failed to allocate fcgi_write_buf!\n");
-                    fcgi_session_release(fs);
-                    session->fcgi_sess = NULL;
-                    return 0;
-                }
-                
-                size_t offset = 0;
-                memcpy(session->fcgi_write_buf + offset, status_ok, status_len);
-                offset += status_len;
-                if (h_len > 0) {
-                    memcpy(session->fcgi_write_buf + offset, fs->fcgi_header_buf, h_len);
-                    offset += h_len;
-                }
-                if (g_len > 0) {
-                    memcpy(session->fcgi_write_buf + offset, fs->fcgi_gather_buf, g_len);
-                }
-
-                session->fcgi_write_offset = 0;
-                fprintf(stderr, "[HTTP1_FCGI_DEBUG] Prepared write payload: total_len=%zu (Content-Length: %zu)\n", 
-                        session->fcgi_write_len, total_body_len);
-
-                // Tutup soket backend FPM & bersihkan fs
-                fcgi_session_release(fs);
-                session->fcgi_sess = NULL;
-            }
-
-            // Pengiriman bertahap (Partial Write Management) ke Klien Socket
-            size_t remaining = session->fcgi_write_len - session->fcgi_write_offset;
-            ssize_t written = 0;
-
-            if (is_tls) {
-                written = SSL_write(conn->ssl, session->fcgi_write_buf + session->fcgi_write_offset, (int)remaining);
-            } else {
-                written = send(sock_client, session->fcgi_write_buf + session->fcgi_write_offset, remaining, MSG_NOSIGNAL);
-            }
-
-            fprintf(stderr, "[HTTP1_FCGI_DEBUG] Write attempt: remaining=%zu, written=%zd, errno=%d\n", remaining, written, errno);
-
-            if (written > 0) {
-                session->fcgi_write_offset += written;
-                if (session->fcgi_write_offset < session->fcgi_write_len) {
-                    fprintf(stderr, "[HTTP1_FCGI_DEBUG] Partial write detected (%zu/%zu sent). Returning 3 (EPOLLOUT)\n", 
-                            session->fcgi_write_offset, session->fcgi_write_len);
-                    return 3; // Rearm EPOLLOUT ke socket client agar tidak stuck!
-                }
-            } else {
-                int err = is_tls ? SSL_get_error(conn->ssl, (int)written) : errno;
-                if (err == EAGAIN || err == EWOULDBLOCK || err == SSL_ERROR_WANT_WRITE || err == SSL_ERROR_WANT_READ) {
-                    fprintf(stderr, "[HTTP1_FCGI_DEBUG] Client socket blocked (EAGAIN/WANT_WRITE). Returning 3 (EPOLLOUT)\n");
-                    return 3; // Rearm EPOLLOUT
-                }
-                fprintf(stderr, "[HTTP1_FCGI_DEBUG] Fatal client write error: err=%d. Closing session.\n", err);
-                free(session->fcgi_write_buf);
-                session->fcgi_write_buf = NULL;
-                return 0;
-            }
-
-            // Seluruh payload terkirim 100%!
-            free(session->fcgi_write_buf);
-            session->fcgi_write_buf = NULL;
-            fprintf(stderr, "[HTTP1_FCGI_DEBUG] FastCGI response completely sent to client!\n");
-        } else {
-            fprintf(stderr, "[HTTP1_FCGI_DEBUG] WARNING: fs is NULL while in STATE_FCGI_PROCESSING!\n");
-        }
-
-        // Reset state untuk Keep-Alive
-        bool keep_alive = session->req.is_keep_alive;
-        http1_parser_free_memory(&session->req);
-        memset(&session->req, 0, sizeof(RequestHeader));
-        
-        session->buf_len = 0;
-        if (session->buffer) session->buffer[0] = '\0';
-        session->state = STATE_READ_HEADERS;
-        
-        return keep_alive ? 2 : 0;
+        return handle_fcgi_processing_state(conn, session, sock_client, is_tls);
     }
 
     // =========================================================================
     // 4. STATE: PENGIRIMAN FILE STATIS (EPOLLOUT)
     // =========================================================================
     if (session->state == STATE_SEND_STATIC_FILE) {
-        long total_file_size = 0;
-        if (session->file_fd >= 0) {
-            struct stat file_st;
-            if (fstat(session->file_fd, &file_st) == 0) {
-                total_file_size = file_st.st_size;
-            }
-        }
-
-        int res = is_tls ? http1_response_ssl(conn, session) 
-                         : http1_response_plain(sock_client, session);
-
-        if (res == 3 || res == 2) {
-            return res; 
-        }
-
-        if (res <= 0) {
-            http1_parser_free_memory(&session->req);
-            if (session->file_fd >= 0) {
-                close(session->file_fd);
-                session->file_fd = -1;
-            }
-            return 0; 
-        }
-        
-        write_log_access("HTTP/1.1", session->req.client_ip, session->req.method, session->req.uri, 200, session->header_len + total_file_size);
-        
-        if (session->file_fd >= 0) {
-            close(session->file_fd);
-            session->file_fd = -1;
-        }
-
-        bool keep_alive = session->req.is_keep_alive;
-        http1_parser_free_memory(&session->req);
-        memset(&session->req, 0, sizeof(RequestHeader));
-        
-        session->buf_len = 0;
-        if (session->buffer) session->buffer[0] = '\0';
-        session->state = STATE_READ_HEADERS;
-        
-        return keep_alive ? 2 : 0;
+        return handle_static_file_state(conn, session, sock_client, is_tls);
     }
     
     return 2;
 }
 
+void http1_session_destroy(void *session) {
+    HTTP1Session *s = (HTTP1Session *)session;
+    if (!s) return;
+    if (s->buffer) free(s->buffer);
+    if (s->file_fd >= 0) close(s->file_fd);
+
+    // Bersihkan sesi FCGI jika masih aktif
+    if (s->fcgi_sess) {
+        fcgi_session_release(s->fcgi_sess);
+        s->fcgi_sess = NULL;
+    }
+
+    if (s->fcgi_write_buf) {
+        free(s->fcgi_write_buf);
+        s->fcgi_write_buf = NULL;
+    }
+
+    http1_parser_free_memory(&s->req);
+    free(s);
+}
+
 // =========================================================================
-// ROUTING BRIDGE MILIK MANAJER (Perbaikan Non-blocking ke FPM)
+// Helper 1A: Menangani State Membaca Header HTTP
+// =========================================================================
+int handle_read_headers_state(halmos_conn_t *conn, HTTP1Session *session, int sock_client, bool is_tls) {
+    bool should_retry = false;
+    bool connection_closed = false;
+
+    while (1) {
+        if (session->buf_len >= session->buf_capacity - 1) {
+            size_t new_cap = session->buf_capacity * 2;
+            char *new_buf = realloc(session->buffer, new_cap);
+            if (!new_buf) return -1;
+            
+            if (new_buf != session->buffer) {
+                ptrdiff_t diff = new_buf - session->buffer;
+                if (session->req.uri)          session->req.uri += diff;
+                if (session->req.directory)    session->req.directory += diff;
+                if (session->req.query_string) session->req.query_string += diff;
+                if (session->req.host)         session->req.host += diff;
+                if (session->req.content_type) session->req.content_type += diff;
+                if (session->req.cookie_data)  session->req.cookie_data += diff;
+                if (session->req.body_data)    session->req.body_data = (void*)((char*)session->req.body_data + diff);
+                if (session->req.path_info)    session->req.path_info += diff;
+            }
+            session->buffer = new_buf;
+            session->buf_capacity = new_cap;
+        }
+
+        size_t to_read = session->buf_capacity - session->buf_len - 1;
+        ssize_t n = is_tls ? SSL_read(conn->ssl, session->buffer + session->buf_len, (int)to_read)
+                           : recv(sock_client, session->buffer + session->buf_len, to_read, 0);
+        
+        if (n > 0) {
+            session->buf_len += n;
+            session->buffer[session->buf_len] = '\0';
+            
+            if (strstr(session->buffer, "\r\n\r\n") != NULL) {
+                break; 
+            }
+        } else if (n < 0) {
+            if (is_tls) {
+                 int err = SSL_get_error(conn->ssl, (int)n);
+                 if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
+                     should_retry = true;
+                 }
+            } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                 should_retry = true;
+            }
+            break;
+        } else { // n == 0
+            connection_closed = true;
+            break;
+        }
+    }
+
+    if (connection_closed && session->buf_len == 0) return 0;
+
+    if (strstr(session->buffer, "\r\n\r\n") == NULL) {
+        if (connection_closed) return 0;
+        if (should_retry) return 2; // WANT_READ (EPOLLIN)
+        return -1;
+    }
+
+    session->req.is_tls = is_tls;
+    
+    struct sockaddr_storage addr;
+    socklen_t addr_len = sizeof(addr);
+    if (getpeername(sock_client, (struct sockaddr*)&addr, &addr_len) == 0) {
+        if (addr.ss_family == AF_INET) {
+            struct sockaddr_in *s_addr = (struct sockaddr_in *)&addr;
+            inet_ntop(AF_INET, &s_addr->sin_addr, session->req.client_ip, sizeof(session->req.client_ip));
+        } else if (addr.ss_family == AF_INET6) {
+            struct sockaddr_in6 *s_addr = (struct sockaddr_in6 *)&addr;
+            inet_ntop(AF_INET6, &s_addr->sin6_addr, session->req.client_ip, sizeof(session->req.client_ip));
+        }
+    }
+
+    if (!http1_parser_parse_header(session->buffer, session->buf_len, &session->req) || !session->req.is_valid) {
+        http1_response_send_mem(sock_client, 400, "Bad Request", "400 Bad Request", false, is_tls);
+        return 0;
+    }
+
+    if (session->req.content_length > 0) {
+        session->state = STATE_READ_BODY;
+    } else {
+        session->state = STATE_HANDLE_REQUEST;
+    }
+    return 1; // Lanjut ke proses berikutnya
+}
+
+// =========================================================================
+// Helper 1B : handle_read_body_state untuk membaca header body 
+// =========================================================================
+int handle_read_body_state(halmos_conn_t *conn, HTTP1Session *session, int sock_client, bool is_tls) {
+    size_t header_len = (char*)session->req.body_data - session->buffer;
+    session->req.body_length = session->buf_len - header_len;
+
+    while (session->req.body_length < (size_t)session->req.content_length) {
+        if (session->buf_len >= session->buf_capacity - 1) {
+            size_t new_cap = session->buf_capacity * 2;
+            char *new_buf = realloc(session->buffer, new_cap);
+            if (!new_buf) return -1;
+
+            if (new_buf != session->buffer) {
+                ptrdiff_t diff = new_buf - session->buffer;
+                if (session->req.uri)          session->req.uri += diff;
+                if (session->req.directory)    session->req.directory += diff;
+                if (session->req.query_string) session->req.query_string += diff;
+                if (session->req.host)         session->req.host += diff;
+                if (session->req.content_type) session->req.content_type += diff;
+                if (session->req.cookie_data)  session->req.cookie_data += diff;
+                if (session->req.body_data)    session->req.body_data = (void*)((char*)session->req.body_data + diff);
+                if (session->req.path_info)    session->req.path_info += diff;
+            }
+            session->buffer = new_buf;
+            session->buf_capacity = new_cap;
+        }
+
+        size_t to_read = session->buf_capacity - session->buf_len - 1;
+        ssize_t n = is_tls ? SSL_read(conn->ssl, session->buffer + session->buf_len, (int)to_read)
+                           : recv(sock_client, session->buffer + session->buf_len, to_read, 0);
+
+        if (n > 0) {
+            session->buf_len += n;
+            session->buffer[session->buf_len] = '\0';
+            session->req.body_length = session->buf_len - header_len;
+        } else if (n < 0) {
+            if (is_tls) {
+                int err = SSL_get_error(conn->ssl, (int)n);
+                if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) return 2;
+            } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                return 2;
+            }
+            return -1;
+        } else {
+            return 0;
+        }
+    }
+
+    session->state = STATE_HANDLE_REQUEST;
+    return 1;
+}
+
+// =========================================================================
+// Helper 2 : Routing Bridge
 // =========================================================================
 static int http1_manager_routing_bridge(halmos_conn_t *conn, HTTP1Session *session) {
     int sock_client = conn->fd;
@@ -477,23 +383,152 @@ static int http1_manager_routing_bridge(halmos_conn_t *conn, HTTP1Session *sessi
     return 3;
 }
 
-void http1_session_destroy(void *session) {
-    HTTP1Session *s = (HTTP1Session *)session;
-    if (!s) return;
-    if (s->buffer) free(s->buffer);
-    if (s->file_fd >= 0) close(s->file_fd);
+// =========================================================================
+// Helper 3: Menangani State Pemrosesan & Pengiriman FastCGI
+// =========================================================================
+int handle_fcgi_processing_state(halmos_conn_t *conn, HTTP1Session *session, int sock_client, bool is_tls) {
+    fprintf(stderr, "[HTTP1_FCGI_DEBUG] ENTER STATE_FCGI_PROCESSING | session=%p, fcgi_sess=%p\n", (void*)session, (void*)session->fcgi_sess);
 
-    // Bersihkan sesi FCGI jika masih aktif
-    if (s->fcgi_sess) {
-        fcgi_session_release(s->fcgi_sess);
-        s->fcgi_sess = NULL;
+    if (session->fcgi_sess != NULL && session->fcgi_sess->is_fcgi_active) {
+        fprintf(stderr, "[HTTP1_FCGI_DEBUG] FCGI upstream task still active. Returning 2 (EPOLLIN)\n");
+        return 2;
     }
 
-    if (s->fcgi_write_buf) {
-        free(s->fcgi_write_buf);
-        s->fcgi_write_buf = NULL;
+    FCGI_Session *fs = session->fcgi_sess;
+    if (fs != NULL) {
+        fprintf(stderr, "[HTTP1_FCGI_DEBUG] FCGI upstream complete. fcgi_h_ptr=%zu, fcgi_g_ptr=%zu\n", fs->fcgi_h_ptr, fs->fcgi_g_ptr);
+
+        if (session->fcgi_write_buf == NULL) {
+            size_t h_len = fs->fcgi_h_ptr;
+            size_t g_len = fs->fcgi_g_ptr;
+            size_t total_body_len = h_len + g_len;
+
+            char status_ok[256];
+            int status_len = snprintf(status_ok, sizeof(status_ok),
+                                      "HTTP/1.1 200 OK\r\n"
+                                      "Server: Halmos-Savage/2.1\r\n"
+                                      "Connection: keep-alive\r\n"
+                                      "Content-Length: %zu\r\n\r\n", 
+                                      total_body_len);
+
+            session->fcgi_write_len = status_len + total_body_len;
+            session->fcgi_write_buf = malloc(session->fcgi_write_len);
+            if (!session->fcgi_write_buf) {
+                fprintf(stderr, "[HTTP1_FCGI_DEBUG] ERROR: Failed to allocate fcgi_write_buf!\n");
+                fcgi_session_release(fs);
+                session->fcgi_sess = NULL;
+                return 0;
+            }
+            
+            size_t offset = 0;
+            memcpy(session->fcgi_write_buf + offset, status_ok, status_len);
+            offset += status_len;
+            if (h_len > 0) {
+                memcpy(session->fcgi_write_buf + offset, fs->fcgi_header_buf, h_len);
+                offset += h_len;
+            }
+            if (g_len > 0) {
+                memcpy(session->fcgi_write_buf + offset, fs->fcgi_gather_buf, g_len);
+            }
+
+            session->fcgi_write_offset = 0;
+            fprintf(stderr, "[HTTP1_FCGI_DEBUG] Prepared write payload: total_len=%zu (Content-Length: %zu)\n", 
+                    session->fcgi_write_len, total_body_len);
+
+            fcgi_session_release(fs);
+            session->fcgi_sess = NULL;
+        }
+
+        size_t remaining = session->fcgi_write_len - session->fcgi_write_offset;
+        ssize_t written = 0;
+
+        if (is_tls) {
+            written = SSL_write(conn->ssl, session->fcgi_write_buf + session->fcgi_write_offset, (int)remaining);
+        } else {
+            written = send(sock_client, session->fcgi_write_buf + session->fcgi_write_offset, remaining, MSG_NOSIGNAL);
+        }
+
+        fprintf(stderr, "[HTTP1_FCGI_DEBUG] Write attempt: remaining=%zu, written=%zd, errno=%d\n", remaining, written, errno);
+
+        if (written > 0) {
+            session->fcgi_write_offset += written;
+            if (session->fcgi_write_offset < session->fcgi_write_len) {
+                fprintf(stderr, "[HTTP1_FCGI_DEBUG] Partial write detected (%zu/%zu sent). Returning 3 (EPOLLOUT)\n", 
+                        session->fcgi_write_offset, session->fcgi_write_len);
+                return 3;
+            }
+        } else {
+            int err = is_tls ? SSL_get_error(conn->ssl, (int)written) : errno;
+            if (err == EAGAIN || err == EWOULDBLOCK || err == SSL_ERROR_WANT_WRITE || err == SSL_ERROR_WANT_READ) {
+                fprintf(stderr, "[HTTP1_FCGI_DEBUG] Client socket blocked (EAGAIN/WANT_WRITE). Returning 3 (EPOLLOUT)\n");
+                return 3;
+            }
+            fprintf(stderr, "[HTTP1_FCGI_DEBUG] Fatal client write error: err=%d. Closing session.\n", err);
+            free(session->fcgi_write_buf);
+            session->fcgi_write_buf = NULL;
+            return 0;
+        }
+
+        free(session->fcgi_write_buf);
+        session->fcgi_write_buf = NULL;
+        fprintf(stderr, "[HTTP1_FCGI_DEBUG] FastCGI response completely sent to client!\n");
+    } else {
+        fprintf(stderr, "[HTTP1_FCGI_DEBUG] WARNING: fs is NULL while in STATE_FCGI_PROCESSING!\n");
     }
 
-    http1_parser_free_memory(&s->req);
-    free(s);
+    bool keep_alive = session->req.is_keep_alive;
+    http1_parser_free_memory(&session->req);
+    memset(&session->req, 0, sizeof(RequestHeader));
+    
+    session->buf_len = 0;
+    if (session->buffer) session->buffer[0] = '\0';
+    session->state = STATE_READ_HEADERS;
+    
+    return keep_alive ? 2 : 0;
+}
+
+// =========================================================================
+// Helper 4: Menangani State Pengiriman File Statis
+// =========================================================================
+int handle_static_file_state(halmos_conn_t *conn, HTTP1Session *session, int sock_client, bool is_tls) {
+    long total_file_size = 0;
+    if (session->file_fd >= 0) {
+        struct stat file_st;
+        if (fstat(session->file_fd, &file_st) == 0) {
+            total_file_size = file_st.st_size;
+        }
+    }
+
+    int res = is_tls ? http1_response_ssl(conn, session) 
+                     : http1_response_plain(sock_client, session);
+
+    if (res == 3 || res == 2) {
+        return res; 
+    }
+
+    if (res <= 0) {
+        http1_parser_free_memory(&session->req);
+        if (session->file_fd >= 0) {
+            close(session->file_fd);
+            session->file_fd = -1;
+        }
+        return 0; 
+    }
+    
+    write_log_access("HTTP/1.1", session->req.client_ip, session->req.method, session->req.uri, 200, session->header_len + total_file_size);
+    
+    if (session->file_fd >= 0) {
+        close(session->file_fd);
+        session->file_fd = -1;
+    }
+
+    bool keep_alive = session->req.is_keep_alive;
+    http1_parser_free_memory(&session->req);
+    memset(&session->req, 0, sizeof(RequestHeader));
+    
+    session->buf_len = 0;
+    if (session->buffer) session->buffer[0] = '\0';
+    session->state = STATE_READ_HEADERS;
+    
+    return keep_alive ? 2 : 0;
 }
