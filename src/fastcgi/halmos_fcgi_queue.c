@@ -216,10 +216,3 @@ FCGI_Task* fcgi_queue_pop(struct timeval *arrival) {
     pthread_mutex_unlock(&q->lock);
     return tmp;
 }
-
-void fcgi_queue_broadcast(void) {
-    FCGI_TaskQueue *q = &global_fcgi_queue;
-    pthread_mutex_lock(&q->lock);
-    pthread_cond_broadcast(&q->not_empty);
-    pthread_mutex_unlock(&q->lock);
-}

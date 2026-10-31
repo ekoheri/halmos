@@ -145,6 +145,8 @@ void* fcgi_thread_pool_worker(void *arg) {
         core_conn_t_unlock(conn);
 
         // --- PENTING: Lepaskan referensi yang dipegang oleh worker task ini ---
+        // Akan berdapak [UPSTREAM_FATAL] fcgi_upstream_acquire FAILED! Target IP: 127.0.0.1, Port: 9000 (Pool Exhausted!)
+        // Ketika diuji wrk
         fcgi_session_release(session);
     }
 

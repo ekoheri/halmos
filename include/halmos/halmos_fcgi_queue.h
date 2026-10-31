@@ -53,6 +53,4 @@ bool fcgi_queue_push(FCGI_Session *session, FCGI_TaskType type);
 
 FCGI_Task* fcgi_queue_pop(struct timeval *arrival);
 
-void fcgi_queue_broadcast(void);
-
 #endif // HALMOS_FCGI_QUEUE_H
