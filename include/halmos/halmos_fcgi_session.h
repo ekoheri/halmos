@@ -39,8 +39,14 @@ typedef struct {
     bool fcgi_header_parsed;
     unsigned char fcgi_header_buf[FCGI_HEADER_BUF_SIZE];
     size_t fcgi_h_ptr;
-    unsigned char fcgi_gather_buf[GATHER_BUF_SIZE];
-    size_t fcgi_g_ptr;
+    //unsigned char fcgi_gather_buf[GATHER_BUF_SIZE];
+    //size_t fcgi_g_ptr;
+
+    // --- PENYESUAIAN UNTUK LARGE DATA / STREAMING DINAMIS ---
+    unsigned char *fcgi_gather_buf;  // Diubah dari array statis menjadi pointer dinamis (malloc/realloc)
+    size_t fcgi_g_ptr;               // Posisi pointer data saat ini
+    size_t fcgi_g_capacity;          // Kapasitas maksimum gather_buf saat ini (menggantikan GATHER_BUF_SIZE kaku)
+    // ---------------------------------------------------------
 
     void *h2_session; // Menyimpan pointer HTTP2Session
     void *h2_stream;

@@ -56,6 +56,10 @@ FCGI_Session* fcgi_session_create(int sock_client, bool is_tls, SSL *ssl_conn, R
     session->last_activity = time(NULL);
     session->fpm_fd = -1; 
 
+    session->fcgi_g_capacity = 65536; // 64KB ukuran awal
+    session->fcgi_gather_buf = malloc(session->fcgi_g_capacity);
+    session->fcgi_g_ptr = 0;
+
     // --- 1. PILIH NODE & ACQUIRE KONEKSI ---
     const char *target_ip = NULL;
     int target_port = 0;
@@ -122,12 +126,19 @@ void fcgi_session_release(FCGI_Session *session) {
             fcgi_upstream_release(target_fd);
             session->fpm_fd = -99;
         }
+        
         pthread_mutex_unlock(&session->lock);
 
-        // 2. Hancurkan mutex
+        // 2. Bebaskan gather_buf dinamis (pencegah memory leak)
+        if (session->fcgi_gather_buf) {
+            free(session->fcgi_gather_buf);
+            session->fcgi_gather_buf = NULL;
+        }
+
+        // 3. Hancurkan mutex
         pthread_mutex_destroy(&session->lock);
 
-        // 3. Bebaskan memori
+        // 4. Bebaskan memori
         free(session);
     }
 }

@@ -124,7 +124,7 @@ void http2_session_destroy(void *sess) {
         free(session->pending_write_buf);
         session->pending_write_buf = NULL;
     }
- 
+
     pthread_mutex_destroy(&session->hpack_lock);
     pthread_mutex_destroy(&session->streams_lock);
     free(session);
@@ -147,7 +147,7 @@ bool session_init(halmos_conn_t *conn) {
         session->dyn_table.entries = calloc(128, sizeof(HPACKEntry));
         session->peer_initial_window_size = 65535;
         session->dyn_table.max_size = 4096; 
-        
+  
         pthread_mutex_init(&session->hpack_lock, NULL);
         pthread_mutex_init(&session->streams_lock, NULL);
         

@@ -124,14 +124,18 @@ typedef struct HTTP2Stream {
     bool fcgi_header_sent;         // Penanda apakah header HTTP/2 sudah dikirim ke client
     bool is_fcgi_active;           // Status apakah stream sedang dalam proses I/O non-blocking dengan FPM
     
-    // Buffer pendukung per-stream (menggunakan ukuran yang selaras dengan GATHER_BUF_SIZE)
-    unsigned char fcgi_gather_buf[GATHER_BUF_SIZE];
-    size_t fcgi_g_ptr;
-    size_t fcgi_g_sent;
-
     char fcgi_header_buf[FCGI_HEADER_BUF_SIZE];
     size_t fcgi_h_ptr;              // Penunjuk ukuran data header yang terkumpul
     bool fcgi_header_parsed;        // Penanda apakah header sudah selesai diparsing & dikirim
+
+    // Buffer pendukung per-stream (menggunakan ukuran yang selaras dengan GATHER_BUF_SIZE)
+    //unsigned char fcgi_gather_buf[GATHER_BUF_SIZE];
+    unsigned char *fcgi_gather_buf;
+    size_t fcgi_g_ptr;
+    size_t fcgi_g_capacity; 
+    // ------------------------
+    
+    size_t fcgi_g_sent;
     
     struct HTTP2Stream *node_next; // Point ke stream aktif lainnya
 } HTTP2Stream;

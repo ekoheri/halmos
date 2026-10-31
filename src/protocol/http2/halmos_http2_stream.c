@@ -1,5 +1,6 @@
 #include "halmos_http2_stream.h"
 #include "halmos_http2_core.h"
+#include "halmos_http2_parser.h"
 #include "halmos_log.h"
 
 #include <stdint.h>
@@ -10,6 +11,7 @@
 #include <sys/socket.h> // Untuk struct sockaddr_storage, getpeername, AF_INET, AF_INET6
 #include <netinet/in.h> // Untuk struct sockaddr_in, struct sockaddr_in6
 #include <arpa/inet.h>  // Untuk inet_ntop
+#include <unistd.h>
 
 static uint32_t http2_stream_get_bucket_fibonacci(uint32_t stream_id);
 
@@ -34,7 +36,7 @@ HTTP2Stream* http2_stream_find(HTTP2Session *session, uint32_t id) {
     return st;
 }
 
-HTTP2Stream *http2_stream_get_or_create(HTTP2Session *session, uint32_t stream_id) {
+HTTP2Stream* http2_stream_get_or_create(HTTP2Session *session, uint32_t stream_id) {
     uint32_t bucket = http2_stream_get_bucket_fibonacci(stream_id);
     HTTP2Stream *st = NULL;
 
@@ -61,7 +63,7 @@ HTTP2Stream *http2_stream_get_or_create(HTTP2Session *session, uint32_t stream_i
         st->out_window_size = session->peer_initial_window_size; 
         st->file_fd = -1;            
         st->http1_compat.is_tls = session->is_tls;
- 
+
         struct sockaddr_storage addr;
         socklen_t addr_len = sizeof(addr);
         
@@ -82,8 +84,58 @@ HTTP2Stream *http2_stream_get_or_create(HTTP2Session *session, uint32_t stream_i
         session->streams_hash[bucket] = st;
         session->active_stream_count++; 
     }
+
+    // --- PASTIKAN BUFFER DINAMIS SELALU SIAP & TER-ALLOCATE ---
+    if (!st->fcgi_gather_buf) {
+        st->fcgi_g_capacity = 65536; // 64KB ukuran awal
+        st->fcgi_gather_buf = malloc(st->fcgi_g_capacity);
+    }
+
+    st->fcgi_g_ptr = 0;
+    st->fcgi_g_sent = 0;
+    st->fcgi_h_ptr = 0;
+    st->fcgi_header_parsed = false;
+    st->fcgi_header_sent = false;
+    st->is_fcgi_active = true;
+    st->state = HTTP2_STATE_OPEN; // Atau status aktif awal stream Anda
+
+    // Tambahkan ini agar memori fisik benar-benar bersih dari sisa request lama!
+    if (st->fcgi_gather_buf && st->fcgi_g_capacity > 0) {
+        memset(st->fcgi_gather_buf, 0, st->fcgi_g_capacity);
+    }
+    memset(st->fcgi_header_buf, 0, sizeof(st->fcgi_header_buf));
+    
     pthread_mutex_unlock(&session->streams_lock);
     return st;
+}
+
+void http2_stream_destroy(HTTP2Stream *st) {
+    if (!st) return;
+
+
+    http2_parser_free_memory(st);
+
+    // 1. Bebaskan gather_buf dinamis FastCGI
+    if (st->fcgi_gather_buf) {
+        free(st->fcgi_gather_buf);
+        st->fcgi_gather_buf = NULL;
+        st->fcgi_g_capacity = 0;
+    }
+
+    // 2. Tutup file descriptor jika ada (misal file statis)
+    if (st->file_fd >= 0) {
+        close(st->file_fd);
+        st->file_fd = -1;
+    }
+
+    // 3. Bersihkan resource FastCGI upstream jika masih terikat
+    if (st->fpm_fd >= 0) {
+        close(st->fpm_fd);
+        st->fpm_fd = -1;
+    }
+
+    // 4. Bebaskan alokasi stream utamanya
+    free(st);
 }
 
 uint32_t http2_stream_get_bucket_fibonacci(uint32_t stream_id) {

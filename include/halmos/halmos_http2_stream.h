@@ -7,6 +7,7 @@
 
 HTTP2Stream* http2_stream_find_unlocked(HTTP2Session *session, uint32_t id);
 HTTP2Stream* http2_stream_find(HTTP2Session *session, uint32_t id);
-HTTP2Stream *http2_stream_get_or_create(HTTP2Session *session, uint32_t stream_id); 
+HTTP2Stream* http2_stream_get_or_create(HTTP2Session *session, uint32_t stream_id); 
+void http2_stream_destroy(HTTP2Stream *st);
 
 #endif // HALMOS_HTTP2_STREAM_H

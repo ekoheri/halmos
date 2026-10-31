@@ -275,7 +275,7 @@ int handle_read_body_state(halmos_conn_t *conn, HTTP1Session *session, int sock_
 // =========================================================================
 // Helper 2 : Routing Bridge
 // =========================================================================
-static int http1_manager_routing_bridge(halmos_conn_t *conn, HTTP1Session *session) {
+int http1_manager_routing_bridge(halmos_conn_t *conn, HTTP1Session *session) {
     int sock_client = conn->fd;
     bool is_tls = (conn->ssl != NULL);
 

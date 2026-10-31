@@ -228,6 +228,13 @@ int fcgi_upstream_acquire(const char *target, int port) {
                     }
 
                     if (is_healthy) {
+                        // --- KURAS SISA SAMPAH / BUFFER DI SOCKET LAMA ---
+                        char drain_buf[4096];
+                        while (true) {
+                            ssize_t n_drain = recv(fcgi_upstream.connections[i].sockfd, drain_buf, sizeof(drain_buf), MSG_DONTWAIT);
+                            if (n_drain <= 0) break; // Berhenti jika sudah habis atau EAGAIN
+                        }
+                        // ------------------------------------------------
                         fcgi_upstream.connections[i].in_use = true;
                         final_sock = fcgi_upstream.connections[i].sockfd;
                         atomic_fetch_add(&fcgi_upstream.active_counts[idx], 1);

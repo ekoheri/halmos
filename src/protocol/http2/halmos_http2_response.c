@@ -277,6 +277,7 @@ void http2_response_send_complex_header(HTTP2Session *session, HTTP2Stream *stre
     free(hpack_buf);
 }
 
+/*
 void http2_response_flush_active_streams(HTTP2Session *session) {
     if (!session) return;
 
@@ -289,18 +290,18 @@ void http2_response_flush_active_streams(HTTP2Session *session) {
         while (curr != NULL) {
             bool has_file = (curr->is_sending_file && curr->file_fd >= 0 && curr->state != HTTP2_STATE_CLOSED);
             
-            /*
-            Program awalnya begini!
-            Satu baris program ini, memicu browser muter-muter ketika 
-            mengakses halaman PHP? Kenapa? Karena walaupun statusnya 
-            sudah HTTP2_STATE_CLOSED, masih dianggap has_fcgi= true.
-            Akhirnya server akan terus mengirim data ke browser, 
-            sampai browsernya muter-muter (alias mblenger!)
-
-            bool has_fcgi = (curr->fcgi_h_ptr > 0 || curr->fcgi_g_ptr > curr->fcgi_g_sent || curr->is_fcgi_active);
             
-            Lalu aku update seperti dibawah, dan browser sudah lancar, walaupin di refresh 100
-            */
+            //Program awalnya begini!
+            //Satu baris program ini, memicu browser muter-muter ketika 
+            //mengakses halaman PHP? Kenapa? Karena walaupun statusnya 
+            //sudah HTTP2_STATE_CLOSED, masih dianggap has_fcgi= true.
+            //Akhirnya server akan terus mengirim data ke browser, 
+            //sampai browsernya muter-muter (alias mblenger!)
+
+            //bool has_fcgi = (curr->fcgi_h_ptr > 0 || curr->fcgi_g_ptr > curr->fcgi_g_sent || curr->is_fcgi_active);
+            
+            //Lalu aku update seperti dibawah, dan browser sudah lancar, walaupin di refresh 100
+            
             bool has_fcgi = (curr->state != HTTP2_STATE_CLOSED && 
                  (curr->fcgi_h_ptr > 0 || curr->fcgi_g_ptr > curr->fcgi_g_sent || curr->is_fcgi_active));
             
@@ -441,6 +442,186 @@ void http2_response_flush_active_streams(HTTP2Session *session) {
         }
         pthread_mutex_unlock(&session->streams_lock);
     }
+}
+*/
+
+void http2_response_flush_active_streams(HTTP2Session *session) {
+    if (!session) return;
+
+    uint32_t active_ids[256];
+    int active_count = 0;
+
+    // --- 1. PINDAI STREAM YANG MASIH AKTIF ---
+    pthread_mutex_lock(&session->streams_lock);
+    for (int i = 0; i < HTTP2_STREAM_BUCKETS; i++) {
+        HTTP2Stream *curr = session->streams_hash[i];
+        while (curr != NULL) {
+            bool has_file = (curr->is_sending_file && curr->file_fd >= 0 && curr->state != HTTP2_STATE_CLOSED);
+            
+            // Pastikan stream yang sudah CLOSED tidak dibaca lagi
+            bool has_fcgi = (curr->state != HTTP2_STATE_CLOSED && 
+                 (curr->fcgi_h_ptr > 0 || curr->fcgi_g_ptr > curr->fcgi_g_sent || curr->is_fcgi_active));
+            
+            if ((has_file || has_fcgi) && active_count < 256) {
+                active_ids[active_count] = curr->stream_id;
+                active_count++;
+            }
+            curr = curr->node_next;
+        }
+    }
+    pthread_mutex_unlock(&session->streams_lock);
+
+    // --- 2. LOOP UTAMA PENGIRIMAN (FLUSH) ---
+    for (int k = 0; k < active_count; k++) {
+        uint32_t target_sid = active_ids[k];
+
+        // --- A. PENANGANAN FASTCGI RESPONSE ---
+        pthread_mutex_lock(&session->streams_lock);
+        HTTP2Stream *st = http2_stream_find_unlocked(session, target_sid);
+        if (st && st->state != HTTP2_STATE_CLOSED) {
+            
+            // Tahap 1: Kirim Header (Flag 0x04 = END_HEADERS)
+            if (st->fcgi_h_ptr > 0 && !st->fcgi_header_sent) {
+                st->fcgi_header_parsed = true;
+                http2_response_send_complex_header(session, st, (char *)st->fcgi_header_buf, 0x04);
+                st->fcgi_header_sent = true;
+            }
+
+            // Tahap 2: Pompa Body Data (Dukungan Buffer Dinamis / Streaming)
+            if (st->fcgi_header_sent && (st->fcgi_g_ptr > st->fcgi_g_sent || !st->is_fcgi_active)) {
+                size_t bytes_to_send = (st->fcgi_g_ptr > st->fcgi_g_sent) ? (st->fcgi_g_ptr - st->fcgi_g_sent) : 0;
+                unsigned char *send_ptr = st->fcgi_gather_buf + st->fcgi_g_sent;
+
+                uint32_t max_allowed = HTTP2_MAX_FRAME_SIZE;
+                if ((int32_t)max_allowed > session->out_window_size) max_allowed = (uint32_t)session->out_window_size;
+                if ((int32_t)max_allowed > st->out_window_size) max_allowed = (uint32_t)st->out_window_size;
+                if (bytes_to_send > max_allowed) bytes_to_send = max_allowed;
+
+                bool is_stream_finished = (!st->is_fcgi_active && (st->fcgi_g_sent + bytes_to_send >= st->fcgi_g_ptr));
+                uint8_t flags = is_stream_finished ? 0x01 : 0x00; // 0x01 = END_STREAM
+
+                if (bytes_to_send > 0 || is_stream_finished) {
+                    http2_frame_send(session->fd, session->is_tls, 0x00, flags, target_sid, send_ptr, (uint32_t)bytes_to_send);
+
+                    if (bytes_to_send > 0) {
+                        session->out_window_size -= (int32_t)bytes_to_send;
+                        st->out_window_size -= (int32_t)bytes_to_send;
+                        st->fcgi_g_sent += bytes_to_send;
+                    }
+
+                    if (is_stream_finished) {
+                        st->state = HTTP2_STATE_CLOSED;
+                        st->is_fcgi_active = false;
+                        if (st->fpm_fd >= 0) {
+                            close(st->fpm_fd);
+                            st->fpm_fd = -1;
+                        }
+                    }
+                }
+            }
+        }
+        pthread_mutex_unlock(&session->streams_lock);
+
+        // --- B. PENANGANAN FILE STATIS ---
+        int file_fd = -1;
+        off_t offset = 0;
+        off_t total_size = 0;
+        int32_t conn_win = 0;
+        int32_t stream_win = 0;
+        bool valid_file = false;
+ 
+        pthread_mutex_lock(&session->streams_lock);
+        st = http2_stream_find_unlocked(session, target_sid);
+        if (st && st->is_sending_file && st->file_fd >= 0 && st->state != HTTP2_STATE_CLOSED) {
+            file_fd = st->file_fd;
+            offset = st->file_offset;
+            total_size = st->file_size;
+            conn_win = session->out_window_size;
+            stream_win = st->out_window_size;
+            valid_file = true;
+        }
+        pthread_mutex_unlock(&session->streams_lock);
+ 
+        if (!valid_file || file_fd < 0 || offset >= total_size) continue;
+        if (conn_win <= 0 || stream_win <= 0) continue;
+ 
+        off_t bytes_remaining = total_size - offset;
+        uint32_t max_allowed_file = HTTP2_MAX_FRAME_SIZE; 
+        if ((int32_t)max_allowed_file > conn_win) max_allowed_file = (uint32_t)conn_win;
+        if ((int32_t)max_allowed_file > stream_win) max_allowed_file = (uint32_t)stream_win;
+        if ((off_t)max_allowed_file > bytes_remaining) max_allowed_file = (uint32_t)bytes_remaining;
+ 
+        if (max_allowed_file == 0) continue;
+ 
+        unsigned char file_buf[HTTP2_MAX_FRAME_SIZE];
+        ssize_t n_read = pread(file_fd, file_buf, max_allowed_file, offset);
+ 
+        if (n_read <= 0) {
+            pthread_mutex_lock(&session->streams_lock);
+            st = http2_stream_find_unlocked(session, target_sid);
+            if (st) {
+                if (st->file_fd >= 0) close(st->file_fd);
+                st->file_fd = -1;
+                st->is_sending_file = false;
+                st->state = HTTP2_STATE_CLOSED;
+            }
+            pthread_mutex_unlock(&session->streams_lock);
+            continue;
+        }
+ 
+        uint8_t file_flags = (offset + n_read >= total_size) ? 0x01 : 0x00;
+        http2_frame_send(session->fd, session->is_tls, 0x00, file_flags, target_sid, file_buf, (uint32_t)n_read);
+ 
+        pthread_mutex_lock(&session->streams_lock);
+        session->out_window_size -= (int32_t)n_read;
+        st = http2_stream_find_unlocked(session, target_sid);
+        if (st) {
+            st->out_window_size -= (int32_t)n_read;
+            st->file_offset += n_read;
+            if (st->file_offset >= st->file_size) {
+                if (st->file_fd >= 0) close(st->file_fd);
+                st->file_fd = -1;
+                st->is_sending_file = false;
+                st->state = HTTP2_STATE_CLOSED;
+            }
+        }
+        pthread_mutex_unlock(&session->streams_lock);
+    }
+
+    // =========================================================================
+    // --- 3. TAHAP PENYAPUAN & PENGHANCURAN STREAM YANG SUDAH CLOSED ---
+    // =========================================================================
+    pthread_mutex_lock(&session->streams_lock);
+    for (int i = 0; i < HTTP2_STREAM_BUCKETS; i++) {
+        HTTP2Stream *curr = session->streams_hash[i];
+        HTTP2Stream *prev = NULL;
+
+        while (curr != NULL) {
+            if (curr->state == HTTP2_STATE_CLOSED) {
+                HTTP2Stream *to_free = curr;
+
+                // Unlink dari hash table bucket
+                if (prev == NULL) {
+                    session->streams_hash[i] = curr->node_next;
+                } else {
+                    prev->node_next = curr->node_next;
+                }
+                curr = curr->node_next;
+
+                // Kurangi counter aktif stream
+                if (session->active_stream_count > 0) {
+                    session->active_stream_count--;
+                }
+
+                // Bebaskan seluruh memori stream termasuk fcgi_gather_buf
+                http2_stream_destroy(to_free);
+            } else {
+                prev = curr;
+                curr = curr->node_next;
+            }
+        }
+    }
+    pthread_mutex_unlock(&session->streams_lock);
 }
 
 bool http2_response_has_active_streams(HTTP2Session *session) {
