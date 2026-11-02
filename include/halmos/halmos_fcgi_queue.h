@@ -15,10 +15,10 @@ typedef enum {
 
 // --- 2. STRUKTUR SIMPUL TASK ---
 typedef struct FCGI_Task {
-    FCGI_TaskType type;         // Jenis tugas yang harus dikerjakan worker
-    FCGI_Session *session; // Pointer ke sesi FSM terkait
-    struct timeval arrival_time;// Waktu tugas masuk antrean (untuk metrik/wait time)
-    struct FCGI_Task *next;      // Pointer ke task berikutnya dalam linked list
+    FCGI_TaskType type;             // Jenis tugas yang harus dikerjakan worker
+    FCGI_Session *session;          // Pointer ke sesi FSM terkait
+    struct timeval arrival_time;    // Waktu tugas masuk antrean (untuk metrik/wait time)
+    struct FCGI_Task *next;         // Pointer ke task berikutnya dalam linked list
 } FCGI_Task;
 
 // --- 3. STRUKTUR TASK QUEUE (ADAPTIVE & THREAD-SAFE) ---

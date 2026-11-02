@@ -94,6 +94,7 @@ bool fcgi_event_loop_mod(int fpm_fd, uint32_t events) {
     }
     return true;
 }
+
 bool fcgi_event_loop_del(int fpm_fd) {
     if (fpm_fd < 0) return false;
     

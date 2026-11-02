@@ -10,7 +10,7 @@ URL_APACHE="https://127.0.0.1/halmos-example/test_dhe.php?mode=lib"
 URL_NGINX="https://127.0.0.1:8443/halmos-example/test_dhe.php?mode=lib"
 URL_HALMOS="https://127.0.0.1:8080/halmos-example/test_dhe.php?mode=lib"
 
-OUTPUT_FILE="TEST_PHP_DHE_$(date +%Y%m%d_%H%M).txt"
+OUTPUT_FILE="TEST_PHP_$(date +%Y%m%d_%H%M).txt"
 
 # --- Kernel Defense Optimization ---
 echo "Reinforcing Kernel Gates (Somaxconn & Ulimit)..."
@@ -25,6 +25,8 @@ echo "Restarting web servers to apply new File Descriptor limits..."
 sudo systemctl restart apache2
 sudo systemctl restart nginx
 sudo systemctl restart halmos
+sudo systemctl restart php8.2-fpm
+
 sleep 2
 
 echo "=================================================" > $OUTPUT_FILE

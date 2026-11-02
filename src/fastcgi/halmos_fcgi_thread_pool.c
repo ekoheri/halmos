@@ -28,37 +28,37 @@ bool fcgi_thread_pool_start(void) {
     fcgi_worker_pool.max_workers = max_workers;
     fcgi_worker_pool.running = true;
 
-    fprintf(stderr, "[FCGI_POOL_DEBUG] Starting FastCGI thread pool: min_workers=%d, max_workers=%d\n", min_workers, max_workers);
+    //fprintf(stderr, "[FCGI_POOL_DEBUG] Starting FastCGI thread pool: min_workers=%d, max_workers=%d\n", min_workers, max_workers);
 
     for (int i = 0; i < min_workers; i++) {
         pthread_t tid;
         if (fcgi_thread_pool_spawn_detached(&tid, fcgi_thread_pool_worker, &global_fcgi_queue) != 0) {
-            fprintf(stderr, "[FCGI_POOL_DEBUG] ERROR: Failed to spawn worker thread #%d\n", i);
+            //fprintf(stderr, "[FCGI_POOL_DEBUG] ERROR: Failed to spawn worker thread #%d\n", i);
             fcgi_worker_pool.running = false;
             fcgi_queue_stop();
             return false;
         }
     }
 
-    fprintf(stderr, "[FCGI_POOL_DEBUG] FastCGI thread pool successfully started.\n");
+    //fprintf(stderr, "[FCGI_POOL_DEBUG] FastCGI thread pool successfully started.\n");
     return true;
 }
 
 void fcgi_thread_pool_stop(void) {
-    fprintf(stderr, "[FCGI_POOL_DEBUG] Stopping FastCGI thread pool...\n");
+    //fprintf(stderr, "[FCGI_POOL_DEBUG] Stopping FastCGI thread pool...\n");
     fcgi_worker_pool.running = false;
 }
 
 void* fcgi_thread_pool_worker(void *arg) {
     (void)arg;
-    fprintf(stderr, "[FCGI_WORKER_DEBUG] Worker thread spawned and entering loop (tid=%lu)\n", (unsigned long)pthread_self());
+    //fprintf(stderr, "[FCGI_WORKER_DEBUG] Worker thread spawned and entering loop (tid=%lu)\n", (unsigned long)pthread_self());
 
     while (fcgi_worker_pool.running) {
         struct timeval arrival;
         FCGI_Task *task = fcgi_queue_pop(&arrival);
         
         if (!task) {
-            fprintf(stderr, "[FCGI_WORKER_DEBUG] Worker thread received NULL task, exiting loop (tid=%lu)\n", (unsigned long)pthread_self());
+            //fprintf(stderr, "[FCGI_WORKER_DEBUG] Worker thread received NULL task, exiting loop (tid=%lu)\n", (unsigned long)pthread_self());
             break; 
         }
 
@@ -149,7 +149,7 @@ void* fcgi_thread_pool_worker(void *arg) {
         fcgi_session_release(session);
     }
 
-    fprintf(stderr, "[FCGI_WORKER_DEBUG] Worker thread routine terminated (tid=%lu)\n", (unsigned long)pthread_self());
+    //fprintf(stderr, "[FCGI_WORKER_DEBUG] Worker thread routine terminated (tid=%lu)\n", (unsigned long)pthread_self());
     return NULL;
 }   
 

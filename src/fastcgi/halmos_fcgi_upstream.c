@@ -144,8 +144,8 @@ bool fcgi_upstream_start(void) {
     fcgi_upstream.current_idle_count = fcgi_upstream.slots;
 
     // Debug verifikasi singkat
-    fprintf(stderr, "[UPSTREAM_INIT] Loaded quotas from adaptive_init -> PHP: %d, Rust: %d, Python: %d, Total Slots: %d\n",
-            fcgi_upstream.php_quota, fcgi_upstream.rust_quota, fcgi_upstream.python_quota, fcgi_upstream.slots);
+    //fprintf(stderr, "[UPSTREAM_INIT] Loaded quotas from adaptive_init -> PHP: %d, Rust: %d, Python: %d, Total Slots: %d\n",
+    //        fcgi_upstream.php_quota, fcgi_upstream.rust_quota, fcgi_upstream.python_quota, fcgi_upstream.slots);
 
     pthread_mutex_init(&fcgi_upstream.lock, NULL);
     for (int i = 0; i < fcgi_upstream.slots; i++) {
