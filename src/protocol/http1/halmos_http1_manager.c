@@ -115,9 +115,12 @@ void http1_session_destroy(void *session) {
     if (s->file_fd >= 0) close(s->file_fd);
 
     // Bersihkan sesi FCGI jika masih aktif
-    if (s->fcgi_sess) {
-        fcgi_session_release(s->fcgi_sess);
-        s->fcgi_sess = NULL;
+    if (s->fcgi_session_id >= 0) {
+        FCGI_Session *fs = fcgi_session_slot_get(s->fcgi_session_id);
+        if (fs) {
+            fcgi_session_release(fs);
+        }
+        s->fcgi_session_id = -1;
     }
 
     if (s->fcgi_write_buf) {
@@ -339,7 +342,7 @@ int http1_manager_routing_bridge(halmos_conn_t *conn, HTTP1Session *session) {
         //fprintf(stderr, "[ROUTING_DEBUG] FastCGI header/params sent: %zd of %d bytes to fpm_fd=%d\n", 
         //        total_sent, g_ptr, fcgi_sess->fpm_fd);
 
-        session->fcgi_sess = fcgi_sess; 
+        session->fcgi_session_id = fcgi_sess->session_id;
         
         if (!fcgi_event_loop_add(fcgi_sess->fpm_fd, fcgi_sess, EPOLLIN)) {
             //fprintf(stderr, "[ROUTING_DEBUG] ERROR: fcgi_event_loop_add failed for fpm_fd=%d\n", fcgi_sess->fpm_fd);
@@ -384,29 +387,24 @@ int http1_manager_routing_bridge(halmos_conn_t *conn, HTTP1Session *session) {
 }
 
 // =========================================================================
-// Helper 3: Menangani State Pemrosesan & Pengiriman FastCGI
+// Helper 3: Menangani State Pemrosesan & Pengiriman FastCGI (Kembali ke Stabil)
 // =========================================================================
 int handle_fcgi_processing_state(halmos_conn_t *conn, HTTP1Session *session, int sock_client, bool is_tls) {
-    //fprintf(stderr, "[HTTP1_FCGI_DEBUG] ENTER STATE_FCGI_PROCESSING | session=%p, fcgi_sess=%p\n", (void*)session, (void*)session->fcgi_sess);
+    FCGI_Session *fs = fcgi_session_slot_get(session->fcgi_session_id);
 
-    // Jika buffer tulis belum ada, artinya kita baru selesai menyedot dari FSM dan perlu menyiapkan payload
     if (session->fcgi_write_buf == NULL) {
-        FCGI_Session *fs = session->fcgi_sess;
-        if (fs != NULL && fs->is_fcgi_active) {
-            //fprintf(stderr, "[HTTP1_FCGI_DEBUG] FCGI upstream task still active. Returning 2 (EPOLLIN)\n");
+        if (fs != NULL && fs->state != FCGI_STATE_FINISHED && fs->state != FCGI_STATE_ERROR && fs->is_fcgi_active) {
             return 2;
         }
 
-        if (fs == NULL) {
-            //fprintf(stderr, "[HTTP1_FCGI_DEBUG] WARNING: fs is NULL while preparing write payload!\n");
+        if (fs == NULL || fs->state == FCGI_SESSION_FREE) {
+            session->fcgi_session_id = -1;
             return 0;
         }
 
-        //fprintf(stderr, "[HTTP1_FCGI_DEBUG] FCGI upstream complete. fcgi_h_ptr=%zu, fcgi_g_ptr=%zu\n", fs->fcgi_h_ptr, fs->fcgi_g_ptr);
-
         size_t h_len = fs->fcgi_h_ptr;
-        size_t g_len = fs->fcgi_g_ptr;
-        size_t total_body_len = h_len + g_len;
+        size_t body_len = fs->rx_buffer.size; 
+        size_t total_body_len = h_len + body_len;
 
         char status_ok[256];
         int status_len = snprintf(status_ok, sizeof(status_ok),
@@ -419,33 +417,30 @@ int handle_fcgi_processing_state(halmos_conn_t *conn, HTTP1Session *session, int
         session->fcgi_write_len = status_len + total_body_len;
         session->fcgi_write_buf = malloc(session->fcgi_write_len);
         if (!session->fcgi_write_buf) {
-            //fprintf(stderr, "[HTTP1_FCGI_DEBUG] ERROR: Failed to allocate fcgi_write_buf!\n");
             fcgi_session_release(fs);
-            session->fcgi_sess = NULL;
+            session->fcgi_session_id = -1;
             return 0;
         }
         
         size_t offset = 0;
         memcpy(session->fcgi_write_buf + offset, status_ok, status_len);
         offset += status_len;
+
         if (h_len > 0) {
             memcpy(session->fcgi_write_buf + offset, fs->fcgi_header_buf, h_len);
             offset += h_len;
         }
-        if (g_len > 0) {
-            memcpy(session->fcgi_write_buf + offset, fs->fcgi_gather_buf, g_len);
+
+        if (body_len > 0) {
+            size_t read_from_ring = fcgi_ring_read(&fs->rx_buffer, (char *)(session->fcgi_write_buf + offset), body_len);
+            offset += read_from_ring;
         }
 
         session->fcgi_write_offset = 0;
-        //fprintf(stderr, "[HTTP1_FCGI_DEBUG] Prepared write payload: total_len=%zu (Content-Length: %zu)\n", 
-        //        session->fcgi_write_len, total_body_len);
-
-        // SEKARANG AMAN UNTUK MERILIS SESI FASTCGI KARENA DATA SUDAH SALIN KE fcgi_write_buf
         fcgi_session_release(fs);
-        session->fcgi_sess = NULL;
+        session->fcgi_session_id = -1;
     }
 
-    // --- LANJUTKAN PROSES PENULISAN (SUPPORT PARTIAL WRITE / EPOLLOUT) ---
     size_t remaining = session->fcgi_write_len - session->fcgi_write_offset;
     ssize_t written = 0;
 
@@ -455,31 +450,23 @@ int handle_fcgi_processing_state(halmos_conn_t *conn, HTTP1Session *session, int
         written = send(sock_client, session->fcgi_write_buf + session->fcgi_write_offset, remaining, MSG_NOSIGNAL);
     }
 
-    //fprintf(stderr, "[HTTP1_FCGI_DEBUG] Write attempt: remaining=%zu, written=%zd, errno=%d\n", remaining, written, errno);
-
     if (written > 0) {
         session->fcgi_write_offset += written;
         if (session->fcgi_write_offset < session->fcgi_write_len) {
-            //fprintf(stderr, "[HTTP1_FCGI_DEBUG] Partial write detected (%zu/%zu sent). Returning 3 (EPOLLOUT)\n", 
-            //        session->fcgi_write_offset, session->fcgi_write_len);
-            return 3; // Lanjut pantau via EPOLLOUT
+            return 3; 
         }
     } else {
         int err = is_tls ? SSL_get_error(conn->ssl, (int)written) : errno;
         if (err == EAGAIN || err == EWOULDBLOCK || err == SSL_ERROR_WANT_WRITE || err == SSL_ERROR_WANT_READ) {
-            //fprintf(stderr, "[HTTP1_FCGI_DEBUG] Client socket blocked (EAGAIN/WANT_WRITE). Returning 3 (EPOLLOUT)\n");
             return 3;
         }
-        //fprintf(stderr, "[HTTP1_FCGI_DEBUG] Fatal client write error: err=%d. Closing session.\n", err);
         free(session->fcgi_write_buf);
         session->fcgi_write_buf = NULL;
         return 0;
     }
 
-    // Jika sampai di sini, artinya pengiriman 100% tuntas!
     free(session->fcgi_write_buf);
     session->fcgi_write_buf = NULL;
-    //fprintf(stderr, "[HTTP1_FCGI_DEBUG] FastCGI response completely sent to client!\n");
 
     bool keep_alive = session->req.is_keep_alive;
     http1_parser_free_memory(&session->req);

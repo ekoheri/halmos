@@ -1,6 +1,7 @@
 #include "halmos_http2_stream.h"
 #include "halmos_http2_core.h"
 #include "halmos_http2_parser.h"
+#include "halmos_fcgi_upstream.h"
 #include "halmos_log.h"
 
 #include <stdint.h>
@@ -112,29 +113,29 @@ HTTP2Stream* http2_stream_get_or_create(HTTP2Session *session, uint32_t stream_i
 void http2_stream_destroy(HTTP2Stream *st) {
     if (!st) return;
 
-
     http2_parser_free_memory(st);
 
-    // 1. Bebaskan gather_buf dinamis FastCGI
+    // 1. Bebaskan gather_buf dinamis FastCGI per-stream
     if (st->fcgi_gather_buf) {
         free(st->fcgi_gather_buf);
         st->fcgi_gather_buf = NULL;
         st->fcgi_g_capacity = 0;
     }
 
-    // 2. Tutup file descriptor jika ada (misal file statis)
+    // 2. Tutup file descriptor file statis jika masih terbuka
     if (st->file_fd >= 0) {
         close(st->file_fd);
         st->file_fd = -1;
     }
 
-    // 3. Bersihkan resource FastCGI upstream jika masih terikat
-    if (st->fpm_fd >= 0) {
-        close(st->fpm_fd);
-        st->fpm_fd = -1;
+    // 3. Kembalikan koneksi FastCGI upstream ke manager (menggunakan fcgi_upstream_release)
+    //    agar slot koneksi PHP-FPM tidak bocor/habis saat benchmark beban tinggi.
+    if (st->fpm_fd >= 0 && st->fpm_fd != -99) {
+        fcgi_upstream_release(st->fpm_fd);
+        st->fpm_fd = -99;
     }
 
-    // 4. Bebaskan alokasi stream utamanya
+    // 4. Bebaskan alokasi struct stream utamanya
     free(st);
 }
 

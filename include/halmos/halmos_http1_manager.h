@@ -41,7 +41,9 @@ typedef struct {
     int fcgi_sock;
 
     // Pointer ke struktur sesi FSM Async FastCGI yang baru
-    FCGI_Session *fcgi_sess;
+    //FCGI_Session *fcgi_sess;
+    int fcgi_session_id;
+
 
     char *fcgi_write_buf;      // Buffer gabungan (status + header + body FPM)
     size_t fcgi_write_len;     // Total panjang data

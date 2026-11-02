@@ -53,28 +53,32 @@ void* fcgi_thread_pool_worker(void *arg) {
     (void)arg;
     //fprintf(stderr, "[FCGI_WORKER_DEBUG] Worker thread spawned and entering loop (tid=%lu)\n", (unsigned long)pthread_self());
 
-    while (fcgi_worker_pool.running) {
+    while (global_fcgi_queue.is_running) { // Sesuaikan dengan flag is_running di struct queue Anda
         struct timeval arrival;
         FCGI_Task *task = fcgi_queue_pop(&arrival);
         
         if (!task) {
-            //fprintf(stderr, "[FCGI_WORKER_DEBUG] Worker thread received NULL task, exiting loop (tid=%lu)\n", (unsigned long)pthread_self());
             break; 
         }
 
-        FCGI_Session *session = task->session;
+        // --- 1. AMBIL SESSION DARI GLOBAL POOL MENGGUNAKAN session_id ---
+        int session_id = task->session_id;
         FCGI_TaskType task_type = task->type;
         
+        // Bebaskan task wrapper (karena task sudah diambil dari antrean)
         free(task); 
 
+        // Dapatkan pointer sesi asli dari Global Pool
+        FCGI_Session *session = fcgi_session_slot_get(session_id);
         if (!session) {
-            continue;
+            continue; // Sesi sudah invalid atau sudah ter-recycle
         }
 
+        // --- 2. CEK STATUS FPM_FD ---
         pthread_mutex_lock(&session->lock);
-        if (session->fpm_fd == -99) {
+        if (session->fpm_fd == -99 || session->fpm_fd == -1) {
             pthread_mutex_unlock(&session->lock);
-            // Lepaskan kepemilikan task worker dari session
+            // Lepaskan referensi yang dipegang oleh task antrean
             fcgi_session_release(session);
             continue;
         }
@@ -83,9 +87,9 @@ void* fcgi_thread_pool_worker(void *arg) {
         bool is_h2 = session->is_http2;
         pthread_mutex_unlock(&session->lock);
 
+        // --- 3. VALIDASI KONEKSI KLIEN ---
         halmos_conn_t *conn = core_conn_t_get(sock_c);
         if (!conn) {
-            // Ganti session_destroy dengan session_release
             fcgi_session_release(session);
             continue;
         }
@@ -93,7 +97,7 @@ void* fcgi_thread_pool_worker(void *arg) {
         core_conn_t_lock(conn);
 
         pthread_mutex_lock(&session->lock);
-        if (session->fpm_fd == -99) {
+        if (session->fpm_fd == -99 || session->fpm_fd == -1) {
             pthread_mutex_unlock(&session->lock);
             core_conn_t_unlock(conn);
             fcgi_session_release(session);
@@ -101,6 +105,7 @@ void* fcgi_thread_pool_worker(void *arg) {
         }
         pthread_mutex_unlock(&session->lock);
 
+        // --- 4. EKSEKUSI FSM (HTTP/1 atau HTTP/2) ---
         if (task_type == FCGI_TASK_PROCESS_READ) {
             bool active = false;
 
@@ -112,12 +117,10 @@ void* fcgi_thread_pool_worker(void *arg) {
 
             if (!active) {
                 pthread_mutex_lock(&session->lock);
-                
                 int target_fd = session->fpm_fd;
                 if (target_fd != -99 && target_fd != -1) {
                     fcgi_event_loop_del(target_fd);
                 }
-
                 pthread_mutex_unlock(&session->lock);
                 
                 if (is_h2) {
@@ -143,15 +146,15 @@ void* fcgi_thread_pool_worker(void *arg) {
 
         core_conn_t_unlock(conn);
 
-        // --- PENTING: Lepaskan referensi yang dipegang oleh worker task ini ---
-        // Akan berdapak [UPSTREAM_FATAL] fcgi_upstream_acquire FAILED! Target IP: 127.0.0.1, Port: 9000 (Pool Exhausted!)
-        // Ketika diuji wrk
+        // --- 5. LEPASKAN REFERENSI TASK WORKER ---
+        // Ini mengurangi ref_count. Jika mencapai 0, slot otomatis dikembalikan 
+        // ke Global Pool (siap dipakai request berikutnya tanpa free()).
         fcgi_session_release(session);
     }
 
     //fprintf(stderr, "[FCGI_WORKER_DEBUG] Worker thread routine terminated (tid=%lu)\n", (unsigned long)pthread_self());
     return NULL;
-}   
+} 
 
 bool fcgi_thread_pool_is_running(void) {
     return fcgi_worker_pool.running;

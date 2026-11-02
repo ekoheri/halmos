@@ -319,7 +319,7 @@ void http2_response_flush_active_streams(HTTP2Session *session) {
                 st->fcgi_header_sent = true;
             }
 
-            // Tahap 2: Pompa Body Data (Dukungan Buffer Dinamis / Streaming)
+            // Tahap 2: Pompa Body Data (Streaming per-stream buffer)
             if (st->fcgi_header_sent && (st->fcgi_g_ptr > st->fcgi_g_sent || !st->is_fcgi_active)) {
                 size_t bytes_to_send = (st->fcgi_g_ptr > st->fcgi_g_sent) ? (st->fcgi_g_ptr - st->fcgi_g_sent) : 0;
                 unsigned char *send_ptr = st->fcgi_gather_buf + st->fcgi_g_sent;
@@ -432,7 +432,6 @@ void http2_response_flush_active_streams(HTTP2Session *session) {
             if (curr->state == HTTP2_STATE_CLOSED) {
                 HTTP2Stream *to_free = curr;
 
-                // Unlink dari hash table bucket
                 if (prev == NULL) {
                     session->streams_hash[i] = curr->node_next;
                 } else {
@@ -440,12 +439,10 @@ void http2_response_flush_active_streams(HTTP2Session *session) {
                 }
                 curr = curr->node_next;
 
-                // Kurangi counter aktif stream
                 if (session->active_stream_count > 0) {
                     session->active_stream_count--;
                 }
 
-                // Bebaskan seluruh memori stream termasuk fcgi_gather_buf
                 http2_stream_destroy(to_free);
             } else {
                 prev = curr;
@@ -466,9 +463,7 @@ bool http2_response_has_active_streams(HTTP2Session *session) {
         while (curr != NULL) {
             bool has_file = (curr->is_sending_file && curr->file_fd >= 0 && curr->state != HTTP2_STATE_CLOSED);
             
-            // bool has_fcgi = curr->is_fcgi_active;
-            // Ini kasusnya sama dengan yang aku tulis di funsgi atas itu!
-            // harus ditambahi curr->state != HTTP2_STATE_CLOSED
+            // Pengecekan aman: pastikan state tidak CLOSED
             bool has_fcgi = (curr->state != HTTP2_STATE_CLOSED && curr->is_fcgi_active);
 
             if (has_file || has_fcgi) {

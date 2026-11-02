@@ -96,6 +96,30 @@ void setup_signals(void) {
     sigaction(SIGINT, &sa, NULL);
 }
 
+// Fungsi untuk mencetak penggunaan RAM aktual saat startup
+void log_startup_memory_usage(void) {
+    FILE *fp = fopen("/proc/self/status", "r");
+    if (!fp) return;
+
+    char line[128];
+    long vmrss_kb = 0;
+
+    while (fgets(line, sizeof(line), fp)) {
+        if (strncmp(line, "VmRSS:", 6) == 0) {
+            vmrss_kb = atol(line + 6); // Ambil nilai RSS dalam Kilobytes
+            break;
+        }
+    }
+    fclose(fp);
+
+    if (vmrss_kb > 0) {
+        double vmrss_mb = (double)vmrss_kb / 1024.0;
+        printf("[HALMOS-INFO] Initial Memory Footprint (VmRSS): %.2f MB\n", vmrss_mb);
+        // Atau gunakan fungsi log internal Anda:
+        // write_log_info("[HALMOS-INFO] Initial Memory Footprint (VmRSS): %.2f MB", vmrss_mb);
+    }
+}
+
 int main(int argc, char *argv[]) {
     // 0. Tangani Argumen CLI (Version, Help, Test Config)
     if (argc > 1) {
@@ -254,6 +278,15 @@ int main(int argc, char *argv[]) {
         exit(EXIT_FAILURE);
     }
 
+    // === TAMBAHKAN INI: Inisialisasi Global Session Pool FastCGI ===
+    // (Misal: alokasi 1024 slot sesi pre-allocated, atau sesuaikan dengan g_fcgi_upstream_slots / max konkurensi)
+    if (!fcgi_global_pool_init(1024)) {
+        fprintf(stderr, "[FATAL] Failed to initialize FastCGI Global Session Pool!\n");
+        exit(EXIT_FAILURE);
+    }
+    write_log("[CORE] FastCGI Global Session Pool initialized.");
+    // ==============================================================
+
     // 1. Inisialisasi antrean terlebih dahulu
     if (!fcgi_queue_start()) {
         fprintf(stderr, "Failed to initialize FCGI task queue!\n");
@@ -292,6 +325,8 @@ int main(int argc, char *argv[]) {
     printf("  Root    : %s\n", config.document_root);
     printf("==================================================\n");
     */
+
+    log_startup_memory_usage();
    
     // 6. RUN! Resepsionis Epoll Utama
     core_event_loop_run();
@@ -301,6 +336,11 @@ int main(int argc, char *argv[]) {
     // =======================================================
     
     write_log("[CORE] Shutdown signal caught. Cleaning up resources...");
+    
+    // === TAMBAHKAN INI: Hancurkan Global Session Pool di awal shutdown ===
+    fcgi_global_pool_destroy();
+    write_log("[CORE] FastCGI Global Session Pool destroyed.");
+    // ====================================================================
     
     fcgi_queue_stop();
     write_log("[CORE] FastCGI Queue cleaned up.");

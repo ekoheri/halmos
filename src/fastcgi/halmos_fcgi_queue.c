@@ -13,15 +13,11 @@ FCGI_TaskQueue global_fcgi_queue;
 extern void* fcgi_thread_pool_worker(void *arg);
 extern int fcgi_thread_pool_spawn_detached(pthread_t *out_tid, void *(*routine)(void *), void *arg);
 
-// Timeout adaptif yang lebih aman (tidak terlalu ekstrem turun ke 0)
 static int halmos_fcgi_get_adaptive_timeout(FCGI_TaskQueue *q) {
-    // Karena fungsi ini dipanggil saat q->head == NULL (antrean kosong), 
-    // kita bisa memberikan timeout idle standar yang sehat (misal 30 detik) 
-    // atau mendasarkannya pada total_workers vs min_threads.
     if (q->total_workers > q->min_threads_limit) {
-        return 10; // Worker ekstra lebih cepat turun jika idle
+        return 10; 
     }
-    return 60;     // Worker minimal bertahan lebih lama
+    return 60;     
 }
 
 bool fcgi_queue_start(void) {
@@ -36,19 +32,9 @@ bool fcgi_queue_start(void) {
     q->scaling_in_progress = 0;
     q->is_running = 1;
 
-    // PERUBAHAN: Berikan error code jika gagal inisialisasi primitif sinkronisasi
-    if (pthread_mutex_init(&q->lock, NULL) != 0) {
-        write_log_error_code(ERR_FCGI_QUEUE_INIT);
-        return false;
-    }
-    if (pthread_cond_init(&q->not_empty, NULL) != 0) {
-        write_log_error_code(ERR_FCGI_QUEUE_INIT);
-        return false;
-    }
-    if (pthread_cond_init(&q->exit_cond, NULL) != 0) {
-        write_log_error_code(ERR_FCGI_QUEUE_INIT);
-        return false;
-    }
+    if (pthread_mutex_init(&q->lock, NULL) != 0) return false;
+    if (pthread_cond_init(&q->not_empty, NULL) != 0) return false;
+    if (pthread_cond_init(&q->exit_cond, NULL) != 0) return false;
 
     return true;
 }
@@ -74,9 +60,10 @@ void fcgi_queue_stop(void) {
         FCGI_Task *tmp = curr;
         curr = curr->next;
         
-        if (tmp->session) {
-           fcgi_session_release(tmp->session);
-            tmp->session = NULL;
+        // Lepaskan referensi slot sesi di global pool jika task dibuang saat shutdown
+        FCGI_Session *session = fcgi_session_slot_get(tmp->session_id);
+        if (session) {
+            fcgi_session_release(session);
         }
         
         free(tmp);
@@ -87,29 +74,33 @@ void fcgi_queue_stop(void) {
     pthread_cond_destroy(&q->exit_cond);
 }
 
-bool fcgi_queue_push(FCGI_Session *session, FCGI_TaskType type) {
+bool fcgi_queue_push(int session_id, FCGI_TaskType type) {
     FCGI_TaskQueue *q = &global_fcgi_queue;
     pthread_mutex_lock(&q->lock);
 
     if (!q->is_running || q->size >= q->max_queue_limit) {
-        write_log_warn_code(WARN_FCGI_QUEUE_FULL, q->size, q->max_queue_limit);
         pthread_mutex_unlock(&q->lock);
         return false;
     }
 
     FCGI_Task *new_task = malloc(sizeof(FCGI_Task));
     if (!new_task) {
-        write_log_error_code(ERR_FCGI_QUEUE_MEM);
         pthread_mutex_unlock(&q->lock);
         return false;
     }
 
-    // --- TAMBAHAN UNTUK ATOMIC REFERENCE COUNTING ---
-    fcgi_session_acquire(session); // Naikkan ref_count karena session masuk ke antrean worker
-    // ------------------------------------------------
+    // --- AMBIL SESSION DARI GLOBAL POOL & NAIKKAN REF_COUNT ---
+    FCGI_Session *session = fcgi_session_slot_get(session_id);
+    if (!session) {
+        free(new_task);
+        pthread_mutex_unlock(&q->lock);
+        return false;
+    }
+    fcgi_session_acquire(session); 
+    // -----------------------------------------------------------
     
     new_task->type = type;
-    new_task->session = session;
+    new_task->session_id = session_id; // Cukup simpan ID integer!
     gettimeofday(&new_task->arrival_time, NULL);
     new_task->next = NULL;
 
@@ -121,9 +112,7 @@ bool fcgi_queue_push(FCGI_Session *session, FCGI_TaskType type) {
     }
     q->size++;
 
-    // LOGIKA UPSCALE AMAN (Batasi step penambahan 1 thread per push untuk hindari race condition pthread_create)
     int should_spawn = 0;
-    // Ubah ambang batas agar lebih responsif: upscale jika antrean melewati jumlah total worker aktif saat ini
     int queue_threshold = q->total_workers * 2; 
     if (queue_threshold < 4) queue_threshold = 4;
 
@@ -139,12 +128,11 @@ bool fcgi_queue_push(FCGI_Session *session, FCGI_TaskType type) {
     pthread_cond_signal(&q->not_empty);
     pthread_mutex_unlock(&q->lock);
 
-    // Spawn di luar lock mutex queue
     if (should_spawn) {
         pthread_t tid;
         if (fcgi_thread_pool_spawn_detached(&tid, fcgi_thread_pool_worker, q) != 0) {
             pthread_mutex_lock(&q->lock);
-            q->total_workers--; // Kembalikan jika gagal
+            q->total_workers--; 
             pthread_mutex_unlock(&q->lock);
         }
 
@@ -174,8 +162,8 @@ FCGI_Task* fcgi_queue_pop(struct timeval *arrival) {
         gettimeofday(&now, NULL);
         int current_timeout = halmos_fcgi_get_adaptive_timeout(q);
 
-        ts.tv_sec = now.tv_sec + current_timeout;
-        ts.tv_nsec = now.tv_usec * 1000;
+    ts.tv_sec = now.tv_sec + current_timeout;
+    ts.tv_nsec = (long)(now.tv_usec * 1000);
         if (ts.tv_nsec >= 1000000000) {
             ts.tv_sec++;
             ts.tv_nsec -= 1000000000;
@@ -190,12 +178,11 @@ FCGI_Task* fcgi_queue_pop(struct timeval *arrival) {
             return NULL;
         }
 
-        // DOWNSCALE AMAN (Hanya jika worker di atas min dan benar-benar timeout idle)
         if (rc == ETIMEDOUT && q->head == NULL && q->total_workers > q->min_threads_limit) {
             q->total_workers--;
             pthread_cond_signal(&q->exit_cond);
             pthread_mutex_unlock(&q->lock);
-            return NULL; // Keluar thread mandiri secara aman
+            return NULL; 
         }
     }
 

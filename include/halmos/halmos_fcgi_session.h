@@ -10,9 +10,14 @@
 #include <openssl/ssl.h>
 #include <stdatomic.h>
 
+// Ukuran Ring Buffer statis per sesi (menggantikan malloc dinamis yang boros RAM)
+#define FCGI_RING_BUFFER_SIZE 4096  // 8192 //16384  // 16KB per buffer (cukup untuk chunking / streaming)
+#define MAX_FCGI_SESSIONS     128   //256  //1024   // Kapasitas maksimum global pool sesi konkuren
+
 // Definisi state FSM untuk Async FastCGI
 typedef enum {
-    FCGI_STATE_INIT = 0,
+    FCGI_SESSION_FREE = 0,      // Slot kosong di dalam global pool
+    FCGI_STATE_INIT,
     FCGI_STATE_CONNECTING,
     FCGI_STATE_SENDING_REQ,
     FCGI_STATE_WAITING_RESPONSE,
@@ -21,7 +26,17 @@ typedef enum {
     FCGI_STATE_ERROR
 } FCGI_AsyncState;
 
+// Struktur Ring Buffer Statis
 typedef struct {
+    char data[FCGI_RING_BUFFER_SIZE];
+    size_t head;
+    size_t tail;
+    size_t size;
+} FCGIRingBuffer;
+
+// Struct Sesi FastCGI yang sepenuhnya statis (Pre-allocated di Global Pool)
+typedef struct FCGI_Session {
+    int session_id;             // Indeks unik sesi di dalam Global Pool (0 hingga MAX_FCGI_SESSIONS - 1)
     int sock_client;            // Socket klien (untuk HTTP/1) atau socket HTTP2Session fd
     int fpm_fd;                 // Socket upstream PHP-FPM
     bool is_tls;                // Apakah koneksi klien menggunakan TLS
@@ -37,15 +52,12 @@ typedef struct {
     // Field Buffer & State FSM untuk HTTP/1
     bool is_fcgi_active;
     bool fcgi_header_parsed;
-    unsigned char fcgi_header_buf[FCGI_HEADER_BUF_SIZE];
+    unsigned char fcgi_header_buf[512]; // Dibatasi ukuran fix yang aman untuk header fastcgi
     size_t fcgi_h_ptr;
-    //unsigned char fcgi_gather_buf[GATHER_BUF_SIZE];
-    //size_t fcgi_g_ptr;
 
-    // --- PENYESUAIAN UNTUK LARGE DATA / STREAMING DINAMIS ---
-    unsigned char *fcgi_gather_buf;  // Diubah dari array statis menjadi pointer dinamis (malloc/realloc)
-    size_t fcgi_g_ptr;               // Posisi pointer data saat ini
-    size_t fcgi_g_capacity;          // Kapasitas maksimum gather_buf saat ini (menggantikan GATHER_BUF_SIZE kaku)
+    // --- PENGGANTI MALLOC DINAMIS (RING BUFFER STATIS) ---
+    FCGIRingBuffer rx_buffer;   // Buffer terima data dari PHP-FPM (menggantikan malloc gather_buf)
+    FCGIRingBuffer tx_buffer;   // Buffer kirim data ke klien
     // ---------------------------------------------------------
 
     void *h2_session; // Menyimpan pointer HTTP2Session
@@ -66,10 +78,21 @@ typedef struct {
     pthread_mutex_t lock;       // Mutex pengaman thread-safe lokal sesi
 } FCGI_Session;
 
-// Prototip fungsi manajemen sesi
+// Prototip fungsi manajemen Global Session Pool
+bool fcgi_global_pool_init(int max_sessions);
+void fcgi_global_pool_destroy(void);
+
+FCGI_Session* fcgi_session_slot_get(int session_id);
+
+// Fungsi Manajemen Sesi berbasis Pool (Tanpa malloc/free di tengah jalan)
 FCGI_Session* fcgi_session_create(int sock_client, bool is_tls, SSL *ssl_conn, RequestHeader *req, int backend_type);
 void fcgi_session_set_state(FCGI_Session *session, FCGI_AsyncState new_state);
 FCGI_Session* fcgi_session_acquire(FCGI_Session *session);
 void fcgi_session_release(FCGI_Session *session);
+
+// Operasi Ring Buffer Statis
+size_t fcgi_ring_write(FCGIRingBuffer *rb, const char *src, size_t len);
+size_t fcgi_ring_read(FCGIRingBuffer *rb, char *dest, size_t max_len);
+void fcgi_ring_clear(FCGIRingBuffer *rb);
 
 #endif // HALMOS_FCGI_SESSION_H

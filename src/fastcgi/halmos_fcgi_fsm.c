@@ -20,16 +20,10 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 
-// Helper HTTP1 : untuk memastikan kapasitas gather buffer mencukupi secara dinamis
-static bool session_ensure_capacity_http1(FCGI_Session *session, size_t needed_bytes);
-
-// Helper HTTP1 : untuk menghandle data (payload) yang ditwrima dari FPM 
+// Helper HTTP1 : untuk menghandle data (payload) yang diterima dari FPM menggunakan Ring Buffer statis
 static void handle_payload_http1(FCGI_Session *session, const char *payload, int read_bytes);
 
-// Helper HTTP2 : untuk memastikan kapasitas gather buffer mencukupi secara dinamis
-static bool stream_ensure_capacity_http2(HTTP2Stream *stream, size_t needed_bytes);
-
-// Helper HTTP2 : untuk menghandle data (payload) yang ditwrima dari FPM 
+// Helper HTTP2 : untuk menghandle data (payload) HTTP/2
 static void handle_payload_http2(HTTP2Stream *stream, const char *payload, int read_bytes);
 
 // ==========================================
@@ -44,8 +38,6 @@ bool fcgi_fsm_step_http1(FCGI_Session *session) {
         return false; 
     }
     pthread_mutex_unlock(&session->lock);
-
-    //fprintf(stderr, "[DEBUG FSM H1] === START STEP == | session=%p, fpm_fd=%d\n", (void*)session, session->fpm_fd);
 
     pthread_mutex_lock(&session->lock);
 
@@ -80,27 +72,25 @@ bool fcgi_fsm_step_http1(FCGI_Session *session) {
                     ssize_t nr = recv(session->fpm_fd, payload + read_bytes, clen - read_bytes, 0);
                     if (nr > 0) {
                         read_bytes += nr;
-                        retry_count = 0; // Reset retry counter jika sukses membaca data
+                        retry_count = 0; 
                     } else if (nr == 0) {
-                        // EOF dari backend PHP-FPM
                         break;
                     } else {
-                        // nr < 0
                         if (errno == EAGAIN || errno == EWOULDBLOCK) {
                             retry_count++;
-                            if (retry_count > 50) { // Mencegah infinite busy-loop
+                            if (retry_count > 50) {
                                 break;
                             }
-                            usleep(1000); // Beri nafas 1ms agar kernel sempat menyiapkan data berikutnya
+                            usleep(1000); 
                             continue;
                         } else {
-                            // Error riil pada socket
                             break;
                         }
                     }
                 }
                 payload[read_bytes] = '\0';
 
+                // Masukkan payload ke Ring Buffer statis session->rx_buffer
                 handle_payload_http1(session, payload, read_bytes);
                 free(payload);
             }
@@ -183,22 +173,18 @@ bool fcgi_fsm_step_http2(FCGI_Session *session) {
                     ssize_t nr = recv(session->fpm_fd, payload + read_bytes, clen - read_bytes, 0);
                     if (nr > 0) {
                         read_bytes += nr;
-                        retry_count = 0; // Reset counter retry jika berhasil membaca data
+                        retry_count = 0; 
                     } else if (nr == 0) {
-                        // EOF dari backend
                         break;
                     } else {
-                        // nr < 0
                         if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                            // Data belum siap sepenuhnya di socket non-blocking, berikan sedikit nafas atau retry
                             retry_count++;
-                            if (retry_count > 50) { // Mencegah infinite busy-loop
+                            if (retry_count > 50) {
                                 break;
                             }
-                            usleep(1000); // Tunggu 1ms sebelum coba recv lagi
+                            usleep(1000);
                             continue;
                         } else {
-                            // Error riil pada socket
                             break;
                         }
                     }
@@ -245,47 +231,19 @@ bool fcgi_fsm_step_http2(FCGI_Session *session) {
     return true;
 }
 
-
 // ================================================================================
-// HELPER ( PRIVATE FUNCTION)
+// HELPER (PRIVATE FUNCTION)
 // ================================================================================
 
-// Helper HTTP1 : untuk memastikan kapasitas gather buffer mencukupi secara dinamis
-bool session_ensure_capacity_http1(FCGI_Session *session, size_t needed_bytes) {
-    if (!session) return false;
-
-    size_t required_space = session->fcgi_g_ptr + needed_bytes;
-    
-    // Jika kapasitas saat ini masih mencukupi, langsung kembalikan true
-    if (required_space <= session->fcgi_g_capacity) {
-        return true;
-    }
-
-    // Tentukan kapasitas baru (kelipatan 2 dari kapasitas sebelumnya, minimal 64KB)
-    size_t new_cap = session->fcgi_g_capacity ? session->fcgi_g_capacity * 2 : 65536;
-    while (required_space > new_cap) {
-        new_cap *= 2;
-    }
-
-    unsigned char *new_buf = realloc(session->fcgi_gather_buf, new_cap);
-    if (!new_buf) {
-        return false; // Gagal alokasi memori (Out of Memory)
-    }
-
-    session->fcgi_gather_buf = new_buf;
-    session->fcgi_g_capacity = new_cap;
-    return true;
-}
-
-// Helper HTTP1 : untuk menghandle data (payload) yang ditwrima dari FPM 
-void handle_payload_http1(FCGI_Session *session, const char *payload, int read_bytes) {
+// Helper HTTP1 : Menulis payload langsung ke Ring Buffer statis session->rx_buffer
+static void handle_payload_http1(FCGI_Session *session, const char *payload, int read_bytes) {
     if (!session || read_bytes <= 0) return;
 
     int payload_offset = 0;
 
     // 1. Jika header belum selesai di-parsing, isi dulu buffer header
     if (!session->fcgi_header_parsed) {
-        size_t space_left = FCGI_HEADER_BUF_SIZE - session->fcgi_h_ptr - 1;
+        size_t space_left = sizeof(session->fcgi_header_buf) - session->fcgi_h_ptr - 1;
         size_t to_copy = (size_t)read_bytes < space_left ? (size_t)read_bytes : space_left;
 
         if (to_copy > 0) {
@@ -303,57 +261,31 @@ void handle_payload_http1(FCGI_Session *session, const char *payload, int read_b
             session->fcgi_header_parsed = true;
             size_t header_len = (size_t)(sep - (char *)session->fcgi_header_buf) + (sep[0] == '\r' ? 4 : 2);
             
-            // Jika ada sisa byte di header_buf yang masuk wilayah body (spillover)
+            // Jika ada sisa byte (spillover) masuk wilayah body
             if (session->fcgi_h_ptr > header_len) {
                 size_t spill_len = session->fcgi_h_ptr - header_len;
                 unsigned char *spill_ptr = session->fcgi_header_buf + header_len;
 
-                // Pastikan gather_buf cukup menampung spillover secara dinamis
-                if (session_ensure_capacity_http1(session, spill_len)) {
-                    memcpy(session->fcgi_gather_buf + session->fcgi_g_ptr, spill_ptr, spill_len);
-                    session->fcgi_g_ptr += spill_len;
-                }
+                // Tulis spillover ke ring buffer rx_buffer statis
+                fcgi_ring_write(&session->rx_buffer, (char *)spill_ptr, spill_len);
+
                 session->fcgi_h_ptr = header_len;
                 session->fcgi_header_buf[header_len] = '\0';
             }
         }
     }
 
-    // 2. Sisa payload (atau seluruh payload jika header sudah lama parsed) langsung masuk ke body gather buffer
+    // 2. Sisa payload langsung masuk ke rx_buffer (Ring Buffer statis)
     if (payload_offset < read_bytes) {
         int body_chunk = read_bytes - payload_offset;
         if (body_chunk > 0) {
-            // Pastikan gather_buf cukup menampung chunk body secara dinamis
-            if (session_ensure_capacity_http1(session, (size_t)body_chunk)) {
-                memcpy(session->fcgi_gather_buf + session->fcgi_g_ptr, payload + payload_offset, (size_t)body_chunk);
-                session->fcgi_g_ptr += (size_t)body_chunk;
-            } /*else {
-                fprintf(stderr, "[FCGI_FSM_ERROR] Failed to ensure capacity for large payload body!\n");
-            }*/
+            fcgi_ring_write(&session->rx_buffer, payload + payload_offset, (size_t)body_chunk);
         }
     }
 }
 
-// Helper HTTP2 : untuk memastikan kapasitas gather buffer mencukupi secara dinamis
-bool stream_ensure_capacity_http2(HTTP2Stream *stream, size_t needed_bytes) {
-    if (!stream) return false;
-    size_t required_space = stream->fcgi_g_ptr + needed_bytes;
-    
-    if (required_space <= stream->fcgi_g_capacity) return true;
-
-    size_t new_cap = stream->fcgi_g_capacity ? stream->fcgi_g_capacity * 2 : 65536;
-    while (required_space > new_cap) new_cap *= 2;
-
-    unsigned char *new_buf = realloc(stream->fcgi_gather_buf, new_cap);
-    if (!new_buf) return false;
-
-    stream->fcgi_gather_buf = new_buf;
-    stream->fcgi_g_capacity = new_cap;
-    return true;
-}
-
-// Helper HTTP2 : untuk menghandle data (payload) yang ditwrima dari FPM 
-void handle_payload_http2(HTTP2Stream *stream, const char *payload, int read_bytes) {
+// Helper HTTP2 : Handle payload HTTP/2
+static void handle_payload_http2(HTTP2Stream *stream, const char *payload, int read_bytes) {
     if (!stream || read_bytes <= 0) return;
 
     int payload_offset = 0;
@@ -380,7 +312,9 @@ void handle_payload_http2(HTTP2Stream *stream, const char *payload, int read_byt
                 size_t spill_len = stream->fcgi_h_ptr - header_len;
                 unsigned char *spill_ptr = (unsigned char *)stream->fcgi_header_buf + header_len;
 
-                if (stream_ensure_capacity_http2(stream, spill_len)) {
+                // Jika stream HTTP/2 masih menggunakan buffer dinamisnya sendiri, biarkan atau sesuaikan.
+                // Fokus utama migrasi pool adalah pada FCGI_Session HTTP/1.
+                if (stream->fcgi_g_ptr + spill_len <= stream->fcgi_g_capacity) {
                     memcpy(stream->fcgi_gather_buf + stream->fcgi_g_ptr, spill_ptr, spill_len);
                     stream->fcgi_g_ptr += spill_len;
                 }
@@ -393,7 +327,7 @@ void handle_payload_http2(HTTP2Stream *stream, const char *payload, int read_byt
     if (payload_offset < read_bytes) {
         int body_chunk = read_bytes - payload_offset;
         if (body_chunk > 0) {
-            if (stream_ensure_capacity_http2(stream, (size_t)body_chunk)) {
+            if (stream->fcgi_g_ptr + (size_t)body_chunk <= stream->fcgi_g_capacity) {
                 memcpy(stream->fcgi_gather_buf + stream->fcgi_g_ptr, payload + payload_offset, (size_t)body_chunk);
                 stream->fcgi_g_ptr += (size_t)body_chunk;
             }

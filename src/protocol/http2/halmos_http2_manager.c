@@ -6,6 +6,7 @@
 #include "halmos_http2_response.h"
 
 #include "halmos_http2_frame.h"
+#include "halmos_http2_stream.h"
 #include "halmos_http2_socket.h"
 
 #include "halmos_sec_tls.h"
@@ -90,6 +91,8 @@ void http2_session_destroy(void *sess) {
  
     for (int i = 0; i < HTTP2_STREAM_BUCKETS; i++) { 
         HTTP2Stream *curr = session->streams_hash[i];
+
+        /*
         while (curr != NULL) {
             HTTP2Stream *next_node = curr->node_next; 
  
@@ -104,6 +107,17 @@ void http2_session_destroy(void *sess) {
             }
             http2_parser_free_memory(curr);
             free(curr);
+            curr = next_node;
+        }
+        */
+        while (curr != NULL) {
+            HTTP2Stream *next_node = curr->node_next; 
+ 
+            // --- GANTI MANUAL CLEANUP DENGAN PEMANGGILAN INI ---
+            // http2_stream_destroy sudah mengurus free(fcgi_gather_buf), 
+            // fcgi_upstream_release, close(file_fd), parser_free, dan free(curr) itu sendiri!
+            http2_stream_destroy(curr);
+            
             curr = next_node;
         }
         session->streams_hash[i] = NULL;

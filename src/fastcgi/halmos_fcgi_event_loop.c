@@ -131,27 +131,24 @@ void* fcgi_event_loop_run(void *arg) {
             if (!session) continue;
 
             uint32_t revents = g_epoll_events[i].events;
-            //fprintf(stderr, "[FCGI_POLLER_ROUTINE] Event triggered! session=%p, revents=0x%x\n", (void*)session, revents);
 
             // 1. Prioritaskan pembacaan data jika ada EPOLLIN atau EPOLLPRI
             if (revents & (EPOLLIN | EPOLLPRI)) {
-                //fprintf(stderr, "[FCGI_POLLER_ROUTINE] -> PHP-FPM ready to read. Pushing FCGI_TASK_PROCESS_READ.\n");
-                
                 if (session->fpm_fd != -1) {
                     fcgi_event_loop_del(session->fpm_fd);
                 }
 
-                fcgi_queue_push(session, FCGI_TASK_PROCESS_READ);
+                // DIUBAH: Kirim session->session_id (integer) ke antrean queue
+                fcgi_queue_push(session->session_id, FCGI_TASK_PROCESS_READ);
             } 
             // 2. Tangani HUP/ERR hanya jika tidak ada data tersisa atau terjadi error murni
             else if (revents & (EPOLLERR | EPOLLHUP)) {
-                //fprintf(stderr, "[FCGI_POLLER_ROUTINE] -> PHP-FPM error/HUP detected. Removing fd and pushing DISCONNECT.\n");
-                
                 if (session->fpm_fd != -1) {
                     fcgi_event_loop_del(session->fpm_fd);
                 }
                 
-                fcgi_queue_push(session, FCGI_TASK_DISCONNECT);
+                // DIUBAH: Kirim session->session_id (integer) ke antrean queue
+                fcgi_queue_push(session->session_id, FCGI_TASK_DISCONNECT);
             }
         }
     }
