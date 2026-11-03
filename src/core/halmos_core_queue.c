@@ -85,15 +85,6 @@ int core_queue_push(TaskQueue *q, halmos_event_t event_item) {
 
         q->total_workers += spawn_count;
         q->scaling_in_progress = 1;
-
-        // --- PANGGIL METRIK UPSCALE ---
-        metrics_log_event(
-            METRIC_EVENT_UPSCALE, 
-            spawn_count, 
-            q->count, 
-            q->total_workers, 
-            atomic_load(&q->active_workers)
-        );
     }
 
     // 5. Bangunkan thread
@@ -168,15 +159,6 @@ int core_queue_pop(TaskQueue *q, halmos_event_t *out_event, struct timeval *arri
         if (rc == ETIMEDOUT && q->head == NULL && q->total_workers > q->min_threads_limit) {
             q->total_workers--;
 
-            // --- PANGGIL METRIK DOWNSCALE ---
-            metrics_log_event(
-                METRIC_EVENT_DOWNSCALE, 
-                -1, 
-                q->count, 
-                q->total_workers, 
-                atomic_load(&q->active_workers)
-            );
-
             pthread_cond_signal(&q->exit_cond);
             pthread_mutex_unlock(&q->lock);
             
@@ -198,21 +180,7 @@ int core_queue_pop(TaskQueue *q, halmos_event_t *out_event, struct timeval *arri
     }
     int sock = tmp->event.fd;
     *arrival = tmp->arrival_time;
-
-    // --- HITUNG QUEUE WAIT TIME ($T_{queue}$) ---
-    gettimeofday(&now, NULL);
-    uint64_t arrival_us = (uint64_t)tmp->arrival_time.tv_sec * 1000000ULL + tmp->arrival_time.tv_usec;
-    uint64_t pop_us = (uint64_t)now.tv_sec * 1000000ULL + now.tv_usec;
-    uint64_t queue_wait_us = (pop_us > arrival_us) ? (pop_us - arrival_us) : 0;
-
-    metrics_log_periodic(
-        q->count, 
-        q->max_queue_limit, 
-        q->total_workers, 
-        atomic_load(&q->active_workers), 
-        queue_wait_us
-    );
-    
+   
     q->head = q->head->next;
     if (q->head == NULL) q->tail = NULL;
     q->count--;

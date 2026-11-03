@@ -74,8 +74,6 @@ typedef struct {
     int vhost_count;
 
     int log_retention_days;
-    bool telemetry_enabled; // <--- Aktif/Non aktif log telemetry
-    bool metrics_enabled; // <--- Aktif/Non aktif log metrics
 } Config;
 
 // Fungsi untuk memuat konfigurasi dari file

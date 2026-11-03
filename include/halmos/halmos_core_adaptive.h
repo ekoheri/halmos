@@ -109,6 +109,5 @@
 
 // Fungsi tunggal untuk menghitung semua parameter adaptive saat startup
 void core_adaptive_init(int print_to_terminal);
-void core_adaptive_advisor(const char *filepath_arg);
 
 #endif

@@ -161,11 +161,7 @@ int core_config_load(const char *filename) {
             } else if (strcmp(key, "python_memory_budget") == 0) {
                 config.python.memory_budget = (int)(parse_size(value) / (1024 * 1024));
 
-            // Telemetry & metrics
-            } else if (strcmp(key, "telemetry_enabled") == 0) {
-                config.telemetry_enabled = (strcasecmp(value, "true") == 0);
-            } else if (strcmp(key, "metrics_enabled") == 0) {
-                config.metrics_enabled = (strcasecmp(value, "true") == 0);
+            // Log
             } else if (strcmp(key, "log_retention_days") == 0) {
                 config.log_retention_days = atoi(value);
             }    

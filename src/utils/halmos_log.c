@@ -10,7 +10,6 @@
 #include <time.h>
 #include <pthread.h>
 #include <stdbool.h>
-#include <sys/resource.h>
 #include <unistd.h>
 #include <stdatomic.h>
 #include <sys/stat.h>
@@ -18,7 +17,6 @@
 #include <dirent.h>
 
 // Variabel internal untuk manajemen thread dan file log
-static pthread_t monitor_tid;
 static pthread_t log_tid; 
 static pthread_t maintenance_tid; 
 
@@ -27,18 +25,9 @@ static atomic_bool log_keep_running = ATOMIC_VAR_INIT(true);
 
 // Status pelacakan keberhasilan pembuatan thread untuk pencegahan crash pthread_join
 static bool log_tid_started = false;
-static bool monitor_tid_started = false;
 static bool maintenance_tid_started = false;
 
-// 1. Inisialisasi Telemetry Global
-LogTelemetry global_telemetry = {
-    .total_requests = 0,
-    .active_connections = 0,
-    .mem_usage_kb = 0,
-    .last_latency_ms = 0.0
-};
-
-// 2. Inisialisasi Global Log Queue
+// Inisialisasi Global Log Queue
 LogQueue global_log_queue = {
     .head = 0, 
     .tail = 0, 
@@ -50,14 +39,12 @@ LogQueue global_log_queue = {
 // Deklarasi helper internal
 static void enqueue_log(LogType type, const char *format, va_list args);
 static void* log_thread_routine(void* arg);
-static void* telemetry_monitor_thread(void* arg);
 static void* log_maintenance_thread(void* arg);
-static uint64_t get_time_us();
 static void perform_log_maintenance();
 static bool is_valid_date_format(const char *date_str);
 
 // ==========================================
-// FUNGSI PUBLIC LOGGING & METRICS
+// FUNGSI PUBLIC LOGGING
 // ==========================================
 
 void write_log(const char *format, ...) {
@@ -85,7 +72,6 @@ void write_log_error_code(HalmosErrorCode code, ...) {
     va_end(args);
 
     char final_log[MAX_LOG_MESSAGE + 128];
-    // Label level diset langsung secara eksplisit sebagai [ERROR]
     snprintf(final_log, sizeof(final_log), "[%s] [ERROR] [ERR-%d] %s", module, code, message_body);
 
     enqueue_log(LOG_TYPE_ERROR, final_log, (va_list){0});
@@ -102,7 +88,6 @@ void write_log_warn_code(HalmosErrorCode code, ...) {
     va_end(args);
 
     char final_log[MAX_LOG_MESSAGE + 128];
-    // Label level diset langsung secara eksplisit sebagai [WARNING]
     snprintf(final_log, sizeof(final_log), "[%s] [WARNING] [ERR-%d] %s", module, code, message_body);
 
     enqueue_log(LOG_TYPE_WARNING, final_log, (va_list){0});
@@ -113,82 +98,6 @@ void write_log_access(const char *protocol, const char *client_ip, const char *m
     snprintf(access_msg, sizeof(access_msg), "[%s] %s \"%s %s\" %d %ld", 
              protocol, client_ip, method, uri, status, bytes_sent);
     enqueue_log(LOG_TYPE_ACCESS, access_msg, (va_list){0});
-}
-
-// Non-blocking: Mengirim event umum Halmos Metrics ke antrean RAM
-void metrics_log_event(LogMetricEvent event, int delta, uint32_t q_len, uint32_t workers, uint32_t active) {
-    if (!config.metrics_enabled) return;
-    uint64_t ts = get_time_us();
-    char buffer[256];
-    
-    snprintf(buffer, sizeof(buffer), "%llu,%d,%d,%u,0,%u,%u,0", 
-            (unsigned long long)ts, event, delta, q_len, workers, active);
-            
-    enqueue_log(LOG_TYPE_METRICS, buffer, (va_list){0});
-}
-
-// Non-blocking: Mengirim data periodik Halmos Metrics ke antrean RAM (Sampling 100 ms)
-void metrics_log_periodic(uint32_t q_len, uint32_t q_cap, uint32_t workers, uint32_t active, uint64_t avg_wait_us) {
-    if (!config.metrics_enabled) return;
-
-    static uint64_t last_periodic_log_ms = 0;
-    const uint64_t sampling_interval_ms = 100; 
-
-    uint64_t ts = get_time_us();
-    uint64_t now_ms = ts / 1000ULL; 
-
-    if (last_periodic_log_ms != 0 && (now_ms - last_periodic_log_ms) < sampling_interval_ms) {
-        return; 
-    }
-    
-    last_periodic_log_ms = now_ms;
-    
-    char buffer[256];
-    snprintf(buffer, sizeof(buffer), "%llu,0,0,%u,%u,%u,%u,%llu", 
-            (unsigned long long)ts, q_len, q_cap, workers, active, (unsigned long long)avg_wait_us);
-            
-    enqueue_log(LOG_TYPE_METRICS, buffer, (va_list){0});
-}
-
-void metrics_log_task_execution(uint32_t q_len, uint32_t workers, uint32_t active, uint64_t execution_time_us, int bound_type) {
-    if (!config.metrics_enabled) return;
-
-    uint64_t ts = get_time_us();
-    char buffer[256];
-    
-    snprintf(buffer, sizeof(buffer), "%llu,99,0,%u,0,%u,%u,0,%llu,%d", 
-            (unsigned long long)ts, q_len, workers, active, (unsigned long long)execution_time_us, bound_type);
-            
-    enqueue_log(LOG_TYPE_METRICS, buffer, (va_list){0});
-}
-
-void write_log_telemetry() {
-    if (!config.telemetry_enabled) {
-        return;
-    }
-    
-    update_mem_usage();
-    char meta_buffer[MAX_LOG_MESSAGE];
-    
-    struct timespec ts_now;
-    clock_gettime(CLOCK_REALTIME, &ts_now);
-    struct tm t_storage;
-    struct tm *t = localtime_r(&ts_now.tv_sec, &t_storage); // Menggunakan localtime_r (Saran QA C)
-    long ms = ts_now.tv_nsec / 1000000;
-
-    char ts_full[32];
-    strftime(ts_full, sizeof(ts_full), "%Y-%m-%d %H:%M:%S", t);
-    snprintf(ts_full + strlen(ts_full), sizeof(ts_full) - strlen(ts_full), ".%03ld", ms);
-
-    snprintf(meta_buffer, MAX_LOG_MESSAGE, 
-             "{\"ts\":\"%s\",\"type\":\"metrics\",\"req\":%lu,\"conn\":%u,\"ram_kb\":%zu,\"lat_ms\":%.3f}", 
-             ts_full,
-             atomic_load(&global_telemetry.total_requests),
-             atomic_load(&global_telemetry.active_connections),
-             atomic_load(&global_telemetry.mem_usage_kb),
-             atomic_load(&global_telemetry.last_latency_ms));
-
-    enqueue_log(LOG_TYPE_TELEMETRY, meta_buffer, (va_list){0});
 }
 
 // ==========================================
@@ -205,18 +114,7 @@ void start_thread_logger() {
         fprintf(stderr, "FATAL: Failed to start logger thread!\n");
     }
 
-    // 2. Spawn Thread Monitor Telemetry
-    if (config.telemetry_enabled) {
-        if (pthread_create(&monitor_tid, NULL, telemetry_monitor_thread, NULL) == 0) {
-            monitor_tid_started = true;
-        } else {
-            fprintf(stderr, "ERROR: Failed to start telemetry monitor thread!\n");
-        }
-    } else {
-        write_log("[CORE] Telemetry monitoring is DISABLED by configuration.");
-    }
-
-    // 3. Spawn Thread Maintenance Terpisah
+    // 2. Spawn Thread Maintenance Terpisah
     if (pthread_create(&maintenance_tid, NULL, log_maintenance_thread, NULL) == 0) {
         maintenance_tid_started = true;
     } else {
@@ -233,10 +131,6 @@ void stop_thread_logger() {
     if (log_tid_started) {
         pthread_join(log_tid, NULL);
         log_tid_started = false;
-    }
-    if (monitor_tid_started) {
-        pthread_join(monitor_tid, NULL);
-        monitor_tid_started = false;
     }
     if (maintenance_tid_started) {
         pthread_join(maintenance_tid, NULL);
@@ -271,7 +165,7 @@ void* log_thread_routine(void* arg) {
         struct timespec ts_now;
         clock_gettime(CLOCK_REALTIME, &ts_now);
         struct tm t_storage;
-        struct tm *t = localtime_r(&ts_now.tv_sec, &t_storage); // Menggunakan localtime_r (Saran QA C)
+        struct tm *t = localtime_r(&ts_now.tv_sec, &t_storage);
         long milliseconds = ts_now.tv_nsec / 1000000;
 
         char log_filename[256];
@@ -282,54 +176,25 @@ void* log_thread_routine(void* arg) {
         strftime(time_str, sizeof(time_str), "%H:%M:%S", t);
         snprintf(time_str + strlen(time_str), sizeof(time_str) - strlen(time_str), ".%03ld", milliseconds);
 
-        // --- PENULISAN KE DISK ---
-        if (current_entry.type == LOG_TYPE_METRICS) {
-            if (!config.metrics_enabled) continue;
-
-            snprintf(log_filename, sizeof(log_filename), "%s%s_metrics.csv", LOG_DIR, date_str);
-            
-            FILE *f_check = fopen(log_filename, "r");
-            bool needs_header = false;
-            if (!f_check) {
-                needs_header = true;
-            } else {
-                fclose(f_check);
-            }
-
-            FILE *f_csv = fopen(log_filename, "a");
-            if (f_csv) {
-                if (needs_header) {
-                    fprintf(f_csv, "timestamp_us,event,scaling_delta,queue_length,queue_capacity,workers,active_workers,queue_wait_us,execution_time_us,bound_type\n");
-                }
-                fprintf(f_csv, "%s\n", current_entry.text);
-                fflush(f_csv);
-                fclose(f_csv);
-            }
+        // --- PENULISAN KE DISK (Hanya file System, Error, Warning, Access) ---
+        if (current_entry.type == LOG_TYPE_ERROR) {
+            snprintf(log_filename, sizeof(log_filename), "%s%s_error.log", LOG_DIR, date_str);
+        } else if (current_entry.type == LOG_TYPE_WARNING) {
+            snprintf(log_filename, sizeof(log_filename), "%s%s_warning.log", LOG_DIR, date_str);
+        } else if (current_entry.type == LOG_TYPE_ACCESS) {
+            snprintf(log_filename, sizeof(log_filename), "%s%s_access.log", LOG_DIR, date_str);
         } else {
-            if (current_entry.type == LOG_TYPE_ERROR) {
-                snprintf(log_filename, sizeof(log_filename), "%s%s_error.log", LOG_DIR, date_str);
-            } else if (current_entry.type == LOG_TYPE_WARNING) {
-                snprintf(log_filename, sizeof(log_filename), "%s%s_warning.log", LOG_DIR, date_str);
-            } else if (current_entry.type == LOG_TYPE_TELEMETRY) {
-                snprintf(log_filename, sizeof(log_filename), "%s%s_telemetry.log", LOG_DIR, date_str);
-            } else if (current_entry.type == LOG_TYPE_ACCESS) {
-                snprintf(log_filename, sizeof(log_filename), "%s%s_access.log", LOG_DIR, date_str);
-            } else {
-                snprintf(log_filename, sizeof(log_filename), "%s%s_system.log", LOG_DIR, date_str);
-            }
+            snprintf(log_filename, sizeof(log_filename), "%s%s_system.log", LOG_DIR, date_str);
+        }
 
-            FILE *f = fopen(log_filename, "a");
-            if (f) {
-                if (current_entry.type == LOG_TYPE_TELEMETRY) {
-                    fprintf(f, "%s\n", current_entry.text); 
-                } else if (current_entry.type == LOG_TYPE_ACCESS) {
-                    fprintf(f, "[%s] %s\n", time_str, current_entry.text);
-                } else {
-                    // Cukup cetak timestamp dan teks log utuh yang sudah berisi [MODULE] ERR-XXXX] Pesan
-                    fprintf(f, "[%s] %s\n", time_str, current_entry.text);
-                }
-                fclose(f);
+        FILE *f = fopen(log_filename, "a");
+        if (f) {
+            if (current_entry.type == LOG_TYPE_ACCESS) {
+                fprintf(f, "[%s] %s\n", time_str, current_entry.text);
+            } else {
+                fprintf(f, "[%s] %s\n", time_str, current_entry.text);
             }
+            fclose(f);
         }
     }
     return NULL;
@@ -381,7 +246,6 @@ static void perform_log_maintenance() {
     char past_dates[64][15];
     int past_date_count = 0;
 
-    // 1. PEMAINAN TANGGAL KETAT
     while ((entry = readdir(dir)) != NULL) {
         const char *name = entry->d_name;
         
@@ -393,9 +257,7 @@ static void perform_log_maintenance() {
             strstr(name, "_system.log") != NULL ||
             strstr(name, "_error.log") != NULL ||
             strstr(name, "_warning.log") != NULL ||
-            strstr(name, "_access.log") != NULL ||
-            strstr(name, "_telemetry.log") != NULL ||
-            strstr(name, "_metrics.csv") != NULL
+            strstr(name, "_access.log") != NULL
         );
 
         if (is_valid_suffix && strlen(name) >= 10) {
@@ -419,10 +281,8 @@ static void perform_log_maintenance() {
     }
     closedir(dir);
 
-    // Deklarasi struct stat st yang sebelumnya terlewat
     struct stat st;
 
-    // 2. PROSES ARSIP BERDASARKAN DAFTAR FILE EKSPLISIT
     for (int d = 0; d < past_date_count; d++) {
         char *target_date = past_dates[d];
         char final_archive[256];
@@ -432,16 +292,15 @@ static void perform_log_maintenance() {
         snprintf(temp_archive, sizeof(temp_archive), "%s/%s.tar.gz.tmp", LOG_DIR, target_date);
 
         if (stat(final_archive, &st) == 0) {
-            continue; // Sudah terarsip
+            continue; 
         }
         unlink(temp_archive);
 
-        // Kumpulkan daftar file nyata yang benar-benar ada untuk tanggal tersebut
         char file_list_str[512] = "";
         int existing_file_count = 0;
-        const char *suffixes[] = {"_system.log", "_error.log", "_access.log", "_telemetry.log", "_metrics.csv"};
+        const char *suffixes[] = {"_system.log", "_error.log", "_access.log", "_warning.log"};
         
-        for (int s = 0; s < 5; s++) {
+        for (int s = 0; s < 4; s++) {
             char check_path[512];
             snprintf(check_path, sizeof(check_path), "%s/%s%s", LOG_DIR, target_date, suffixes[s]);
             
@@ -470,14 +329,13 @@ static void perform_log_maintenance() {
             continue;
         }
 
-        // 3. VALIDASI INTEGRITAS ARSIP
         char cmd_verify[512];
         snprintf(cmd_verify, sizeof(cmd_verify), "tar -tzf %s >/dev/null 2>&1", temp_archive);
         int verify_res = system(cmd_verify);
 
         if (verify_res == 0) {
             if (rename(temp_archive, final_archive) == 0) {
-                for (int s = 0; s < 5; s++) {
+                for (int s = 0; s < 4; s++) {
                     char rm_path[512];
                     snprintf(rm_path, sizeof(rm_path), "%s/%s%s", LOG_DIR, target_date, suffixes[s]);
                     unlink(rm_path);
@@ -492,20 +350,17 @@ static void perform_log_maintenance() {
         }
     }
 
-    // 5. KEBIJAKAN RETENSI ARSIP (Berdasarkan Tanggal pada Nama File)
     dir = opendir(LOG_DIR);
     if (dir) {
         time_t now = time(NULL);
         
         while ((entry = readdir(dir)) != NULL) {
             const char *name = entry->d_name;
-            // Pastikan formatnya YYYY-MM-DD.tar.gz (panjang minimal 14 karakter)
             if (strstr(name, ".tar.gz") != NULL && strstr(name, ".tmp") == NULL && strlen(name) >= 14) {
                 char file_date_str[11];
                 strncpy(file_date_str, name, 10);
                 file_date_str[10] = '\0';
 
-                // Validasi format tanggal pada nama file
                 if (is_valid_date_format(file_date_str)) {
                     struct tm file_tm = {0};
                     file_tm.tm_year = atoi(file_date_str) - 1900;
@@ -534,33 +389,6 @@ static void perform_log_maintenance() {
 // HELPER FUNCTIONS LAINNYA
 // ==========================================
 
-static void* telemetry_monitor_thread(void* arg) {
-    (void)arg;
-    write_log("[CORE] Telemetry monitor thread started.");
-    
-    struct timespec ts;
-    while (atomic_load(&log_keep_running)) {
-        if (config.telemetry_enabled) {
-            write_log_telemetry();
-        }
-
-        clock_gettime(CLOCK_REALTIME, &ts);
-        ts.tv_sec += 15; 
-
-        pthread_mutex_lock(&global_log_queue.mutex);
-        pthread_cond_timedwait(&global_log_queue.cond, &global_log_queue.mutex, &ts);
-        pthread_mutex_unlock(&global_log_queue.mutex);
-    }
-    return NULL;
-}
-
-void update_mem_usage() {
-    struct rusage usage;
-    if (getrusage(RUSAGE_SELF, &usage) == 0) {
-        atomic_store(&global_telemetry.mem_usage_kb, (size_t)usage.ru_maxrss);
-    }
-}
-
 static void enqueue_log(LogType type, const char *format, va_list args) {
     pthread_mutex_lock(&global_log_queue.mutex);
     
@@ -568,7 +396,7 @@ static void enqueue_log(LogType type, const char *format, va_list args) {
         int tail = global_log_queue.tail;
         
         if (format) {
-            if (type == LOG_TYPE_TELEMETRY || type == LOG_TYPE_ACCESS || type == LOG_TYPE_METRICS) {
+            if (type == LOG_TYPE_ACCESS) {
                 snprintf(global_log_queue.entries[tail].text, MAX_LOG_MESSAGE, "%s", format);
             } else {
                 vsnprintf(global_log_queue.entries[tail].text, MAX_LOG_MESSAGE, format, args);
@@ -583,12 +411,6 @@ static void enqueue_log(LogType type, const char *format, va_list args) {
     }
     
     pthread_mutex_unlock(&global_log_queue.mutex);
-}
-
-static uint64_t get_time_us() {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
 }
 
 double hitung_durasi(struct timespec start, struct timespec end) {

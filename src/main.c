@@ -207,19 +207,6 @@ int main(int argc, char *argv[]) {
         } else if (strcmp(argv[1], "-v") == 0 || strcmp(argv[1], "--version") == 0) {
             printf("%s v%s\n", HALMOS_NAME, HALMOS_VERSION);
             return EXIT_SUCCESS;
-        } else if (strcmp(argv[1], "-a") == 0 || strcmp(argv[1], "--advisor") == 0) {
-            if (core_config_load(HALMOS_CONFIG_PATH) != 0) {
-                fprintf(stderr, "[ERROR] Configuration test FAILED: Cannot parse %s\n", HALMOS_CONFIG_PATH);
-                return EXIT_FAILURE;
-            }
-            // Cek apakah ada argumen path file tambahan setelah -a (yaitu di argv[2])
-            const char *custom_file = NULL;
-            if (argc > 2 && argv[2][0] != '-') {
-                custom_file = argv[2];
-            }
-            
-            core_adaptive_advisor(custom_file); // Sesuaikan dengan nama fungsi Anda (run_halmos_advisor atau utils_run_advisor)
-            return EXIT_SUCCESS;
         } else {
             printf("Unknown command. Use '-h' or '--help' for available options.\n");
             return EXIT_SUCCESS;

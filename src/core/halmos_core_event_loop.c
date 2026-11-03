@@ -166,8 +166,6 @@ void core_event_loop_run() {
                     setsockopt(sock_client, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
                     setsockopt(sock_client, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
  
-                    atomic_fetch_add(&global_telemetry.active_connections, 1); // Tambah saat ada tamu masuk
- 
                     // === MODIFIKASI 2: Aktifkan slot tracking koneksi & ambil generation baru ===
                     uint32_t conn_gen = core_conn_t_activate(sock_client);
                     if (conn_gen == 0) {
@@ -175,7 +173,6 @@ void core_event_loop_run() {
                         //write_log_error("[CRIT] FD %d exceeds g_max_fd capacity", sock_client);
                         write_log_error_code(ERR_CORE_MAX_FD_EXCEED, sock_client);
                         close(sock_client);
-                        atomic_fetch_sub(&global_telemetry.active_connections, 1);
                         break;
                     }
  
@@ -204,7 +201,6 @@ void core_event_loop_run() {
                             write_log_error_code(ERR_CORE_EPOLL_ADD_CLI, sock_client, strerror(errno));
                         }
                         // Kurangi counter & jalankan cleanup terisolasi agar slot connection kembali reset
-                        atomic_fetch_sub(&global_telemetry.active_connections, 1);
                         core_event_loop_cleanup_connection(sock_client);
                     }
                 }
@@ -216,7 +212,6 @@ void core_event_loop_run() {
  
                 // 1. CEK ERROR / DISCONNECT DULU
                 if (ev & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) {
-                    atomic_fetch_sub(&global_telemetry.active_connections, 1);
                     core_event_loop_cleanup_connection(client_fd);
                     continue;
                 }
@@ -243,7 +238,6 @@ void core_event_loop_run() {
                     int status = core_queue_push(&global_queue, event_item);
  
                     if (status < 0) {
-                        atomic_fetch_sub(&global_telemetry.active_connections, 1);
                         core_event_loop_cleanup_connection(client_fd);
                     }
                 }
