@@ -17,31 +17,29 @@ void http_multipart_parse_body(RequestHeader *req) {
     // 1. Ekstrak Boundary
     char *boundary_ptr = strstr(req->content_type, "boundary=");
     if (!boundary_ptr) {
-        //write_log_error("[HTTP] Multipart boundary missing from %s", req->client_ip);
         write_log_warn_code(WARN_PROTO_MULTIPART_BND, req->client_ip);
         return;
     }
     
     char boundary[256];
     int b_len = snprintf(boundary, sizeof(boundary), "--%s", boundary_ptr + 9);
+    if (b_len <= 0 || (size_t)b_len >= sizeof(boundary)) return;
 
     char *current_pos = (char *)req->body_data;
     size_t remaining_len = req->body_length;
+    char *buffer_end = current_pos + remaining_len;
 
     req->parts = malloc(sizeof(MultipartPart) * 10);
     req->parts_count = 0;
 
     while (remaining_len > (size_t)b_len) {
-        char *part_start = memmem(current_pos, remaining_len, boundary, b_len);
+        char *part_start = memmem(current_pos, remaining_len, boundary, (size_t)b_len);
         if (!part_start) break;
 
         // Cek apakah array parts sudah penuh sebelum memproses part baru
         if (req->parts_count > 0 && req->parts_count % 10 == 0) {
             MultipartPart *tmp = realloc(req->parts, sizeof(MultipartPart) * (req->parts_count + 10));
             if (!tmp) {
-                // Jika RAM penuh, kita berhenti parkir part baru tapi 
-                // data yang sudah masuk sebelumnya tidak hilang (tidak leak).
-                //write_log_error("[MEM] Failed to realloc multipart parts for %s", req->client_ip);
                 write_log_warn_code(ERR_PROTO_MULTIPART_MEM, req->client_ip);
                 return; 
             }
@@ -49,15 +47,18 @@ void http_multipart_parse_body(RequestHeader *req) {
         }
 
         char *header_start = part_start + b_len + 2; 
-        char *header_end = memmem(header_start, remaining_len - (header_start - current_pos), "\r\n\r\n", 4);
+        
+        // --- 2. PROTEKSI INTEGER UNDERFLOW & BOUNDS CHECK ---
+        if (header_start >= buffer_end) break;
+        size_t header_search_len = (size_t)(buffer_end - header_start);
+
+        char *header_end = memmem(header_start, header_search_len, "\r\n\r\n", 4);
         if (!header_end) break;
 
         MultipartPart *p = &req->parts[req->parts_count];
         memset(p, 0, sizeof(MultipartPart));
 
         // --- TEKNIK RESTORE AGAR TIDAK MERUSAK BUFFER FASTCGI ---
-        
-        // Simpan karakter asli di header_end (\r)
         char orig_header_end = *header_end;
         *header_end = '\0'; 
 
@@ -67,10 +68,9 @@ void http_multipart_parse_body(RequestHeader *req) {
             char *val_start = n_ptr + 6;
             char *n_end = strchr(val_start, '\"');
             if (n_end) {
-                // Pinjam buffer: suntik NULL, log/copy, lalu kembalikan
                 char orig_n = *n_end;
                 *n_end = '\0';
-                p->name = strdup(val_start); // Harus di-copy karena buffer asli akan dikembalikan
+                p->name = strdup(val_start);
                 *n_end = orig_n;
             }
         }
@@ -83,7 +83,7 @@ void http_multipart_parse_body(RequestHeader *req) {
             if (f_end) {
                 char orig_f = *f_end;
                 *f_end = '\0';
-                p->filename = strdup(val_start); // Di-copy agar tetap aman di struct lo
+                p->filename = strdup(val_start);
                 *f_end = orig_f;
             }
         }
@@ -91,27 +91,30 @@ void http_multipart_parse_body(RequestHeader *req) {
         // Balikkan karakter asli di header_end
         *header_end = orig_header_end;
 
-        // 3. Tentukan Data (Tetap Zero-Copy p->data menunjuk ke buffer asli)
+        // 3. Tentukan Data (Zero-Copy)
         p->data = header_end + 4;
         
-        char *next_boundary = memmem(p->data, req->body_length - ((char*)p->data - (char*)req->body_data), boundary, b_len);
+        if ((char*)p->data >= buffer_end) break;
+        size_t data_search_len = (size_t)(buffer_end - (char*)p->data);
+
+        char *next_boundary = memmem(p->data, data_search_len, boundary, (size_t)b_len);
         
         if (next_boundary) {
-            //p->data_len = (size_t)((next_boundary - 2) - (char*)p->data);
-            if (next_boundary && (next_boundary >= (char*)p->data + 2)) {
+            if (next_boundary >= (char*)p->data + 2) {
                 p->data_len = (size_t)((next_boundary - 2) - (char*)p->data);
-            } else if (next_boundary) {
+            } else {
                 p->data_len = (size_t)(next_boundary - (char*)p->data);
             }
 
-            // LOG SETIAP PART YANG BERHASIL DI-PARSE
             write_log("[UPLOAD] Part #%d parsed: name=\"%s\", file=\"%s\" (%zu bytes)", 
                       req->parts_count + 1, 
                       p->name ? p->name : "none", 
                       p->filename ? p->filename : "none", 
                       p->data_len);
                       
-            remaining_len -= (next_boundary - current_pos);
+            // Update posisi secara aman
+            if (next_boundary > buffer_end) break;
+            remaining_len = (size_t)(buffer_end - next_boundary);
             current_pos = next_boundary;
             req->parts_count++;
         } else {

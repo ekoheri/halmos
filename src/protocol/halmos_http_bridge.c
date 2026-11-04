@@ -91,6 +91,7 @@ static halmos_protocol_t bridge_detect(int fd, SSL *ssl);
  *  tidak boleh ketimpa rearm generik EPOLLIN|EPOLLOUT di caller)
  */
 int http_bridge_dispatch(int sock_client, uint32_t events) {
+    (void)events;
     if (halmos_is_websocket_fd(sock_client)) {
         return ws_system_dispatch(sock_client);
     }
@@ -128,31 +129,35 @@ int http_bridge_dispatch(int sock_client, uint32_t events) {
  
     // Jika event pancingannya adalah EPOLLOUT, kita bisa langsung melompat 
     // ke protocol manager (karena handshake/deteksi awal biasanya sudah selesai di event EPOLLIN sebelumnya).
+    /*
     if (!(events & EPOLLOUT)) {
-        // 2. DETEKSI AWAL: Intip byte pertama kalau belum yakin ini TLS
-        if (!is_actually_tls) {
-            ssize_t n = recv(sock_client, peek_buf, 1, MSG_PEEK | MSG_DONTWAIT);
+        if dipindah keluar
+    }
+    */
+    
+    // 2. DETEKSI AWAL: Intip byte pertama kalau belum yakin ini TLS
+    if (!is_actually_tls) {
+        ssize_t n = recv(sock_client, peek_buf, 1, MSG_PEEK | MSG_DONTWAIT);
+        
+        if (n < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                return 2; 
+            }
+            return 0; 
+        }
+
+        if (n == 0) {
+            return 0; // Client close koneksi
+        }
+
+        if (peek_buf[0] == 0x16) {
+            is_actually_tls = true;
             
-            if (n < 0) {
-                if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                    return 2; 
-                }
-                return 0; 
-            }
- 
-            if (n == 0) {
-                return 0; // Client close koneksi
-            }
- 
-            if (peek_buf[0] == 0x16) {
-                is_actually_tls = true;
-                
-                if (config.tls_enabled) {
-                    ssl = SSL_new(halmos_tls_ctx);
-                    SSL_set_fd(ssl, sock_client);
-                    ssl_set_for_fd(sock_client, ssl);
-                    conn->ssl = ssl;
-                }
+            if (config.tls_enabled) {
+                ssl = SSL_new(halmos_tls_ctx);
+                SSL_set_fd(ssl, sock_client);
+                ssl_set_for_fd(sock_client, ssl);
+                conn->ssl = ssl;
             }
         }
     }

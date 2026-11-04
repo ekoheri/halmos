@@ -50,6 +50,8 @@ typedef struct {
     char *path_info;
     char *content_type;
     char *cookie_data;
+    char *authorization;
+    char *user_agent;
     void *vhost_context;
     FcgiBackend backend_type;
 
@@ -62,6 +64,8 @@ typedef struct {
     char h2_host_buf[HTTP2_HOST_MAX];
     char h2_content_type_buf[HTTP2_CONTENT_TYPE_MAX];
     char h2_cookie_buf[HTTP2_COOKIE_MAX];
+    char h2_auth_buf[512];
+    char h2_user_agent_buf[256];
 
     // Status Error (0 = Normal, 414 = URI Too Long, 431 = Header Too Large)
     int error_code;

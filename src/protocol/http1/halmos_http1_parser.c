@@ -134,6 +134,8 @@ bool http1_parser_parse_header(char *raw_data, size_t total_received, RequestHea
                 req->vhost_context = (void *)http_vhost_get_context(req->host);
             }
             else if (strcasecmp(key, "Content-Type") == 0) req->content_type = val;
+            else if (strcasecmp(key, "Authorization") == 0) req->authorization = val; // <--- TAMBAHKAN INI
+            else if (strcasecmp(key, "User-Agent") == 0) req->user_agent = val;
             else if (strcasecmp(key, "Content-Length") == 0) {
                 req->content_length = strtol(val, NULL, 10);
                 if (req->content_length < 0) req->content_length = 0;
@@ -181,11 +183,15 @@ bool http1_parser_parse_header(char *raw_data, size_t total_received, RequestHea
                 strcat(t_query, req->query_string);
             }
 
-            // Update memori route_result (Zero-copy sync)
+            // --- AMAN: Susun URI akhir dengan menggabungkan t_uri dan t_path terlebih dahulu ---
+            char final_uri[256];
+            snprintf(final_uri, sizeof(final_uri), "%s%s", t_uri, t_path);
+
+            // Update memori route_result (Zero-copy sync dengan offset aman)
             int offset = 0;
             req->uri = &req->route_result[offset];
-            strcpy(req->uri, t_uri);
-            size_t uri_len = strlen(t_uri);
+            strcpy(req->uri, final_uri);
+            size_t uri_len = strlen(req->uri);
             offset += uri_len + 1;
 
             req->query_string = &req->route_result[offset];
@@ -194,8 +200,8 @@ bool http1_parser_parse_header(char *raw_data, size_t total_received, RequestHea
 
             // Sinkronisasi Path Info
             if (strlen(t_path) > 0) {
-                req->path_info = req->uri + uri_len; 
-                strcat(req->uri, t_path);
+                // Path info menunjuk ke bagian awal t_path di dalam uri yang sudah digabung
+                req->path_info = req->uri + (strlen(t_uri)); 
             } else {
                 req->path_info = NULL; 
             }

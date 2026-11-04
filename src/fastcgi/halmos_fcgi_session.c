@@ -229,10 +229,18 @@ void fcgi_session_release(FCGI_Session *session) {
 // --- IMPLEMENTASI RING BUFFER STATIS ---
 
 size_t fcgi_ring_write(FCGIRingBuffer *rb, const char *src, size_t len) {
+    if (!rb || !src || len == 0) return 0;
+
     size_t written = 0;
-    while (written < len && rb->size < FCGI_RING_BUFFER_SIZE) {
-        size_t idx = (rb->tail + rb->size) % FCGI_RING_BUFFER_SIZE;
+    while (written < len) {
+        if (rb->size >= FCGI_RING_BUFFER_SIZE) {
+            break; // Buffer penuh
+        }
+        
+        // Indeks penulisan dihitung dari posisi tail
+        size_t idx = rb->tail;
         rb->data[idx] = src[written++];
+        rb->tail = (rb->tail + 1) % FCGI_RING_BUFFER_SIZE;
         rb->size++;
     }
     return written;

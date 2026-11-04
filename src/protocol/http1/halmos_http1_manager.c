@@ -390,93 +390,34 @@ int http1_manager_routing_bridge(halmos_conn_t *conn, HTTP1Session *session) {
 // Helper 3: Menangani State Pemrosesan & Pengiriman FastCGI (Kembali ke Stabil)
 // =========================================================================
 int handle_fcgi_processing_state(halmos_conn_t *conn, HTTP1Session *session, int sock_client, bool is_tls) {
+    // Redam warning unused parameter
+    (void)conn;
+    (void)sock_client;
+    (void)is_tls;
+
     FCGI_Session *fs = fcgi_session_slot_get(session->fcgi_session_id);
 
-    if (session->fcgi_write_buf == NULL) {
-        if (fs != NULL && fs->state != FCGI_STATE_FINISHED && fs->state != FCGI_STATE_ERROR && fs->is_fcgi_active) {
-            return 2;
-        }
-
-        if (fs == NULL || fs->state == FCGI_SESSION_FREE) {
-            session->fcgi_session_id = -1;
-            return 0;
-        }
-
-        size_t h_len = fs->fcgi_h_ptr;
-        size_t body_len = fs->rx_buffer.size; 
-        size_t total_body_len = h_len + body_len;
-
-        char status_ok[256];
-        int status_len = snprintf(status_ok, sizeof(status_ok),
-                                  "HTTP/1.1 200 OK\r\n"
-                                  "Server: Halmos-Savage/2.1\r\n"
-                                  "Connection: keep-alive\r\n"
-                                  "Content-Length: %zu\r\n\r\n", 
-                                  total_body_len);
-
-        session->fcgi_write_len = status_len + total_body_len;
-        session->fcgi_write_buf = malloc(session->fcgi_write_len);
-        if (!session->fcgi_write_buf) {
-            fcgi_session_release(fs);
-            session->fcgi_session_id = -1;
-            return 0;
-        }
-        
-        size_t offset = 0;
-        memcpy(session->fcgi_write_buf + offset, status_ok, status_len);
-        offset += status_len;
-
-        if (h_len > 0) {
-            memcpy(session->fcgi_write_buf + offset, fs->fcgi_header_buf, h_len);
-            offset += h_len;
-        }
-
-        if (body_len > 0) {
-            size_t read_from_ring = fcgi_ring_read(&fs->rx_buffer, (char *)(session->fcgi_write_buf + offset), body_len);
-            offset += read_from_ring;
-        }
-
-        session->fcgi_write_offset = 0;
-        fcgi_session_release(fs);
+    if (fs == NULL || fs->state == FCGI_SESSION_FREE || !fs->is_fcgi_active) {
+        if (fs) fcgi_session_release(fs);
         session->fcgi_session_id = -1;
+        
+        // Reset sesi untuk Keep-Alive berikutnya
+        bool keep_alive = session->req.is_keep_alive;
+        http1_parser_free_memory(&session->req);
+        memset(&session->req, 0, sizeof(RequestHeader));
+        session->buf_len = 0;
+        if (session->buffer) session->buffer[0] = '\0';
+        session->is_header_sent = false;
+        session->state = STATE_READ_HEADERS;
+        
+        return keep_alive ? 2 : 0;
     }
 
-    size_t remaining = session->fcgi_write_len - session->fcgi_write_offset;
-    ssize_t written = 0;
+    // JANGAN PANGGIL fcgi_session_release(fs) DI SINI! 
+    // Biarkan slot tetap dipegang selama request aktif.
+    //fcgi_session_release(fs);
 
-    if (is_tls) {
-        written = SSL_write(conn->ssl, session->fcgi_write_buf + session->fcgi_write_offset, (int)remaining);
-    } else {
-        written = send(sock_client, session->fcgi_write_buf + session->fcgi_write_offset, remaining, MSG_NOSIGNAL);
-    }
-
-    if (written > 0) {
-        session->fcgi_write_offset += written;
-        if (session->fcgi_write_offset < session->fcgi_write_len) {
-            return 3; 
-        }
-    } else {
-        int err = is_tls ? SSL_get_error(conn->ssl, (int)written) : errno;
-        if (err == EAGAIN || err == EWOULDBLOCK || err == SSL_ERROR_WANT_WRITE || err == SSL_ERROR_WANT_READ) {
-            return 3;
-        }
-        free(session->fcgi_write_buf);
-        session->fcgi_write_buf = NULL;
-        return 0;
-    }
-
-    free(session->fcgi_write_buf);
-    session->fcgi_write_buf = NULL;
-
-    bool keep_alive = session->req.is_keep_alive;
-    http1_parser_free_memory(&session->req);
-    memset(&session->req, 0, sizeof(RequestHeader));
-    
-    session->buf_len = 0;
-    if (session->buffer) session->buffer[0] = '\0';
-    session->state = STATE_READ_HEADERS;
-    
-    return keep_alive ? 2 : 0;
+    return 2; // Keep waiting (EPOLLIN dari fpm_fd)
 }
 
 // =========================================================================

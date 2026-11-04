@@ -390,6 +390,19 @@ void flush_fcgi_stream(HTTP2Session *session, uint32_t target_sid) {
                 session->out_window_size -= (int32_t)bytes_to_send;
                 st->out_window_size -= (int32_t)bytes_to_send;
                 st->fcgi_g_sent += bytes_to_send;
+
+                // ---> TARUH DI SINI <---
+                if (st->fcgi_g_sent >= st->fcgi_g_ptr) {
+                    // Semua data di buffer sudah terkirim, reset total
+                    st->fcgi_g_sent = 0;
+                    st->fcgi_g_ptr = 0;
+                } else if (st->fcgi_g_sent > 0) {
+                    // Geser sisa data yang belum terkirim (karena window flow control) ke depan buffer
+                    size_t unsent = st->fcgi_g_ptr - st->fcgi_g_sent;
+                    memmove(st->fcgi_gather_buf, st->fcgi_gather_buf + st->fcgi_g_sent, unsent);
+                    st->fcgi_g_ptr = unsent;
+                    st->fcgi_g_sent = 0;
+                }
             }
 
             if (is_stream_finished) {

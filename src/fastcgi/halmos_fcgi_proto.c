@@ -123,6 +123,20 @@ void fcgi_proto_build_params(RequestHeader *req, int sock_client, size_t content
         FCGI_ADD_PARAM_SAFE("CONTENT_TYPE", type_to_send);
     }
 
+    if (req->authorization) {
+        FCGI_ADD_PARAM_SAFE("HTTP_AUTHORIZATION", req->authorization);
+    }
+    if (req->user_agent) {
+        FCGI_ADD_PARAM_SAFE("HTTP_USER_AGENT", req->user_agent);
+    }
+    if (req->content_type && content_length == 0) { // Jika content_type ada tapi bukan payload utama POST
+        FCGI_ADD_PARAM_SAFE("HTTP_CONTENT_TYPE", req->content_type);
+    }
+    
+    // Jika struct RequestHeader Anda memiliki field header kustom lain, Anda bisa tambahkan di sini:
+    // FCGI_ADD_PARAM_SAFE("HTTP_ACCEPT", req->accept);
+    // FCGI_ADD_PARAM_SAFE("HTTP_X_REQUESTED_WITH", req->x_requested_with);
+
     // 2. Finalisasi Header PARAMS
     // Perhitungan panjang payload (p_len) adalah selisih antara posisi p_offset saat ini 
     // dikurangi posisi awal data (setelah header_pos + sizeof(FCGI_Header))

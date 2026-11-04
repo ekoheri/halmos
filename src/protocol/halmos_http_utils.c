@@ -135,11 +135,17 @@ char *sanitize_path(const char *root, const char *uri) {
 
     // Gabungkan dengan cerdas: cek apakah uri sudah punya slash
     // 3. Gabungkan Path
-    if (uri[0] == '/') {
-        snprintf(full_path, sizeof(full_path), "%.512s%.511s", resolved_root, uri);
-    } else {
-        snprintf(full_path, sizeof(full_path), "%.512s/%.510s", resolved_root, uri);
+    size_t r_len = strlen(resolved_root);
+    size_t u_len = strlen(uri);
+
+    memcpy(full_path, resolved_root, r_len);
+    size_t current = r_len;
+
+    if (uri[0] != '/') {
+        full_path[current++] = '/';
     }
+    
+    memcpy(full_path + current, uri, u_len + 1); // +1 menyalin null-terminator '\0'
 
     char resolved_path[PATH_MAX];
     if (realpath(full_path, resolved_path) == NULL) {

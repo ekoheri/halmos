@@ -82,9 +82,26 @@ static int create_backend_socket(const char *target, int port, bool is_unix) {
             }
 
             int res = connect(sock, (struct sockaddr *)&addr, sizeof(addr));
-            if (res < 0 && errno != EINPROGRESS) {
-                close(sock);
-                sock = -1;
+            if (res < 0) {
+                if (errno == EINPROGRESS) {
+                    // Tunggu hingga soket siap (writable) menandakan handshake TCP/Unix selesai (timeout 1 detik)
+                    struct pollfd pfd = { .fd = sock, .events = POLLOUT };
+                    int pr = poll(&pfd, 1, 1000);
+                    if (pr <= 0 || !(pfd.revents & POLLOUT)) {
+                        close(sock);
+                        return -1;
+                    }
+                    // Validasi apakah benar-benar tersambung tanpa error
+                    int optval = 0;
+                    socklen_t optlen = sizeof(optval);
+                    if (getsockopt(sock, SOL_SOCKET, SO_ERROR, &optval, &optlen) < 0 || optval != 0) {
+                        close(sock);
+                        return -1;
+                    }
+                } else {
+                    close(sock);
+                    return -1;
+                }
             }
         }
     } else {
@@ -102,10 +119,27 @@ static int create_backend_socket(const char *target, int port, bool is_unix) {
             }
 
             int res = connect(sock, (struct sockaddr *)&addr, sizeof(addr));
-            if (res < 0 && errno != EINPROGRESS) {
-                write_log_error_code(ERR_FCGI_BACKEND_SOCK, target ? target : "0.0.0.0", port);
-                close(sock);
-                sock = -1;
+            if (res < 0) {
+                if (errno == EINPROGRESS) {
+                    // Tunggu hingga soket siap (writable) menandakan handshake TCP/Unix selesai (timeout 1 detik)
+                    struct pollfd pfd = { .fd = sock, .events = POLLOUT };
+                    int pr = poll(&pfd, 1, 1000);
+                    if (pr <= 0 || !(pfd.revents & POLLOUT)) {
+                        close(sock);
+                        return -1;
+                    }
+                    // Validasi apakah benar-benar tersambung tanpa error
+                    int optval = 0;
+                    socklen_t optlen = sizeof(optval);
+                    if (getsockopt(sock, SOL_SOCKET, SO_ERROR, &optval, &optlen) < 0 || optval != 0) {
+                        close(sock);
+                        return -1;
+                    }
+                } else {
+                    write_log_error_code(ERR_FCGI_BACKEND_SOCK, target ? target : "0.0.0.0", port);
+                    close(sock);
+                    return -1;
+                }
             }
         }
     }

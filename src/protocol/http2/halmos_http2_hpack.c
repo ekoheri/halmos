@@ -5064,6 +5064,20 @@ int http2_hpack_literal_header_with_name(const char *name, const char *value, Re
         }
         req->cookie_data = req->h2_cookie_buf;
     } 
+    else if (strcmp(name, "authorization") == 0) {
+        if (val_len >= sizeof(req->h2_auth_buf)) {
+            return 431; // Request Header Fields Too Large
+        }
+        snprintf(req->h2_auth_buf, sizeof(req->h2_auth_buf), "%s", value);
+        req->authorization = req->h2_auth_buf;
+    }
+    else if (strcmp(name, "user-agent") == 0) {
+        if (val_len >= sizeof(req->h2_user_agent_buf)) {
+            return 431; // Request Header Fields Too Large
+        }
+        snprintf(req->h2_user_agent_buf, sizeof(req->h2_user_agent_buf), "%s", value);
+        req->user_agent = req->h2_user_agent_buf;
+    }
     else if (strcmp(name, "content-length") == 0) {
         req->content_length = strtol(value, NULL, 10);
     } 
