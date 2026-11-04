@@ -89,7 +89,7 @@ bool fcgi_event_loop_mod(int fpm_fd, uint32_t events) {
     //(stderr, "[FCGI_POLLER_DEBUG] Modifying fpm_fd=%d in epoll (new events=0x%x)\n", fpm_fd, events);
 
     if (epoll_ctl(upstream_poller.epoll_fd, EPOLL_CTL_MOD, fpm_fd, &ev) < 0) {
-        //fprintf(stderr, "[FCGI_POLLER_DEBUG] ERROR: epoll_ctl MOD failed for fd=%d: %s\n", fpm_fd, strerror(errno));
+        write_log_error_code(ERR_FCGI_EPOLL_MOD, fpm_fd, strerror(errno));
         return false;
     }
     return true;

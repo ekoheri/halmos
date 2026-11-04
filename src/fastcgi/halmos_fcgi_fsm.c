@@ -65,7 +65,10 @@ bool fcgi_fsm_step_http1(FCGI_Session *session) {
     if (h->type == FCGI_STDOUT) {
         if (clen > 0) {
             char *payload = malloc(clen + 1);
-            if (payload) {
+            if (!payload) {
+                // [LOG TAMBAHAN] Kehabisan RAM saat mengalokasikan payload FPM
+                write_log_error_code(ERR_FCGI_PAYLOAD_MEM, clen + 1);
+            } else {
                 int read_bytes = 0;
                 int retry_count = 0;
                 while (read_bytes < clen) {
@@ -166,7 +169,10 @@ bool fcgi_fsm_step_http2(FCGI_Session *session) {
     if (h->type == FCGI_STDOUT) {
         if (clen > 0) {
             char *payload = malloc(clen + 1);
-            if (payload) {
+            if (!payload) {
+                // [LOG TAMBAHAN] Kehabisan RAM saat mengalokasikan payload FPM
+                write_log_error_code(ERR_FCGI_PAYLOAD_MEM, clen + 1);
+            } else {
                 int read_bytes = 0;
                 int retry_count = 0;
                 while (read_bytes < clen) {

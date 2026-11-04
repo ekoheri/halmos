@@ -79,12 +79,14 @@ bool fcgi_queue_push(int session_id, FCGI_TaskType type) {
     pthread_mutex_lock(&q->lock);
 
     if (!q->is_running || q->size >= q->max_queue_limit) {
+        write_log_warn_code(WARN_FCGI_QUEUE_FULL, q->size, q->max_queue_limit);
         pthread_mutex_unlock(&q->lock);
         return false;
     }
 
     FCGI_Task *new_task = malloc(sizeof(FCGI_Task));
     if (!new_task) {
+        write_log_error_code(ERR_FCGI_TASK_MEM);
         pthread_mutex_unlock(&q->lock);
         return false;
     }
@@ -116,6 +118,12 @@ bool fcgi_queue_push(int session_id, FCGI_TaskType type) {
     int queue_threshold = q->total_workers * 2; 
     if (queue_threshold < 4) queue_threshold = 4;
 
+    //UPSCALE : Jika ada task baru yang masuk (push) dan ukuran antrean (q->size) 
+    // melebihi ambang batas (queue_threshold, yaitu dua kali lipat jumlah worker aktif), 
+    // serta jumlah worker belum menyentuh batas maksimal (g_worker_max), 
+    // server akan secara otomatis menaikkan q->total_workers++ dan 
+    // men-spawn worker baru (fcgi_thread_pool_spawn_detached).
+    
     if (q->size > queue_threshold 
         && q->total_workers < q->max_threads_limit 
         && !q->scaling_in_progress) {
@@ -130,7 +138,9 @@ bool fcgi_queue_push(int session_id, FCGI_TaskType type) {
 
     if (should_spawn) {
         pthread_t tid;
-        if (fcgi_thread_pool_spawn_detached(&tid, fcgi_thread_pool_worker, q) != 0) {
+        int spawn_res = fcgi_thread_pool_spawn_detached(&tid, fcgi_thread_pool_worker, q);
+        if (spawn_res != 0) {
+            write_log_error_code(ERR_FCGI_SPAWN_THREAD, strerror(spawn_res));
             pthread_mutex_lock(&q->lock);
             q->total_workers--; 
             pthread_mutex_unlock(&q->lock);
@@ -162,8 +172,8 @@ FCGI_Task* fcgi_queue_pop(struct timeval *arrival) {
         gettimeofday(&now, NULL);
         int current_timeout = halmos_fcgi_get_adaptive_timeout(q);
 
-    ts.tv_sec = now.tv_sec + current_timeout;
-    ts.tv_nsec = (long)(now.tv_usec * 1000);
+        ts.tv_sec = now.tv_sec + current_timeout;
+        ts.tv_nsec = (long)(now.tv_usec * 1000);
         if (ts.tv_nsec >= 1000000000) {
             ts.tv_sec++;
             ts.tv_nsec -= 1000000000;
@@ -178,6 +188,11 @@ FCGI_Task* fcgi_queue_pop(struct timeval *arrival) {
             return NULL;
         }
 
+        //DOWNSCALE : Jika sebuah worker thread menunggu tugas di dalam antrean (pop) hingga 
+        // mengalami waktu habis/timeout (ETIMEDOUT), antrean kosong (q->head == NULL), 
+        // dan jumlah worker saat ini masih di atas batas minimal (g_worker_min), 
+        // maka worker tersebut akan memangkas dirinya sendiri (q->total_workers--) 
+        // dan keluar secara anggun untuk menghemat sumber daya sistem.
         if (rc == ETIMEDOUT && q->head == NULL && q->total_workers > q->min_threads_limit) {
             q->total_workers--;
             pthread_cond_signal(&q->exit_cond);

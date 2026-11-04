@@ -98,7 +98,21 @@ static const ErrorMapping ERROR_TABLE[] = {
     { ERR_FCGI_EPOLL_CREATE,   "FastCGI event loop epoll_create1 failed: %s" },
     { ERR_FCGI_EPOLL_MEM,      "Failed to allocate memory for FastCGI epoll events batch" },
     { ERR_FCGI_EPOLL_ADD,      "FastCGI epoll_ctl(EPOLL_CTL_ADD) failed for fpm_fd %d: %s" },
+    { ERR_FCGI_EPOLL_MOD,      "FastCGI epoll_ctl(EPOLL_CTL_MOD) failed for fpm_fd %d: %s" },
 
+    //fastcgi/fcgi_session.c
+    { ERR_FCGI_POOL_MEM,       "FATAL: Failed to allocate memory for FastCGI global session pool (%d sessions)" },
+    { ERR_FCGI_POOL_MUTEX,     "FATAL: Failed to initialize global session pool mutex" },
+    { ERR_FCGI_UPSTREAM_SEL,   "Failed to select FastCGI upstream node for URI: %s" },
+    { ERR_FCGI_NONBLOCK,       "Failed to set O_NONBLOCK for FPM socket FD %d" },
+    
+    //fastcgi/fcgi_queue.c
+    { ERR_FCGI_TASK_MEM,       "Failed to allocate memory for new FastCGI task item" },
+    { ERR_FCGI_SPAWN_THREAD,   "FATAL: Failed to spawn FastCGI worker thread: %s (System limit reached?)" },
+
+    //fastcgi/fcgi_fsme.c
+    { ERR_FCGI_PAYLOAD_MEM,    "Failed to allocate memory for FastCGI payload buffer (Size: %d bytes)" },
+    
     // --- WARNING ---
     //protocol/http_utils.c
     { WARN_PROTO_PATH_TRAVERSAL,"Path traversal security attempt blocked: %s" },
@@ -113,10 +127,16 @@ static const ErrorMapping ERROR_TABLE[] = {
     { WARN_PROTO_WS_PAYLOAD_SZ,"WebSocket FD %d payload size limit exceeded (%zu bytes)" },
     { WARN_PROTO_WS_JSON_ERR,  "Malformed JSON payload on WebSocket FD %d (Stream ID %u)" },
     { WARN_PROTO_WS_IPC_JSON,  "Malformed internal JSON received in WebSocket IPC" },
-    //fastcgi/fcgi_upstream.c & fcgi subsystem
+    
+    //fastcgi/fcgi_upstream.c
     { WARN_FCGI_BACKEND_DEAD,  "Upstream backend socket %d detected unhealthy/disconnected, cleaning up slot" },
+
+    //fastcgi/fcgi_session.c
+    { WARN_FCGI_POOL_EXHAUSTED, "Global FastCGI session pool exhausted (Max: %d sessions). Rejecting client FD %d" },
+
     //fastcgi/fcgi_queue.c
     { WARN_FCGI_QUEUE_FULL,    "FastCGI task queue capacity reached (%d/%d)! Rejecting incoming task" },
+    
     //security/traffic.c
     { WARN_SEC_RATE_LIMIT,     "Rate limit exceeded for client IP: %s (Limit: %d req/sec)" }
 };

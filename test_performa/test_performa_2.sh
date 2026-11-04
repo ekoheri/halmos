@@ -85,18 +85,24 @@ run_bench() {
     if [[ "$name" == "HALMOS_CORE" && "$max_ram" -lt 2000 ]]; then max_ram=2150; fi
     local final_ram_mb=$(echo "scale=2; $max_ram / 1024" | bc)
     
-    # --- 5. RECORD STATISTICS TO FILE ---
-    echo -e "\nUnit: $name ($level)" >> $OUTPUT_FILE
-    
+    # --- 5. PARSE STATISTICS FROM WRK ---
     local rps=$(grep "Requests/sec:" temp_wrk.txt | awk '{print $2}')
     local lat_avg=$(grep "Latency" temp_wrk.txt | head -n 1 | awk '{print $2}')
     local req_tot=$(grep "requests in" temp_wrk.txt | awk '{print $1}')
+    local transfer_sec=$(grep "Transfer/sec:" temp_wrk.txt | awk '{print $2, $3}')
+    local socket_errors=$(grep -E "Socket errors:" temp_wrk.txt || echo "Socket errors: none")
+    local non_2xx_3xx=$(grep -E "Non-2xx or 3xx status codes" temp_wrk.txt || echo "Non-2xx/3xx: none")
 
+    # --- 6. RECORD STATISTICS TO LOG FILE ---
+    echo -e "\nUnit: $name ($level)" >> $OUTPUT_FILE
     echo "Total Requests      : ${req_tot:-N/A}" >> $OUTPUT_FILE
     echo "Requests per second : ${rps:-N/A}" >> $OUTPUT_FILE
+    echo "Transfer rate       : ${transfer_sec:-N/A}" >> $OUTPUT_FILE
     echo "Average Latency     : ${lat_avg:-N/A}" >> $OUTPUT_FILE
-    cat temp_wrk.txt | grep -E "Req/Sec|Latency Distribution" -A 10 >> $OUTPUT_FILE 2>/dev/null
     echo "Peak RAM Usage      : $final_ram_mb MB" >> $OUTPUT_FILE
+    echo "[Error Metrics]     : $socket_errors | $non_2xx_3xx" >> $OUTPUT_FILE
+    
+    cat temp_wrk.txt | grep -E "Req/Sec|Latency Distribution" -A 10 >> $OUTPUT_FILE 2>/dev/null
     
     # Rangkuman vmstat
     echo "--- System Health During Test (vmstat avg) ---" >> $OUTPUT_FILE
@@ -110,8 +116,25 @@ run_bench() {
     fi
 
     echo "-------------------------------------------------" >> $OUTPUT_FILE
-    echo -e "      [RESULT] Speed: ${rps:-N/A} RPS | Latency: ${lat_avg:-N/A} | Peak RAM: $final_ram_mb MB"
-    
+
+    # --- 7. DISPLAY DETAILED RESULTS TO SCREEN/TERMINAL ---
+    echo -e "\n================================================="
+    echo -e "      BENCHMARK RESULT: $name ($level)           "
+    echo -e "================================================="
+    echo -e " Total Requests      : ${req_tot:-0}"
+    echo -e " Requests per second : ${rps:-0} RPS"
+    echo -e " Transfer rate       : ${transfer_sec:-N/A}"
+    echo -e " Average Latency     : ${lat_avg:-N/A}"
+    echo -e " Peak RAM Usage      : $final_ram_mb MB"
+    echo -e "-------------------------------------------------"
+    echo -e " [Error Metrics & Status]"
+    echo -e "   -> $socket_errors"
+    echo -e "   -> $non_2xx_3xx"
+    echo -e "================================================="
+    echo -e " Latency Distribution Details:"
+    grep -E "50%|75%|90%|99%" temp_wrk.txt || echo "   (Distribusi latensi tidak tersedia)"
+    echo -e "================================================="
+
     rm -f temp_wrk.txt temp_vmstat.txt temp_perf_log.txt
 
     echo "      [COOLDOWN] Clearing sockets and resting CPU..."

@@ -250,8 +250,7 @@ int fcgi_upstream_acquire(const char *target, int port) {
         }
         pthread_mutex_unlock(&fcgi_upstream.lock);
     }
-
-    // --- BAGIAN 2: CREATE BARU JIKA PERLU ---
+    
     // --- BAGIAN 2: CREATE BARU JIKA PERLU ---
     if (final_sock == -1) {
         // Pembuatan socket jaringan dilakukan di luar mutex (non-blocking / connect async)

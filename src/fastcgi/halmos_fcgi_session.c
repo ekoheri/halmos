@@ -26,10 +26,12 @@ bool fcgi_global_pool_init(int max_sessions) {
     // Alokasi memori tunggal untuk seluruh pool sesi
     g_session_pool = malloc(sizeof(FCGI_Session) * g_max_sessions);
     if (!g_session_pool) {
+        write_log_error_code(ERR_FCGI_POOL_MEM, g_max_sessions);
         return false;
     }
 
     if (pthread_mutex_init(&g_pool_lock, NULL) != 0) {
+        write_log_error_code(ERR_FCGI_POOL_MUTEX);
         free(g_session_pool);
         g_session_pool = NULL;
         return false;
@@ -91,7 +93,7 @@ FCGI_Session* fcgi_session_create(int sock_client, bool is_tls, SSL *ssl_conn, R
 
     if (!session) {
         pthread_mutex_unlock(&g_pool_lock);
-        //fprintf(stderr, "[FCGI_SESSION_DEBUG] ERROR: Global Session Pool Exhausted!\n");
+        write_log_warn_code(WARN_FCGI_POOL_EXHAUSTED, g_max_sessions, sock_client);
         return NULL; // Pool penuh / Max konkurensi tercapai
     }
 
@@ -139,6 +141,7 @@ FCGI_Session* fcgi_session_create(int sock_client, bool is_tls, SSL *ssl_conn, R
 
     if (fcgi_upstream_select_node(req, backend_type, &target_ip, &target_port, &is_unix) < 0) {
         // Kembalikan slot ke status FREE jika gagal
+        write_log_error_code(ERR_FCGI_UPSTREAM_SEL, req ? req->uri : "UNKNOWN_URI");
         pthread_mutex_lock(&session->lock);
         session->state = FCGI_SESSION_FREE;
         pthread_mutex_unlock(&session->lock);
@@ -147,7 +150,7 @@ FCGI_Session* fcgi_session_create(int sock_client, bool is_tls, SSL *ssl_conn, R
 
     int fpm_sock = fcgi_upstream_acquire(is_unix ? target_ip : NULL, target_port);
     if (fpm_sock < 0) {
-        // Kembalikan slot ke status FREE jika pool upstream habis
+        // Kembalikan slot ke status FREE jika pool upstream habis       
         pthread_mutex_lock(&session->lock);
         session->state = FCGI_SESSION_FREE;
         pthread_mutex_unlock(&session->lock);
@@ -158,6 +161,8 @@ FCGI_Session* fcgi_session_create(int sock_client, bool is_tls, SSL *ssl_conn, R
     int flags = fcntl(fpm_sock, F_GETFL, 0);
     if (flags != -1) {
         fcntl(fpm_sock, F_SETFL, flags | O_NONBLOCK);
+    } else {
+        write_log_error_code(ERR_FCGI_NONBLOCK, fpm_sock);
     }
     session->fpm_fd = fpm_sock;
 

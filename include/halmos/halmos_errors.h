@@ -108,6 +108,20 @@ typedef enum {
     ERR_FCGI_EPOLL_CREATE   = 5004, // Gagal membuat epoll instance untuk FCGI event loop
     ERR_FCGI_EPOLL_MEM      = 5005, // Gagal alokasi memori event batch epoll FCGI
     ERR_FCGI_EPOLL_ADD      = 5006, // Gagal menambahkan FPM FD ke epoll event loop
+    ERR_FCGI_EPOLL_MOD      = 5007, // Gagal meng-update FPM FD ke epoll event loop
+
+    //fastcgi/fcgi_session.c
+    ERR_FCGI_POOL_MEM       = 5008, // Gagal alokasi memori untuk global session pool
+    ERR_FCGI_POOL_MUTEX     = 5009, // Gagal inisialisasi mutex global session pool
+    ERR_FCGI_UPSTREAM_SEL   = 5010, // Gagal memilih node upstream untuk URI request
+    ERR_FCGI_NONBLOCK       = 5011, // Gagal set non-blocking pada FPM socket
+
+    // fastcgi/fcgi_queue.c
+    ERR_FCGI_TASK_MEM       = 5012, // Gagal alokasi memori task baru (Kehabisan RAM)
+    ERR_FCGI_SPAWN_THREAD   = 5013, // Gagal membuat thread worker FastCGI (Startup / Upscale)
+    
+    // fastcgi/fcgi_fsm.c
+    ERR_FCGI_PAYLOAD_MEM    = 5014, // Gagal alokasi memori payload FPM di FSM
 
     // ==========================================
     // KELOMPOK WARNING (Murni Perilaku / Aksi User)
@@ -126,9 +140,15 @@ typedef enum {
     WARN_PROTO_WS_JSON_ERR    = 9007,
     WARN_PROTO_WS_IPC_JSON    = 9008,
     
-    //fastcgi/fcgi_upstream.c & fcgi subsystem
-    WARN_FCGI_BACKEND_DEAD  = 9009, // Socket backend terdeteksi mati/unhealthy saat health check
-    WARN_FCGI_QUEUE_FULL    = 9010, // Antrean task FastCGI penuh, task ditolak
+    //fastcgi/fcgi_upstream.c 
+    WARN_FCGI_BACKEND_DEAD    = 9009, // Socket backend terdeteksi mati/unhealthy saat health check
+
+    // fastcgi/fcgi_session.c
+    WARN_FCGI_POOL_EXHAUSTED  = 9010, // Global session pool habis / max konkurensi tercapai
+
+    // fastcgi/fcgi_queue.c
+    WARN_FCGI_QUEUE_FULL      = 9011, // Antrean task FastCGI penuh (Kapasitas antrean/worker jenuh)
+  
     //security/traffic.c
     WARN_SEC_RATE_LIMIT       = 9500
 
