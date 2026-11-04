@@ -118,6 +118,12 @@ void http1_session_destroy(void *session) {
     if (s->fcgi_session_id >= 0) {
         FCGI_Session *fs = fcgi_session_slot_get(s->fcgi_session_id);
         if (fs) {
+            // Putuskan pointer SSL & socket agar worker tahu koneksi sudah putus
+            pthread_mutex_lock(&fs->lock);
+            fs->ssl_conn = NULL;
+            fs->sock_client = -1;
+            pthread_mutex_unlock(&fs->lock);
+
             fcgi_session_release(fs);
         }
         s->fcgi_session_id = -1;

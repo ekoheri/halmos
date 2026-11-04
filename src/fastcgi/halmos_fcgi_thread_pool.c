@@ -96,6 +96,15 @@ void* fcgi_thread_pool_worker(void *arg) {
 
         core_conn_t_lock(conn);
 
+        // Cegah eksekusi jika koneksi klien sudah diputus / dead
+        if (!atomic_load(&conn->active) || 
+            atomic_load(&conn->state) == CONN_STATE_DEAD ||
+            (session->is_tls && conn->ssl == NULL)) {
+            core_conn_t_unlock(conn);
+            fcgi_session_release(session);
+            continue;
+        }
+
         pthread_mutex_lock(&session->lock);
         if (session->fpm_fd == -99 || session->fpm_fd == -1) {
             pthread_mutex_unlock(&session->lock);
@@ -164,6 +173,11 @@ int fcgi_thread_pool_spawn_detached(pthread_t *out_tid, void *(*routine)(void *)
     pthread_attr_t attr;
     pthread_attr_init(&attr);
     pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+
+    // Membatasi stack size worker core jadi 256 KB
+    // Sebab jika tidak dibatasi, RAM yang kemakan bisa 2MB - 8 MB
+    pthread_attr_setstacksize(&attr, 256 * 1024);
+
     int ret = pthread_create(out_tid, &attr, routine, arg);
     pthread_attr_destroy(&attr);
     return ret;

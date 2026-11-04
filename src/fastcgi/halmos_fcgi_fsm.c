@@ -22,6 +22,8 @@
 #include <poll.h>
 
 static ssize_t http1_session_write(FCGI_Session *session, const void *buf, size_t len) {
+    if (!session || session->sock_client < 0) return -2;
+
     if (session->is_tls) {
         if (!session->ssl_conn) return -2;
         int written = SSL_write(session->ssl_conn, buf, (int)len);
@@ -200,9 +202,11 @@ bool fcgi_fsm_step_http1(FCGI_Session *session) {
             session->fcgi_header_parsed = true;
         }
         session->is_fcgi_active = false;
-        
-        // --- KIRIM TERMINAL CHUNK KE KLIEN ---
-        http1_send_terminal_chunk_safe(session);
+
+        // --- KIRIM TERMINAL CHUNK HANYA JIKA KONEKSI MASIH VALID ---
+        if (session->sock_client >= 0 && (!session->is_tls || session->ssl_conn != NULL)) {
+            http1_send_terminal_chunk_safe(session);
+        }
 
         if (session->fpm_fd != -1 && session->fpm_fd != -99) {
             fcgi_event_loop_del(session->fpm_fd);

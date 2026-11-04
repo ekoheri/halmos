@@ -253,6 +253,10 @@ int spawn_detached_worker(pthread_t *out_tid, void *(*routine)(void *), void *ar
     pthread_attr_t attr;
     pthread_attr_init(&attr);
     pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+
+    // Membatasi stack size worker core jadi 256 KB
+    // Sebab jika tidak dibatasi, RAM yang kemakan bisa 2MB - 8 MB
+    pthread_attr_setstacksize(&attr, 256 * 1024);
     
     int ret = pthread_create(out_tid, &attr, routine, arg);
     pthread_attr_destroy(&attr);
