@@ -42,6 +42,11 @@ void *core_thread_pool_worker(void *arg) {
             write_log("[WORKER] Stale event detected on FD %d (Gen: %u). Dropping task.", 
                       event_item.fd, event_item.generation);
             mark_worker_idle(&global_queue);
+            
+            // PASTIKAN: Cek apakah server sudah shutdown agar worker tidak looping selamanya
+            if (!global_queue.is_running && global_queue.head == NULL) {
+                break;
+            }
             continue;
         }
  
@@ -56,6 +61,10 @@ void *core_thread_pool_worker(void *arg) {
         if (!core_conn_t_is_valid(event_item.fd, event_item.generation)) {
             core_conn_t_unlock(conn);
             mark_worker_idle(&global_queue);
+            
+            if (!global_queue.is_running && global_queue.head == NULL) {
+                break;
+            }
             continue;
         }
  

@@ -23,7 +23,8 @@
 #include <openssl/sha.h>
 #include <json-c/json.h>
 #include <arpa/inet.h>   
-#include <endian.h>      
+#include <endian.h>
+#include <signal.h>      
 
 #define WS_GUID "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 #define MAX_WS_PAYLOAD (10 * 1024 * 1024)
@@ -32,6 +33,10 @@
 #endif
 
 static bool ws_fd_map[MAX_FDS]; 
+
+static pthread_t ws_maintenance_tid;
+
+static volatile sig_atomic_t ws_maintenance_running = 1;
 
 /* State machine receiver per-FD menggunakan ws_state_t yang didefinisikan di .h */
 typedef struct {
@@ -125,6 +130,8 @@ void halmos_ws_system_init(void) {
 }
 
 void ws_system_destroy(void) {
+    ws_maintenance_running = 0;
+    pthread_join(ws_maintenance_tid, NULL);
     for (int i = 0; i < MAX_FDS; i++) {
         ws_free_recv_state(i);
     }
@@ -151,11 +158,8 @@ void halmos_set_websocket_fd(int fd, bool status) {
 }
 
 static void ws_system_start_maintenance(void) {
-    pthread_t tid;
-    if (pthread_create(&tid, NULL, ws_system_maintenance_run, NULL) == 0) {
-        pthread_detach(tid);
-    } else {
-        //write_log_error("[WS-SYSTEM] Failed to start maintenance thread!");
+    // Buat thread tanpa detach (bersifat joinable secara default)
+    if (pthread_create(&ws_maintenance_tid, NULL, ws_system_maintenance_run, NULL) != 0) {
         write_log_error_code(ERR_PROTO_WS_MAINT_TH);
     }
 }
@@ -925,10 +929,23 @@ static void* ws_system_maintenance_run(void *arg) {
     (void)arg;
     write_log("[WS-SYSTEM] Background Maintenance Thread Active.");
 
-    while (1) {
-        sleep(30);
+    while (atomic_load(&ws_maintenance_running)) {
+        // Iris sleep 30 detik menjadi 30 kali sleep 1 detik 
+        // agar thread langsung responsif saat server shutdown tanpa nunggu lama
+        for (int i = 0; i < 30; i++) {
+            if (!atomic_load(&ws_maintenance_running)) {
+                break;
+            }
+            sleep(1);
+        }
+
+        if (!atomic_load(&ws_maintenance_running)) {
+            break;
+        }
+
+        // Jalankan pemeliharaan
         ws_registry_heartbeat();
-        ws_registry_reaper();
+        ws_registry_reaper(); // Pastikan ws_registry_reaper menggunakan mekanisme penguncian (io_lock) yang sama dengan core_conn_t
     }
     return NULL;
 }

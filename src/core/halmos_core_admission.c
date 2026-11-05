@@ -79,8 +79,19 @@ static void* admission_monitor_loop(void *arg) {
     int consecutive_idle_counts = 0;
 
     while (atomic_load(&controller->is_running)) {
-        // Sampling setiap 100ms agar sangat responsif terhadap lonjakan kilat wrk
-        usleep(100000); 
+        // Sampling total 100ms, dipecah menjadi 10 irisan 10ms 
+        // agar responsif terhadap sinyal shutdown (tidak perlu nunggu lama saat join)
+        for (int i = 0; i < 10; i++) {
+            if (!atomic_load(&controller->is_running)) {
+                break;
+            }
+            usleep(10000); // 10ms x 10 = 100ms
+        }
+
+        // Jika keburu dimatikan di tengah irisan sleep, langsung keluar loop
+        if (!atomic_load(&controller->is_running)) {
+            break;
+        }
         
         CpuStats curr_stats = read_cpu_stats();
         float cpu_usage = 0.0f;
@@ -88,33 +99,27 @@ static void* admission_monitor_loop(void *arg) {
         if (calculate_cpu_percentage(&prev_stats, &curr_stats, &cpu_usage)) {
             prev_stats = curr_stats; 
             
-            // Deteksi cepat jika server sedang sangat sepi / habis digeber wrk
             if (cpu_usage < 0.05f) {
                 consecutive_idle_counts++;
                 if (consecutive_idle_counts > 5) {
                     smoothed_cpu = 0.0f;
                     consecutive_idle_counts = 0;
-                    //is_first_sample = true;
                     atomic_store(&controller->is_cpu_overloaded, false);
                 }
             } else {
                 consecutive_idle_counts = 0;
             }
 
-            // Perhitungan EMA (jika di-reset ke 0, langsung ambil nilai cpu_usage terbaru)
             if (smoothed_cpu == 0.0f) {
                 smoothed_cpu = cpu_usage;
-                //is_first_sample = false; // pastikan tidak dianggap first sample kosong
             } else {
                 smoothed_cpu = (0.25f * cpu_usage) + (0.75f * smoothed_cpu);
             }
             
-            // Simpan hasil yang sudah di-smoothing ke atomic variable
             atomic_store(&controller->live_cpu_usage, smoothed_cpu);
             
             bool cpu_overload = atomic_load(&controller->is_cpu_overloaded);
             
-            // Evaluasi Hysteresis CPU menggunakan nilai smoothed_cpu
             if (!cpu_overload && smoothed_cpu >= controller->max_cpu_threshold) {
                 atomic_store(&controller->is_cpu_overloaded, true);
             } else if (cpu_overload && smoothed_cpu <= controller->recovery_cpu_threshold) {
@@ -127,7 +132,6 @@ static void* admission_monitor_loop(void *arg) {
         
         bool ram_overload = atomic_load(&controller->is_ram_overloaded);
         
-        // Evaluasi Hysteresis RAM menggunakan threshold dinamis
         if (!ram_overload && ram_usage >= controller->max_ram_threshold) {
             atomic_store(&controller->is_ram_overloaded, true);
         } else if (ram_overload && ram_usage <= controller->recovery_ram_threshold) {

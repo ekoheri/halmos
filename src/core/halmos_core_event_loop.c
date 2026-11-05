@@ -43,6 +43,8 @@ int sock_server;
 AdmissionController *admission_ctrl = NULL;
  
 volatile sig_atomic_t server_running = 1;
+
+int shutdown_pipe[2];
  
 // PERBAIKAN: Mengubah void menjadi int
 int core_event_loop_start(void) {
@@ -54,9 +56,17 @@ int core_event_loop_start(void) {
         write_log_error_code(ERR_CORE_EPOLL_MEM);
         return -1;
     }
+
+    if (pipe2(shutdown_pipe, O_NONBLOCK) < 0) {
+        free(events);
+        events = NULL;
+        return -1;
+    }
  
     sock_server = tcp_create_server(config.server_name, config.server_port);
     if (sock_server < 0) {
+        close(shutdown_pipe[0]);
+        close(shutdown_pipe[1]);
         free(events);
         events = NULL;
         return -1; // PERBAIKAN: Return -1, bukan exit(EXIT_FAILURE)
@@ -66,6 +76,8 @@ int core_event_loop_start(void) {
     if (epoll_fd < 0) { // PERBAIKAN: Cek kegagalan epoll_create1
         //write_log_error("[FATAL] epoll_create1 failed: %s", strerror(errno));
         write_log_error_code(ERR_CORE_EPOLL_CREATE, strerror(errno));
+        close(shutdown_pipe[0]);
+        close(shutdown_pipe[1]);
         close(sock_server);
         free(events);
         events = NULL;
@@ -78,6 +90,17 @@ int core_event_loop_start(void) {
     if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, sock_server, &ev) < 0) {
         //write_log_error("[FATAL] Failed to add sock_server to epoll: %s", strerror(errno));
         write_log_error_code(ERR_CORE_EPOLL_ADD_SOCK, strerror(errno));
+        close(sock_server);
+        close(epoll_fd);
+        free(events);
+        events = NULL;
+        return -1;
+    }
+
+    struct epoll_event ev_pipe;
+    ev_pipe.data.fd = shutdown_pipe[0];
+    ev_pipe.events = EPOLLIN;
+    if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, shutdown_pipe[0], &ev_pipe) < 0) {
         close(sock_server);
         close(epoll_fd);
         free(events);
@@ -97,7 +120,7 @@ int core_event_loop_start(void) {
     }
 
     // Inisialisasi Admission Control saat server start:
-      admission_ctrl = core_admission_init();
+    admission_ctrl = core_admission_init();
     if (!admission_ctrl) {
         write_log_error("[CRIT] Failed to initialize Admission Control module");
         return -1;
@@ -120,6 +143,14 @@ void core_event_loop_run() {
  
         for (int i = 0; i < num_fds; i++) {
             int current_fd = events[i].data.fd;
+
+            if (current_fd == shutdown_pipe[0]) {
+                char trash[128];
+                while (read(shutdown_pipe[0], trash, sizeof(trash)) > 0);
+                server_running = 0;
+                break; // Keluar dari loop events
+            }
+            
             // Tambahan handler Inotify Jika jenisnya Virtual Host
             if (current_fd == http_vhost_get_inotify_fd()) {
                 http_vhost_handle_inotify_event();
@@ -243,6 +274,16 @@ void core_event_loop_run() {
                 }
             }
         }
+    }
+
+    // Cleanup resources setelah loop berhenti
+    if (shutdown_pipe[0] >= 0) {
+        close(shutdown_pipe[0]);
+        shutdown_pipe[0] = -1;
+    }
+    if (shutdown_pipe[1] >= 0) {
+        close(shutdown_pipe[1]);
+        shutdown_pipe[1] = -1;
     }
  
     // Cleanup Resource Admission Control saat server berhenti

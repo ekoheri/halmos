@@ -79,19 +79,28 @@
 #define HALMOS_VERSION    "1.1.2-RC1"
 #define HALMOS_CONFIG_PATH "/etc/halmos/halmos.conf"
 
-// Handle sinyal dengan aman (Async-Signal Safe)
+// Deklarasi variabel global pengendali loop (sesuai modul event loop Anda)
+extern volatile sig_atomic_t server_running;
+extern int shutdown_pipe[2]; // Jika menggunakan Self-Pipe Trick
+
+// 1. Signal handler yang benar-benar Async-Signal-Safe
 static void handle_shutdown_signal(int sig) {
     (void)sig;
-    core_event_loop_stop(); // Hentikan loop epoll_wait agar keluar dari core_event_loop_run()
+    server_running = 0;
+    
+    // Jika menggunakan Self-Pipe Trick untuk membangunkan epoll_wait seketika:
+    char buf = 1;
+    ssize_t w = write(shutdown_pipe[1], &buf, 1);
+    (void)w;
 }
 
 void setup_signals(void) {
     struct sigaction sa;
     sa.sa_handler = handle_shutdown_signal;
     sigemptyset(&sa.sa_mask);
-    sa.sa_flags = 0;
+    sa.sa_flags = 0; // Tanpa SA_RESTART agar epoll_wait bisa terinterupsi/terbangun
 
-    signal(SIGPIPE, SIG_IGN); // Abaikan koneksi yang putus mendadak
+    signal(SIGPIPE, SIG_IGN);
     sigaction(SIGTERM, &sa, NULL);
     sigaction(SIGINT, &sa, NULL);
 }
@@ -267,7 +276,9 @@ int main(int argc, char *argv[]) {
 
     // === TAMBAHKAN INI: Inisialisasi Global Session Pool FastCGI ===
     // (Misal: alokasi 1024 slot sesi pre-allocated, atau sesuaikan dengan g_fcgi_upstream_slots / max konkurensi)
-    if (!fcgi_global_pool_init(1024)) {
+    // CATATAN INI HARUS MASUK KONFIGURASI ADAPTIVE SUPAYA MENGHASILKAN NILAI YANG MAKSIMAL!
+    
+    if (!fcgi_global_pool_init(128)) {
         fprintf(stderr, "[FATAL] Failed to initialize FastCGI Global Session Pool!\n");
         exit(EXIT_FAILURE);
     }
@@ -323,6 +334,8 @@ int main(int argc, char *argv[]) {
     // =======================================================
     
     write_log("[CORE] Shutdown signal caught. Cleaning up resources...");
+
+    core_event_loop_stop();
     
     // === TAMBAHKAN INI: Hancurkan Global Session Pool di awal shutdown ===
     fcgi_global_pool_destroy();

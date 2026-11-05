@@ -128,6 +128,9 @@ int core_queue_pop(TaskQueue *q, halmos_event_t *out_event, struct timeval *arri
     struct timespec ts;
     struct timeval now;
 
+    // Worker terus mengambil task selama antrean belum kosong, 
+    // ATAU jika server masih running. Jika server stop tapi task masih ada, 
+    // worker tetap harus melahap task tersebut sampai habis!
     while (q->head == NULL) {
         if (!q->is_running) {
             q->total_workers--;
@@ -148,7 +151,7 @@ int core_queue_pop(TaskQueue *q, halmos_event_t *out_event, struct timeval *arri
 
         int rc = pthread_cond_timedwait(&q->cond, &q->lock, &ts);
         
-        if (!q->is_running) {
+        if (!q->is_running && q->head == NULL) { // Hanya keluar jika kosong & stop
             q->total_workers--;
             pthread_cond_signal(&q->exit_cond);
             pthread_mutex_unlock(&q->lock);
@@ -156,22 +159,17 @@ int core_queue_pop(TaskQueue *q, halmos_event_t *out_event, struct timeval *arri
         }
 
         // === LOGIKA DOWNSCALING (DETACHED WORKER) ===
-        if (rc == ETIMEDOUT && q->head == NULL && q->total_workers > q->min_threads_limit) {
+        if (rc == ETIMEDOUT && q->head == NULL && q->total_workers > q->min_threads_limit && q->is_running) {
             q->total_workers--;
-
             pthread_cond_signal(&q->exit_cond);
             pthread_mutex_unlock(&q->lock);
-            
             return -3;
         }
     }
 
-    if (!q->is_running) {
-        q->total_workers--;
-        pthread_cond_signal(&q->exit_cond);
-        pthread_mutex_unlock(&q->lock);
-        return -3;
-    }
+    // HAPUS atau sesuaikan pengecekan `if (!q->is_running)` di sini, 
+    // karena jika q->head != NULL, kita ingin task-nya tetap dieksekusi 
+    // meskipun q->is_running sudah bernilai 0 (proses draining).
 
     Task *tmp = q->head;
     
