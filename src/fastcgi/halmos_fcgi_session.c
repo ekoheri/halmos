@@ -1,6 +1,7 @@
 #include "halmos_fcgi_session.h"
 #include "halmos_fcgi_upstream.h"
 #include "halmos_fcgi_event_loop.h"
+#include "halmos_global.h"
 #include "halmos_core_conn_table.h"
 #include "halmos_http1_header.h"
 #include "halmos_log.h"
@@ -20,8 +21,8 @@ static pthread_mutex_t g_pool_lock;
 /**
  * Menginisialisasi Global Session Pool sekali di awal server startup.
  */
-bool fcgi_global_pool_init(int max_sessions) {
-    g_max_sessions = (max_sessions > 0) ? max_sessions : MAX_FCGI_SESSIONS;
+bool fcgi_global_pool_init(void) {
+    g_max_sessions = (g_fcgi_session_slots > 0) ? g_fcgi_session_slots : 64;
     
     // Alokasi memori tunggal untuk seluruh pool sesi
     g_session_pool = malloc(sizeof(FCGI_Session) * g_max_sessions);

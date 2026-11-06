@@ -20,8 +20,9 @@ extern int g_event_batch_size;       // Ukuran batch epoll_wait
 // --- 3. DOMAIN BACKEND / FASTCGI UPSTREAM ---
 extern int g_fcgi_upstream_slots;    // Total slot koneksi paralel ke FPM (PHP+Rust+Python)
 extern int g_fcgi_queue_capacity;    // Batas antrean khusus jika jatah backend penuh
+extern int g_fcgi_session_slots;     // Kapasitas maksimum global pool sesi konkuren
 
-// --- DOMAIN BACKEND UPSTREAM QUOTA untuk (PHP+Rust+Python) ---
+// --- 4. DOMAIN BACKEND UPSTREAM QUOTA untuk (PHP+Rust+Python) ---
 extern int g_fcgi_php_quota;
 extern int g_fcgi_rust_quota;
 extern int g_fcgi_python_quota;

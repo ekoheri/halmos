@@ -105,27 +105,27 @@ void setup_signals(void) {
     sigaction(SIGINT, &sa, NULL);
 }
 
-// Fungsi untuk mencetak penggunaan RAM aktual saat startup
-void log_startup_memory_usage(void) {
+
+// Fungsi untuk mencetak footprint memori/RAM (VmRSS / VmHWM)
+void log_memory_footprint(const char *label, const char *target_key) {
     FILE *fp = fopen("/proc/self/status", "r");
     if (!fp) return;
 
     char line[128];
-    long vmrss_kb = 0;
+    long mem_kb = 0;
+    size_t key_len = strlen(target_key);
 
     while (fgets(line, sizeof(line), fp)) {
-        if (strncmp(line, "VmRSS:", 6) == 0) {
-            vmrss_kb = atol(line + 6); // Ambil nilai RSS dalam Kilobytes
+        if (strncmp(line, target_key, key_len) == 0) {
+            mem_kb = atol(line + key_len); // Ambil nilai dalam Kilobytes
             break;
         }
     }
     fclose(fp);
 
-    if (vmrss_kb > 0) {
-        double vmrss_mb = (double)vmrss_kb / 1024.0;
-        printf("[HALMOS-INFO] Initial Memory Footprint (VmRSS): %.2f MB\n", vmrss_mb);
-        // Atau gunakan fungsi log internal Anda:
-        // write_log_info("[HALMOS-INFO] Initial Memory Footprint (VmRSS): %.2f MB", vmrss_mb);
+    if (mem_kb > 0) {
+        double mem_mb = (double)mem_kb / 1024.0;
+        write_log("[CORE] %s: %.2f MB", label, mem_mb);
     }
 }
 
@@ -229,18 +229,18 @@ int main(int argc, char *argv[]) {
         return EXIT_FAILURE;
     }
 
-    // 2. Hitung Parameter Hardware & OS Limit
+    // 2. Aktifkan thread untuk penulisan log
+    start_thread_logger();
+    write_log("[CORE] Initializing %s v%s...", HALMOS_NAME, HALMOS_VERSION);
+
+    // 3. Hitung Parameter Hardware & OS Limit
     core_adaptive_init(0);
 
-    // 3. INIALISASI KONEKSI (Menggunakan g_max_fd hasil kalkulasi adaptive)
+    // 4. Inisialisasi connection table
     if (core_conn_t_init() != 0) {
         fprintf(stderr, "[FATAL] Failed to allocate core connection tracking table.\n");
         return EXIT_FAILURE;
     }
-
-    // 4. Aktifkan Logger Asynchronous (Thread Terpisah)
-    start_thread_logger();
-    write_log("[CORE] Starting Halmos Web Server v1.0.0-rc1...");
 
     // 5. Inisialisasi Layanan SSL
     if (config.tls_enabled) {
@@ -254,93 +254,94 @@ int main(int argc, char *argv[]) {
         write_log("[CORE] TLS Engine & Mapping ready.");
     }
     
-    // Inisialisasi Virtual Host
+    // 6. Inisialisasi Virtual Host
     http_vhost_init_all();
 
-    // Inisialisasi Registry & Hash Table WebSocket
+    // 7. Inisialisasi Registry & Hash Table WebSocket
     halmos_ws_system_init();
     write_log("[CORE] WebSocket Registry & Subsystems ready.");
 
-    // 4. Inisialisasi Antrean (Dapur) & Thread Pool Dinamis
+    // 8. Inisialisasi Antrean (Dapur) & Thread Pool Dinamis
     // Menggunakan batas antrean dari config
     core_queue_thread_worker_start();
+    write_log("[CORE] Core Worker thread pool started dynamically.");
 
+    // 9. Inisialisasi janitor jika fungsi rate limited diaktifkan
     if(config.rate_limit_enabled == true) {
-        sec_traffic_start_janitor();    
+        sec_traffic_start_janitor();
+        write_log("[SEC] Security Janitor thread started.");    
     }
     
+    // 10. Start upstream untuk koneksi ke backend
     if (!fcgi_upstream_start()) {
         fprintf(stderr, "Failed to create upstream backend or connect to backend socket!\n");
         exit(EXIT_FAILURE);
     }
+    write_log("[UPSTREAM] FastCGI Upstream Connection Pool initialized.");
 
-    // === TAMBAHKAN INI: Inisialisasi Global Session Pool FastCGI ===
-    // (Misal: alokasi 1024 slot sesi pre-allocated, atau sesuaikan dengan g_fcgi_upstream_slots / max konkurensi)
-    // CATATAN INI HARUS MASUK KONFIGURASI ADAPTIVE SUPAYA MENGHASILKAN NILAI YANG MAKSIMAL!
-    
-    if (!fcgi_global_pool_init(128)) {
+    // 11. Inisialisasi session pool untuk sesi di backend
+    if (!fcgi_global_pool_init()) {
         fprintf(stderr, "[FATAL] Failed to initialize FastCGI Global Session Pool!\n");
         exit(EXIT_FAILURE);
     }
     write_log("[CORE] FastCGI Global Session Pool initialized.");
-    // ==============================================================
 
-    // 1. Inisialisasi antrean terlebih dahulu
+    // 12. Inisialisasi queue backend, untuk menampung antrian request ke backend
     if (!fcgi_queue_start()) {
         fprintf(stderr, "Failed to initialize FCGI task queue!\n");
         exit(EXIT_FAILURE);
     }
+    write_log("[CORE] FastCGI Task Queue started.");
 
+    // 13. Inisialisasi event loop di backend
     if (!fcgi_event_loop_start()) {
         fprintf(stderr, "Failed to initialize FastCGI Async Event Loop!\n> exit(1);\n");
         return 1;
     }
+    write_log("[CORE] FastCGI Async Event Loop started.");
 
-    // 2. INTI PERBAIKAN: Inisialisasi Worker Pool FastCGI (misal 4 thread worker)
+    // 14. Inisialisasi Worker Pool FastCGI
     if (!fcgi_thread_pool_start()) {
         fprintf(stderr, "Failed to initialize FCGI thread pool!\n");
         return 1;
     }
+    write_log("[CORE] FastCGI Worker Pool started.");
     
-    // 5. Inisialisasi Server (Network & Epoll)
+    // 15. Inisialisasi Network & Epoll di core
     if (core_event_loop_start() != 0) {
         fprintf(stderr, "[FATAL] Failed to start event loop.\n");
         stop_thread_logger();
         return EXIT_FAILURE;
     }
+    write_log("[CORE] Core Network & Epoll Event Loop started.");
 
+    // 16. Inisialisasi virtual host inotify
     // === TAMBAHKAN INI DI SINI ===
     // Karena epoll_fd sudah tercipta di dalam core_event_loop_start(), 
     // kita bisa langsung mendaftarkan inotify vhost ke epoll utama.
     // (Asumsikan epoll_fd bisa diakses secara global atau diekspos via getter)
     extern int epoll_fd; // Jika epoll_fd dideklarasikan global di core event loop
     http_vhost_init_inotify(epoll_fd);
+    write_log("[CORE] Virtual Host Inotify watcher registered to epoll.");
     
-    /*
-    printf("==================================================\n");
-    printf("  HALMOS SAVAGE SERVER IS RUNNING\n");
-    printf("  Address : %s:%d\n", config.server_name, config.server_port);
-    printf("  Root    : %s\n", config.document_root);
-    printf("==================================================\n");
-    */
-
-    log_startup_memory_usage();
+    write_log("[CORE] Starting Halmos Web Server v1.0.0-rc1...");
+    log_memory_footprint("Initial Memory Footprint (VmRSS)", "VmRSS:");
    
-    // 6. RUN! Resepsionis Epoll Utama
+    // 17. RUN! Resepsionis Epoll Utama
     core_event_loop_run();
 
     // =======================================================
     // --- GRACEFUL SHUTDOWN CLEANUP SEQUENCE ---
     // =======================================================
     
-    write_log("[CORE] Shutdown signal caught. Cleaning up resources...");
+    log_memory_footprint("Peak Memory Footprint (VmHWM)", "VmHWM:");
 
     core_event_loop_stop();
-    
-    // === TAMBAHKAN INI: Hancurkan Global Session Pool di awal shutdown ===
+    write_log("[CORE] Shutdown signal caught. Cleaning up resources...");
+
+    // Hancurkan Global Session Pool di awal shutdown ===
     fcgi_global_pool_destroy();
     write_log("[CORE] FastCGI Global Session Pool destroyed.");
-    // ====================================================================
     
     fcgi_queue_stop();
     write_log("[CORE] FastCGI Queue cleaned up.");
@@ -378,9 +379,9 @@ int main(int argc, char *argv[]) {
     core_conn_t_destroy();
     write_log("[CORE] Connection Table destroyed.");
 
+    write_log("[CORE] %s shutdown complete. Bye!", HALMOS_NAME);
     // 7. TERAKHIR: Wajib tempatkan stop_thread_logger() di paling ujung!
     stop_thread_logger();
-    write_log("[CORE] Halmos shutdown complete. Bye!");
-
+    
     return EXIT_SUCCESS;
 }

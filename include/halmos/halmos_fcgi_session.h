@@ -12,7 +12,6 @@
 
 // Ukuran Ring Buffer statis per sesi (menggantikan malloc dinamis yang boros RAM)
 #define FCGI_RING_BUFFER_SIZE 4096  // 8192 //16384  // 16KB per buffer (cukup untuk chunking / streaming)
-#define MAX_FCGI_SESSIONS     128   //256  //1024   // Kapasitas maksimum global pool sesi konkuren
 
 // Definisi state FSM untuk Async FastCGI
 typedef enum {
@@ -79,7 +78,7 @@ typedef struct FCGI_Session {
 } FCGI_Session;
 
 // Prototip fungsi manajemen Global Session Pool
-bool fcgi_global_pool_init(int max_sessions);
+bool fcgi_global_pool_init(void);
 void fcgi_global_pool_destroy(void);
 
 FCGI_Session* fcgi_session_slot_get(int session_id);
