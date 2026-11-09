@@ -148,6 +148,12 @@ typedef struct {
     int session_slots;
 } BackendQuotas;
 
+typedef struct {
+    float threshold_ratio;
+    int spawn_step;
+    int timeout_idle;
+} AdaptivePolicy;
+
 #define MAX_EVENT_BATCH_SIZE 1024
 
 #define MAX_QUEUE_CAPACITY 4096
@@ -161,8 +167,5 @@ void core_adaptive_runtime_destroy(void);
 void core_adaptive_runtime_record_task(uint64_t execution_time_us);
 void* core_adaptive_runtime_background_loop(void *arg);
 
-int core_adaptive_get_timeout_idle(void);
-int core_adaptive_get_spawn_step(void);
-float core_adaptive_get_threshold_ratio(void);
-
+AdaptivePolicy core_adaptive_get_policy(void);
 #endif

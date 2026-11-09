@@ -27,11 +27,6 @@ extern int g_fcgi_php_quota;
 extern int g_fcgi_rust_quota;
 extern int g_fcgi_python_quota;
 
-// --- 5. RUNTIME OTONOM (In-Memory Self-Tuning Variables) ---
-extern float g_runtime_queue_threshold_ratio;
-extern int   g_runtime_spawn_worker_step;
-extern int   g_runtime_timeout_worker_idle;
-
 // Deklarasikan variabel global untuk :
 // 1. menyimpan konfigurasi
 extern Config config;

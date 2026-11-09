@@ -72,7 +72,8 @@ int core_queue_push(TaskQueue *q, halmos_event_t event_item) {
     q->count++;
 
     // 4. LOGIKA UPSCALING
-    int queue_threshold = q->max_queue_limit * core_adaptive_get_threshold_ratio();
+    AdaptivePolicy policy = core_adaptive_get_policy();
+    int queue_threshold = q->max_queue_limit * policy.threshold_ratio;
     int spawn_count = 0;
 
     if (q->count > queue_threshold 
@@ -80,7 +81,7 @@ int core_queue_push(TaskQueue *q, halmos_event_t event_item) {
         && !q->scaling_in_progress) {
 
         int available_slots = q->max_threads_limit - q->total_workers;
-        int spawn_step = core_adaptive_get_spawn_step();
+        int spawn_step = policy.spawn_step;
 
         spawn_count = (available_slots < spawn_step) ? available_slots : spawn_step;
 
@@ -142,7 +143,9 @@ int core_queue_pop(TaskQueue *q, halmos_event_t *out_event, struct timeval *arri
 
         gettimeofday(&now, NULL);
 
-        int current_timeout = core_adaptive_get_timeout_idle();//get_adaptive_timeout(q); 
+        AdaptivePolicy policy = core_adaptive_get_policy();
+        int current_timeout = policy.timeout_idle;
+
         ts.tv_sec = now.tv_sec + current_timeout;
         ts.tv_nsec = now.tv_usec * 1000;
         if (ts.tv_nsec >= 1000000000) {
