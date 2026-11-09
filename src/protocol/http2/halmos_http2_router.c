@@ -98,9 +98,7 @@ void route_fastcgi_backend(HTTP2Session *session, HTTP2Stream *stream, RequestHe
         fcgi_sess->is_http2 = true;                  
         fcgi_sess->http2_stream_id = stream->stream_id; 
         
-        // --- TAMBAHAN SELARAS ---
-        // Simpan pointer HTTP2Session (HTTP/2 connection session) dan HTTP2Stream langsung ke fcgi_sess
-        fcgi_sess->h2_session = session; 
+        fcgi_sess->h2_session = session; // // Simpan pointer HTTP2Session (HTTP/2 connection session) dan HTTP2Stream langsung ke fcgi_sess
         fcgi_sess->h2_stream = stream;   // Pointer langsung ke stream terkait!
     }
 
@@ -178,6 +176,9 @@ void route_fastcgi_backend(HTTP2Session *session, HTTP2Stream *stream, RequestHe
     pthread_mutex_lock(&session->streams_lock);
     stream->fpm_fd = fcgi_sess->fpm_fd;
     stream->is_fcgi_active = true;
+
+    // ---> SIMPAN REFERENSI SESI DI SINI <---
+    stream->fcgi_session = fcgi_sess;
     pthread_mutex_unlock(&session->streams_lock);
 
     // 6. Daftarkan fpm_sock ke Epoll Upstream Poller

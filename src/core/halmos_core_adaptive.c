@@ -18,9 +18,17 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <ctype.h>
+#include <signal.h>
+#include <stdatomic.h>
 
 #define INITIAL_CAPACITY 1000
 #define MAX_LINE_LENGTH 1024
+
+#define HISTORY_SLOTS 60 // Menyimpan 60 slot riwayat akses (misal per detik atau per menit)
+
+// Gunakan atomic flag khusus untuk background loop adaptive
+static atomic_bool g_adaptive_active = ATOMIC_VAR_INIT(false);
+static pthread_t   g_runtime_adaptive_tid;
 
 // --- 1. DOMAIN CORE / FRONTEND (Klien & Epoll) ---
 uint32_t g_core_max_fd         = 0;
@@ -41,12 +49,29 @@ int      g_fcgi_php_quota      = 0;
 int      g_fcgi_rust_quota     = 0;
 int      g_fcgi_python_quota   = 0;
 
+// --- 5. RUNTIME OTONOM (In-Memory Self-Tuning Variables) ---
+float    g_runtime_queue_threshold_ratio = 0.50f; // Default 50%
+int      g_runtime_spawn_worker_step     = 4;     // Default step 4 worker
+int      g_runtime_timeout_worker_idle   = 30;    // Default 30 detik
+
+typedef struct {
+    uint64_t io_counts[HISTORY_SLOTS];
+    uint64_t cpu_counts[HISTORY_SLOTS];
+    int current_index;
+    pthread_mutex_t lock;
+} RuntimeMetricsWindow;
+
+static RuntimeMetricsWindow g_runtime_win;
+
 typedef struct {
     int max_children;
     int backlog;
     char mode[16]; 
 } PHPConfig;
 
+extern volatile sig_atomic_t server_running;
+
+extern TaskQueue global_queue;
 
 /* Helper untuk adaptive init*/
 static PHPConfig fetch_php_fpm_config(void);
@@ -73,7 +98,11 @@ static void core_print_adaptive_summary(
     int print_to_terminal
 );
 
-void core_adaptive_init(int print_to_terminal) {
+/********************************************************************
+ * BAGIAN A: STARTUP HARDWARE-AWARE INITIALIZATION
+ ********************************************************************/
+
+void core_adaptive_hw_aware_init(int print_to_terminal) {
     // 1. Eksekusi tahapan modular secara berurutan
     HardwareProfile hw = core_detect_hardware();
     MemoryBudget mb = core_calculate_memory_budgets(&hw);
@@ -102,7 +131,173 @@ void core_adaptive_init(int print_to_terminal) {
     core_print_adaptive_summary(&hw, &mb, &wc, &php, is_php_active, print_to_terminal);
 }
 
-/* Fungsi helper untuk core_adaptive_init */
+/********************************************************************
+ * BAGIAN B: RUNTIME IN-MEMORY SELF-TUNING ENGINE
+ ********************************************************************/
+// Inisialisasi mutex & langsung spawn background thread secara otonom
+bool core_adaptive_runtime_init(void) {
+    memset(&g_runtime_win, 0, sizeof(RuntimeMetricsWindow));
+    g_runtime_win.current_index = 0;
+    
+    if (pthread_mutex_init(&g_runtime_win.lock, NULL) != 0) {
+        write_log("[ERROR] Failed to initialize runtime adaptive mutex.");
+        return false;
+    }
+
+    atomic_store(&g_adaptive_active, true);
+
+    if (pthread_create(&g_runtime_adaptive_tid, NULL, core_adaptive_runtime_background_loop, NULL) != 0) {
+        write_log("[ERROR] Failed to start runtime adaptive background thread.");
+        pthread_mutex_destroy(&g_runtime_win.lock);
+        atomic_store(&g_adaptive_active, false);
+        return false;
+    }
+    return true;
+}
+
+// Fungsi untuk membersihkan sumber daya runtime adaptive saat server shutdown
+void core_adaptive_runtime_destroy(void) {
+    // 1. Matikan flag background loop
+    atomic_store(&g_adaptive_active, false);
+
+    // 2. Tunggu thread benar-benar mati (Join) sebelum mutex didestruksi!
+    pthread_join(g_runtime_adaptive_tid, NULL);
+
+    // 3. Setelah thread mati, aman untuk mendestruksi mutex
+    pthread_mutex_destroy(&g_runtime_win.lock);
+    write_log("[ADAPTIVE RAM] Runtime self-tuning engine destroyed cleanly.");
+}
+
+// Pencatatan Task (Langsung diakumulasi ke slot waktu aktif saat ini)
+
+void core_adaptive_runtime_record_task(uint64_t execution_time_us) {
+    // Tentukan sendiri secara otomatis: > 10ms (10000 us) dianggap CPU-bound
+    int bound_type = (execution_time_us > 10000) ? 1 : 0; 
+    
+    pthread_mutex_lock(&g_runtime_win.lock);
+    int idx = g_runtime_win.current_index;
+    if (bound_type == 1) {
+        g_runtime_win.cpu_counts[idx]++;
+    } else {
+        g_runtime_win.io_counts[idx]++;
+    }
+    pthread_mutex_unlock(&g_runtime_win.lock);
+}
+
+// Background Loop yang Bergeser Mengikuti Slot Waktu (Sliding Window)
+void* core_adaptive_runtime_background_loop(void *arg) {
+    (void)arg;
+
+    // Deteksi jumlah core sekali saja saat awal loop
+    long n_cores = sysconf(_SC_NPROCESSORS_ONLN);
+    if (n_cores < 1) n_cores = 1; 
+    int high_load_threshold = (int)(n_cores * 2);
+
+    while (atomic_load(&g_adaptive_active)) {
+        // Tidur per 1 detik yang dipecah menjadi interval 100ms agar responsif saat shutdown
+        for (int i = 0; i < 10 && atomic_load(&g_adaptive_active); i++) {
+            usleep(100000); // 100ms * 10 = 1 detik
+        }
+        if (!atomic_load(&g_adaptive_active)) break;
+
+        // 1. Ambil dan reset window metrik dengan penguncian mutex window
+        pthread_mutex_lock(&g_runtime_win.lock);
+        int latest_idx = g_runtime_win.current_index;
+        g_runtime_win.current_index = (g_runtime_win.current_index + 1) % HISTORY_SLOTS;
+        
+        int next_idx = g_runtime_win.current_index;
+        g_runtime_win.cpu_counts[next_idx] = 0;
+        g_runtime_win.io_counts[next_idx] = 0;
+
+        double weighted_cpu_sum = 0.0;
+        double weighted_io_sum = 0.0;
+        double total_weight = 0.0;
+
+        for (int i = 0; i < HISTORY_SLOTS; i++) {
+            int target_idx = (latest_idx - i + HISTORY_SLOTS) % HISTORY_SLOTS;
+            double weight = (double)(HISTORY_SLOTS - i); 
+
+            weighted_cpu_sum += (double)g_runtime_win.cpu_counts[target_idx] * weight;
+            weighted_io_sum  += (double)g_runtime_win.io_counts[target_idx] * weight;
+            total_weight     += weight;
+        }
+        pthread_mutex_unlock(&g_runtime_win.lock);
+
+        if (total_weight == 0.0) continue;
+
+        double final_cpu_score = weighted_cpu_sum / total_weight;
+        double final_io_score  = weighted_io_sum / total_weight;
+        double total_score     = final_cpu_score + final_io_score;
+
+        if (total_score < 1.0) continue;
+
+        float cpu_ratio = (float)(final_cpu_score / total_score);
+        float io_ratio  = (float)(final_io_score / total_score);
+
+        // --- AMBIL KONDISI ANTREAN SAAT INI SECARA AMAN DENGAN MUTEX QUEUE ---
+        pthread_mutex_lock(&global_queue.lock);
+        int current_count = global_queue.count;
+        int max_limit = global_queue.max_queue_limit;
+        pthread_mutex_unlock(&global_queue.lock);
+
+        float load_factor = (max_limit > 0) ? (float)current_count / max_limit : 0;
+
+        // --- PENYESUAIAN OTONOM GABUNGAN (TREN BEBAN + KONDISI QUEUE) ---
+        pthread_mutex_lock(&g_runtime_win.lock);
+        if (load_factor > g_runtime_queue_threshold_ratio || current_count > high_load_threshold) {
+            // Kondisi High Load / Padat: Tahan worker lebih lama (misal 300 detik)
+            g_runtime_timeout_worker_idle = 300;
+        } 
+        else if (current_count > 0) {
+            // Kondisi Light Load / Ada sisa task: (misal 60 detik)
+            g_runtime_timeout_worker_idle = 60;
+        } 
+        else {
+            // Kondisi Idle / Sepi, disesuaikan juga dengan karakteristik CPU vs IO
+            if (cpu_ratio > 0.5f) {
+                g_runtime_queue_threshold_ratio = 0.35f;
+                g_runtime_spawn_worker_step     = 2;
+                g_runtime_timeout_worker_idle   = 30; // CPU idle cepat dibersihkan
+            } 
+            else if (io_ratio > 0.8f) {
+                g_runtime_queue_threshold_ratio = 0.60f;
+                g_runtime_spawn_worker_step     = 4;
+                g_runtime_timeout_worker_idle   = 45; // I/O biarkan tahan agak lama
+            } 
+            else {
+                g_runtime_queue_threshold_ratio = 0.50f;
+                g_runtime_spawn_worker_step     = 4;
+                g_runtime_timeout_worker_idle   = 30;
+            }
+        }
+        pthread_mutex_unlock(&g_runtime_win.lock);
+    }
+    return NULL;
+}
+
+// --- THREAD-SAFE GETTERS UNTUK VARIABEL OTONOM ---
+int core_adaptive_get_timeout_idle(void) {
+    pthread_mutex_lock(&g_runtime_win.lock);
+    int val = g_runtime_timeout_worker_idle;
+    pthread_mutex_unlock(&g_runtime_win.lock);
+    return val;
+}
+
+int core_adaptive_get_spawn_step(void) {
+    pthread_mutex_lock(&g_runtime_win.lock);
+    int val = g_runtime_spawn_worker_step;
+    pthread_mutex_unlock(&g_runtime_win.lock);
+    return val;
+}
+
+float core_adaptive_get_threshold_ratio(void) {
+    pthread_mutex_lock(&g_runtime_win.lock);
+    float val = g_runtime_queue_threshold_ratio;
+    pthread_mutex_unlock(&g_runtime_win.lock);
+    return val;
+}
+
+/* Fungsi helper untuk core_adaptive_hw_aware_init */
 
 PHPConfig fetch_php_fpm_config(void) {
     PHPConfig cfg = {50, 511, "dynamic"}; 

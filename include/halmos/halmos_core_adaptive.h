@@ -112,6 +112,7 @@
 - ========================================================================== */
 
 #include <stdint.h>
+#include <stdbool.h>
  
  // Menampung batasan fisik dasar dari sistem operasi & hardware
 typedef struct {
@@ -151,7 +152,17 @@ typedef struct {
 
 #define MAX_QUEUE_CAPACITY 4096
 
-// Fungsi tunggal untuk menghitung semua parameter adaptive saat startup
-void core_adaptive_init(int print_to_terminal);
+// Fungsi untuk menghitung semua parameter adaptive hardware aware saat startup
+void core_adaptive_hw_aware_init(int print_to_terminal);
+
+// --- Fungsi Runtime Self-Tuning Adaptive ---
+bool core_adaptive_runtime_init(void);
+void core_adaptive_runtime_destroy(void);
+void core_adaptive_runtime_record_task(uint64_t execution_time_us);
+void* core_adaptive_runtime_background_loop(void *arg);
+
+int core_adaptive_get_timeout_idle(void);
+int core_adaptive_get_spawn_step(void);
+float core_adaptive_get_threshold_ratio(void);
 
 #endif

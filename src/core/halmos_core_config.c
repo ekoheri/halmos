@@ -16,8 +16,6 @@ static char *trim(char *str);
 
 static unsigned long parse_size(const char *str);
 
-static float parse_percentage(const char *value);
-
 static void parse_csv_to_group(char *value, BackendGroup *group, bool is_port);
 
 // Fungsi untuk membaca file konfigurasi
@@ -93,15 +91,6 @@ int core_config_load(const char *filename) {
             } else if (strcmp(key, "request_buffer_size") == 0) {
                 config.request_buffer_size = atoi(value);
             } else if (strcmp(key, "queue_threshold_ratio") == 0) {
-                config.queue_threshold_ratio = parse_percentage(value);
-            } else if (strcmp(key, "spawn_worker_step") == 0) {
-                config.spawn_worker_step = atoi(value);
-            } else if (strcmp(key, "timeout_worker_high_load") == 0) {
-                config.timeout_worker_high_load = atoi(value);
-            } else if (strcmp(key, "timeout_worker_light_load") == 0) {
-                config.timeout_worker_light_load = atoi(value);
-            } else if (strcmp(key, "timeout_worker_idle") == 0) {
-                config.timeout_worker_idle = atoi(value);
 
             //Security    
             } else if (strcmp(key, "max_body_size") == 0) {    
@@ -116,10 +105,10 @@ int core_config_load(const char *filename) {
                 snprintf(config.ssl_private_key_file, sizeof(config.ssl_private_key_file), "%s", value);
             } else if (strcmp(key, "rate_limit_enabled") == 0) {
                 config.rate_limit_enabled = (strcasecmp(value, "true") == 0);
-            } else if (strcmp(key, "anti_slow_loris_enabled") == 0) {
-                config.anti_slow_loris_enabled = (strcasecmp(value, "true") == 0);
             } else if (strcmp(key, "max_requests_per_sec") == 0) {
                 config.max_requests_per_sec = atoi(value);
+            } else if (strcmp(key, "anti_slow_loris_enabled") == 0) {
+                config.anti_slow_loris_enabled = (strcasecmp(value, "true") == 0);
             } else if (strcmp(key, "keep_alive_timeout") == 0) {
                 config.keep_alive_timeout = atoi(value);
             } else if (strcmp(key, "trust_proxy") == 0) {
@@ -231,31 +220,4 @@ void parse_csv_to_group(char *value, BackendGroup *group, bool is_port) {
     }
     // Update count hanya jika ini adalah parsing IP (asumsi IP adalah wajib)
     if (!is_port) group->node_count = i;
-}
-
-float parse_percentage(const char *value) {
-    if (value == NULL) return 0.0f;
-
-    char clean_val[64];
-    snprintf(clean_val, sizeof(clean_val), "%s", value);
-    
-    // Trim string untuk membuang spasi di awal/akhir (misal: " 50% ")
-    char *trimmed = trim(clean_val);
-    
-    // Cek apakah mengandung karakter '%'
-    char *percent_sign = strchr(trimmed, '%');
-    if (percent_sign) {
-        *percent_sign = '\0'; // Putus string sebelum tanda '%'
-        trimmed = trim(trimmed); // Trim ulang angka setelah '%' dipotong (untuk kasus "50 %")
-        return (float)(atof(trimmed) / 100.0);
-    } else {
-        // Jika administrator menuliskan langsung dalam bentuk desimal atau angka bulat
-        float parsed_val = (float)atof(trimmed);
-        if (parsed_val > 1.0f) {
-            // Jaga-jaga jika ditulis angka bulat langsung misal "50" tanpa persen
-            return parsed_val / 100.0f;
-        } else {
-            return parsed_val;
-        }
-    }
 }

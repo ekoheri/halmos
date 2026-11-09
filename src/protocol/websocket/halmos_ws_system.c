@@ -130,7 +130,8 @@ void halmos_ws_system_init(void) {
 }
 
 void ws_system_destroy(void) {
-    ws_maintenance_running = 0;
+    atomic_store(&ws_maintenance_running, 0);
+
     pthread_join(ws_maintenance_tid, NULL);
     for (int i = 0; i < MAX_FDS; i++) {
         ws_free_recv_state(i);

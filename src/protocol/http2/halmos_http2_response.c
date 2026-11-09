@@ -408,10 +408,20 @@ void flush_fcgi_stream(HTTP2Session *session, uint32_t target_sid) {
             if (is_stream_finished) {
                 st->state = HTTP2_STATE_CLOSED;
                 st->is_fcgi_active = false;
+
+                if (st->fcgi_session) {
+                    fcgi_session_release((FCGI_Session *)st->fcgi_session);
+                    st->fcgi_session = NULL;
+                }
+                
+                /*
+                Penyebab race condition karena langsung di close(st->fpm_fd)
+                Solusinya, serahkan kepada fcgi untuk melakukan release seperti progrm diatas
                 if (st->fpm_fd >= 0) {
                     close(st->fpm_fd);
                     st->fpm_fd = -1;
                 }
+                */    
             }
         }
     }

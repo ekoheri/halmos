@@ -1,5 +1,6 @@
 #include "halmos_core_queue.h"
 #include "halmos_global.h"
+#include "halmos_core_adaptive.h"
 #include "halmos_core_config.h"
 #include "halmos_core_thread_pool.h"
 #include "halmos_log.h"
@@ -18,7 +19,7 @@ TaskQueue global_queue;
 
 static void init_queue(TaskQueue *q, int min_limit, int max_limit, int max_queue_size);
 static int spawn_detached_worker(pthread_t *out_tid, void *(*routine)(void *), void *arg);
-static int get_adaptive_timeout(TaskQueue *q);
+//static int get_adaptive_timeout(TaskQueue *q);
 
 void core_queue_thread_worker_start(void) {
     // Inisialisasi struct antrean global
@@ -71,7 +72,7 @@ int core_queue_push(TaskQueue *q, halmos_event_t event_item) {
     q->count++;
 
     // 4. LOGIKA UPSCALING
-    int queue_threshold = q->max_queue_limit * config.queue_threshold_ratio;
+    int queue_threshold = q->max_queue_limit * core_adaptive_get_threshold_ratio();
     int spawn_count = 0;
 
     if (q->count > queue_threshold 
@@ -79,7 +80,7 @@ int core_queue_push(TaskQueue *q, halmos_event_t event_item) {
         && !q->scaling_in_progress) {
 
         int available_slots = q->max_threads_limit - q->total_workers;
-        int spawn_step = config.spawn_worker_step;
+        int spawn_step = core_adaptive_get_spawn_step();
 
         spawn_count = (available_slots < spawn_step) ? available_slots : spawn_step;
 
@@ -141,7 +142,7 @@ int core_queue_pop(TaskQueue *q, halmos_event_t *out_event, struct timeval *arri
 
         gettimeofday(&now, NULL);
 
-        int current_timeout = get_adaptive_timeout(q); 
+        int current_timeout = core_adaptive_get_timeout_idle();//get_adaptive_timeout(q); 
         ts.tv_sec = now.tv_sec + current_timeout;
         ts.tv_nsec = now.tv_usec * 1000;
         if (ts.tv_nsec >= 1000000000) {
@@ -261,6 +262,7 @@ int spawn_detached_worker(pthread_t *out_tid, void *(*routine)(void *), void *ar
     return ret;
 }
 
+/*
 int get_adaptive_timeout(TaskQueue *q) {
     long n_cores = sysconf(_SC_NPROCESSORS_ONLN);
     if (n_cores < 1) n_cores = 1; 
@@ -278,3 +280,4 @@ int get_adaptive_timeout(TaskQueue *q) {
         return config.timeout_worker_idle; 
     }
 }
+*/

@@ -46,6 +46,28 @@ bool fcgi_event_loop_start(void) {
 }
 
 void fcgi_event_loop_stop(void) {
+    atomic_store(&upstream_poller.running, false);
+    
+    // 1. TUNGGU thread poller selesai TERLEBIH DAHULU sebelum close epoll_fd
+    if (upstream_poller.event_thread) {
+        pthread_join(upstream_poller.event_thread, NULL);
+        upstream_poller.event_thread = 0;
+    }
+
+    // 2. Baru tutup epoll_fd setelah thread benar-benar mati
+    if (upstream_poller.epoll_fd != -1) {
+        close(upstream_poller.epoll_fd);
+        upstream_poller.epoll_fd = -1;
+    }
+
+    if (g_epoll_events) {
+        free(g_epoll_events);
+        g_epoll_events = NULL;
+    }
+}
+
+/*
+void fcgi_event_loop_stop(void) {
     upstream_poller.running = false;
     
     if (upstream_poller.epoll_fd != -1) {
@@ -62,6 +84,7 @@ void fcgi_event_loop_stop(void) {
         g_epoll_events = NULL;
     }
 }
+*/    
 
 bool fcgi_event_loop_add(int fpm_fd, FCGI_Session *session, uint32_t events) {
     struct epoll_event ev;
@@ -117,7 +140,7 @@ void* fcgi_event_loop_run(void *arg) {
 
     //fprintf(stderr, "[FCGI_POLLER_ROUTINE] Poller worker thread running loop (adaptive batch size: %d)...\n", g_event_batch_size);
 
-    while (upstream_poller.running) {
+    while (atomic_load(&upstream_poller.running)) {
         // Menggunakan g_event_batch_size hasil kalkulasi adaptive hardware
         int n = epoll_wait(upstream_poller.epoll_fd, g_epoll_events, g_event_batch_size, 1000); // Timeout 1 detik
         if (n < 0) {

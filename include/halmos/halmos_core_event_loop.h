@@ -10,6 +10,7 @@
 
 int core_event_loop_start();
 void core_event_loop_run();
+void core_event_loop_destroy(void);
 void core_event_loop_stop(void);
 
 //dipanggil di thread pool dan bridge

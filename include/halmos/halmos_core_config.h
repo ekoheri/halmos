@@ -63,12 +63,7 @@ typedef struct {
 
     //Performance    
     int request_buffer_size;
-    float queue_threshold_ratio;
-    int spawn_worker_step;
-    int timeout_worker_high_load;
-    int timeout_worker_light_load;
-    int timeout_worker_idle;
-
+    
     //Virtual Host
     VHostEntry vhosts[32];    // Bisa nampung 32 domain
     int vhost_count;

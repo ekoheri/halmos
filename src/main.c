@@ -158,7 +158,7 @@ int main(int argc, char *argv[]) {
             } else {
                 printf("[WARN] php_fpm_config_path is empty in configuration.\n");
             }
-            core_adaptive_init(1);
+            core_adaptive_hw_aware_init(1);
             return EXIT_SUCCESS;
         } else if (strcmp(argv[1], "-t") == 0 || strcmp(argv[1], "--test") == 0) {
             // 1. Load konfigurasi utama Halmos
@@ -234,11 +234,20 @@ int main(int argc, char *argv[]) {
     write_log("[CORE] Initializing %s v%s...", HALMOS_NAME, HALMOS_VERSION);
 
     // 3. Hitung Parameter Hardware & OS Limit
-    core_adaptive_init(0);
+    core_adaptive_hw_aware_init(0);
+
+
+    if (!core_adaptive_runtime_init()) {
+        fprintf(stderr, "[FATAL] Failed to initialize runtime self-tuning adaptive engine.\n");
+        stop_thread_logger();
+        return EXIT_FAILURE;
+    }
+    write_log("[CORE] Runtime self-tuning ready.");
 
     // 4. Inisialisasi connection table
     if (core_conn_t_init() != 0) {
         fprintf(stderr, "[FATAL] Failed to allocate core connection tracking table.\n");
+        stop_thread_logger();
         return EXIT_FAILURE;
     }
 
@@ -256,6 +265,7 @@ int main(int argc, char *argv[]) {
     
     // 6. Inisialisasi Virtual Host
     http_vhost_init_all();
+    write_log("[CORE] Virtual Host ready.");
 
     // 7. Inisialisasi Registry & Hash Table WebSocket
     halmos_ws_system_init();
@@ -275,6 +285,7 @@ int main(int argc, char *argv[]) {
     // 10. Start upstream untuk koneksi ke backend
     if (!fcgi_upstream_start()) {
         fprintf(stderr, "Failed to create upstream backend or connect to backend socket!\n");
+        stop_thread_logger();
         exit(EXIT_FAILURE);
     }
     write_log("[UPSTREAM] FastCGI Upstream Connection Pool initialized.");
@@ -282,6 +293,7 @@ int main(int argc, char *argv[]) {
     // 11. Inisialisasi session pool untuk sesi di backend
     if (!fcgi_global_pool_init()) {
         fprintf(stderr, "[FATAL] Failed to initialize FastCGI Global Session Pool!\n");
+        stop_thread_logger();
         exit(EXIT_FAILURE);
     }
     write_log("[CORE] FastCGI Global Session Pool initialized.");
@@ -289,6 +301,7 @@ int main(int argc, char *argv[]) {
     // 12. Inisialisasi queue backend, untuk menampung antrian request ke backend
     if (!fcgi_queue_start()) {
         fprintf(stderr, "Failed to initialize FCGI task queue!\n");
+        stop_thread_logger();
         exit(EXIT_FAILURE);
     }
     write_log("[CORE] FastCGI Task Queue started.");
@@ -296,6 +309,7 @@ int main(int argc, char *argv[]) {
     // 13. Inisialisasi event loop di backend
     if (!fcgi_event_loop_start()) {
         fprintf(stderr, "Failed to initialize FastCGI Async Event Loop!\n> exit(1);\n");
+        stop_thread_logger();
         return 1;
     }
     write_log("[CORE] FastCGI Async Event Loop started.");
@@ -303,6 +317,7 @@ int main(int argc, char *argv[]) {
     // 14. Inisialisasi Worker Pool FastCGI
     if (!fcgi_thread_pool_start()) {
         fprintf(stderr, "Failed to initialize FCGI thread pool!\n");
+        stop_thread_logger();
         return 1;
     }
     write_log("[CORE] FastCGI Worker Pool started.");
@@ -335,52 +350,57 @@ int main(int argc, char *argv[]) {
     // =======================================================
     
     log_memory_footprint("Peak Memory Footprint (VmHWM)", "VmHWM:");
-
-    core_event_loop_stop();
     write_log("[CORE] Shutdown signal caught. Cleaning up resources...");
 
-    // Hancurkan Global Session Pool di awal shutdown ===
-    fcgi_global_pool_destroy();
-    write_log("[CORE] FastCGI Global Session Pool destroyed.");
-    
-    fcgi_queue_stop();
-    write_log("[CORE] FastCGI Queue cleaned up.");
+    core_event_loop_stop(); 
+    write_log("[CORE] Core Network Event Loop stopped.");
 
-    // 1. Hentikan FastCGI Worker Pool TERLEBIH DAHULU (Bangunkan thread yang menunggu di queue)
-    fcgi_event_loop_stop();
-    write_log("[CORE] FastCGI Event Loop cleaned up.");
+    // 1. Hentikan background/maintenance thread mandiri terlebih dahulu
+    core_adaptive_runtime_destroy();
+    write_log("[CORE] Runtime self-tuning engine destroyed.");
 
-    // 2. Hentikan worker yang memproses task, pastikan thread-nya sudah join/mati total
+    ws_system_destroy();
+    write_log("[CORE] WebSocket Registry & Subsystems destroyed.");
+
+    if (config.rate_limit_enabled) {
+        sec_traffic_stop_janitor();
+        write_log("[SEC] Security Janitor stopped.");
+    }
+
+    // 2. Hentikan FastCGI & Upstream Event Loop (tunggu thread join di dalamnya)
     fcgi_thread_pool_stop();
     write_log("[CORE] FastCGI Worker Pool stopped.");
+
+    fcgi_event_loop_stop();
+    write_log("[CORE] FastCGI Event Loop stopped.");
+
+    fcgi_queue_stop();
+    write_log("[CORE] FastCGI Queue cleaned up.");
 
     fcgi_upstream_stop();
     write_log("[CORE] FastCGI Upstream Connection Pool destroyed.");
 
-    // 3. Stop Worker Thread Pool utama Halmos & Join semua thread
+    fcgi_global_pool_destroy();
+    write_log("[CORE] FastCGI Global Session Pool destroyed.");
+
     core_queue_thread_worker_stop();
     write_log("[CORE] Core Worker thread pool joined & stopped.");
 
-    // 4. Stop Janitor Security Thread
-    if (config.rate_limit_enabled) {
-        sec_traffic_stop_janitor();
-    }
-    
-    // 5. Bersihkan WebSocket & TLS
-    ws_system_destroy();
-    write_log("[CORE] WebSocket Registry & Subsystems destroyed.");
-    
+    // 3. Hentikan Core Network Event Loop & Worker Pool Utama
+    core_event_loop_destroy();
+
+    // 4. Bersihkan TLS & Connection Table
     if (config.tls_enabled) {
         ssl_cleanup();
         write_log("[CORE] TLS Resources cleaned up.");
     }
    
-    // 6. DESTROY CORE CONNECTION TABLE
     core_conn_t_destroy();
     write_log("[CORE] Connection Table destroyed.");
 
     write_log("[CORE] %s shutdown complete. Bye!", HALMOS_NAME);
-    // 7. TERAKHIR: Wajib tempatkan stop_thread_logger() di paling ujung!
+    
+    // 5. Terakhir: Matikan logger
     stop_thread_logger();
     
     return EXIT_SUCCESS;

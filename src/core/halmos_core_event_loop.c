@@ -277,6 +277,8 @@ void core_event_loop_run() {
     }
 
     // Cleanup resources setelah loop berhenti
+    // dipindah ke core_event_loop_destroy.
+    /*
     if (shutdown_pipe[0] >= 0) {
         close(shutdown_pipe[0]);
         shutdown_pipe[0] = -1;
@@ -315,8 +317,49 @@ void core_event_loop_run() {
     }
  
     write_log("[CORE] Server stopped. Resource cleanup complete."); 
+    */
 }
+
+void core_event_loop_destroy(void) {
+    if (shutdown_pipe[0] >= 0) {
+        close(shutdown_pipe[0]);
+        shutdown_pipe[0] = -1;
+    }
+    if (shutdown_pipe[1] >= 0) {
+        close(shutdown_pipe[1]);
+        shutdown_pipe[1] = -1;
+    }
  
+    if (admission_ctrl) {
+        core_admission_destroy(admission_ctrl);
+        admission_ctrl = NULL;
+    }
+
+    if (bridge_fd >= 0) {
+        close(bridge_fd);
+        unlink("/tmp/halmos_bridge.sock");
+        bridge_fd = -1;
+    }
+    
+    if (sock_server >= 0) {
+        close(sock_server);
+        sock_server = -1;
+    }
+    
+    // epoll_fd ditutup DI SINI, pastikan dipanggil SETELAH worker thread core join/mati total
+    if (epoll_fd >= 0) {
+        close(epoll_fd);
+        epoll_fd = -1;
+    }
+    
+    if (events) {
+        free(events);
+        events = NULL;
+    }
+ 
+    write_log("[CORE] Server stopped. Resource cleanup complete."); 
+}
+
 void core_event_loop_stop(void) {
     //(void)sig;
     server_running = 0;

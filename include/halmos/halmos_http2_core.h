@@ -137,6 +137,8 @@ typedef struct HTTP2Stream {
     
     size_t fcgi_g_sent;
     
+    void *fcgi_session; // Menyimpan pointer ke FCGI_Session terkait
+    
     struct HTTP2Stream *node_next; // Point ke stream aktif lainnya
 } HTTP2Stream;
  
