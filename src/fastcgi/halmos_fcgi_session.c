@@ -98,14 +98,13 @@ FCGI_Session* fcgi_session_create(int sock_client, bool is_tls, SSL *ssl_conn, R
         return NULL; // Pool penuh / Max konkurensi tercapai
     }
 
-    // Tandai slot sebagai aktif dan kunci secara eksklusif untuk inisialisasi
+    // Tandai slot sebagai INIT dan KUNCI EKSKLUSIF SEBELUM g_pool_lock dilepas!
     pthread_mutex_lock(&session->lock);
     session->state = FCGI_STATE_INIT;
-    pthread_mutex_unlock(&session->lock);
     
-    pthread_mutex_unlock(&g_pool_lock);
+    pthread_mutex_unlock(&g_pool_lock); // Lepas global pool lock, tapi session->lock TETAP DIKERAS/DIKUNCI
 
-    // --- INISIALISASI PROPERTI SESI ---
+    // --- INISIALISASI PROPERTI SESI (Kini Aman di dalam session->lock) ---
     session->sock_client = sock_client;
     session->is_tls = is_tls;
     session->ssl_conn = ssl_conn;
@@ -141,20 +140,16 @@ FCGI_Session* fcgi_session_create(int sock_client, bool is_tls, SSL *ssl_conn, R
     bool is_unix = false;
 
     if (fcgi_upstream_select_node(req, backend_type, &target_ip, &target_port, &is_unix) < 0) {
-        // Kembalikan slot ke status FREE jika gagal
         write_log_error_code(ERR_FCGI_UPSTREAM_SEL, req ? req->uri : "UNKNOWN_URI");
-        pthread_mutex_lock(&session->lock);
         session->state = FCGI_SESSION_FREE;
-        pthread_mutex_unlock(&session->lock);
+        pthread_mutex_unlock(&session->lock); // Lepas kunci sebelum keluar
         return NULL; 
     }
 
     int fpm_sock = fcgi_upstream_acquire(is_unix ? target_ip : NULL, target_port);
     if (fpm_sock < 0) {
-        // Kembalikan slot ke status FREE jika pool upstream habis       
-        pthread_mutex_lock(&session->lock);
         session->state = FCGI_SESSION_FREE;
-        pthread_mutex_unlock(&session->lock);
+        pthread_mutex_unlock(&session->lock); // Lepas kunci sebelum keluar
         return NULL; 
     }
 
@@ -166,6 +161,9 @@ FCGI_Session* fcgi_session_create(int sock_client, bool is_tls, SSL *ssl_conn, R
         write_log_error_code(ERR_FCGI_NONBLOCK, fpm_sock);
     }
     session->fpm_fd = fpm_sock;
+
+    // Selesai inisialisasi, lepas session lock agar bisa diakses worker lain
+    pthread_mutex_unlock(&session->lock);
 
     return session;
 }
@@ -199,6 +197,9 @@ void fcgi_session_release(FCGI_Session *session) {
 
     // Jika ref_count turun dari 1 ke 0, sesi ini sudah selesai dan bisa didaur ulang.
     if (atomic_fetch_sub(&session->ref_count, 1) == 1) {
+        
+        // Kunci g_pool_lock terlebih dahulu, lalu session->lock (urutan yang sama dengan create)
+        pthread_mutex_lock(&g_pool_lock);
         pthread_mutex_lock(&session->lock);
 
         // 1. Bersihkan fpm_fd dan kembalikan ke upstream pool
@@ -223,7 +224,9 @@ void fcgi_session_release(FCGI_Session *session) {
 
         session->state = FCGI_SESSION_FREE; // Kembalikan slot ke pool (READY TO REUSE)
         
+        // Lepas kedua mutex dengan urutan terbalik
         pthread_mutex_unlock(&session->lock);
+        pthread_mutex_unlock(&g_pool_lock);
     }
 }
 
