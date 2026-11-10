@@ -113,7 +113,8 @@
 
 #include <stdint.h>
 #include <stdbool.h>
- 
+#include <time.h>
+
  // Menampung batasan fisik dasar dari sistem operasi & hardware
 typedef struct {
     long num_cores;
@@ -148,6 +149,13 @@ typedef struct {
     int session_slots;
 } BackendQuotas;
 
+// --- STRUCT TELEMETRI UNIVERSAL (Dipakai HTTP/1 & HTTP/2) ---
+typedef struct {
+    struct timespec wall_start;     // Waktu mulai request/stream
+    uint64_t total_cpu_time_us;     // Akumulasi CPU tick worker
+    uint64_t resume_count;          // Jumlah event loop resume
+} AdaptiveTelemetry;
+
 typedef struct {
     float threshold_ratio;
     int spawn_step;
@@ -164,8 +172,11 @@ void core_adaptive_hw_aware_init(int print_to_terminal);
 // --- Fungsi Runtime Self-Tuning Adaptive ---
 bool core_adaptive_runtime_init(void);
 void core_adaptive_runtime_destroy(void);
-void core_adaptive_runtime_record_task(uint64_t execution_time_us);
-void* core_adaptive_runtime_background_loop(void *arg);
-
 AdaptivePolicy core_adaptive_get_policy(void);
+
+// Fungsi Telemetri Terpusat
+void core_adaptive_telemetry_tick_begin(AdaptiveTelemetry *t, struct timespec *cpu_start);
+void core_adaptive_telemetry_tick_end(AdaptiveTelemetry *t, struct timespec *cpu_start);
+void core_adaptive_telemetry_finalize(AdaptiveTelemetry *t);
+
 #endif

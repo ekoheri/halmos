@@ -1,5 +1,6 @@
 #include "halmos_http2_stream.h"
 #include "halmos_http2_core.h"
+#include "halmos_core_adaptive.h"
 #include "halmos_http2_parser.h"
 #include "halmos_fcgi_upstream.h"
 #include "halmos_log.h"
@@ -112,6 +113,9 @@ HTTP2Stream* http2_stream_get_or_create(HTTP2Session *session, uint32_t stream_i
 
 void http2_stream_destroy(HTTP2Stream *st) {
     if (!st) return;
+
+    core_adaptive_telemetry_finalize(&st->telemetry);
+    // ============================================================
 
     http2_parser_free_memory(st);
 

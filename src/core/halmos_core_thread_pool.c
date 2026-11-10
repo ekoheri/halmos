@@ -1,6 +1,6 @@
 #include "halmos_core_thread_pool.h"
 #include "halmos_global.h"
-#include "halmos_core_adaptive.h"
+//#include "halmos_core_adaptive.h"
 #include "halmos_core_event_loop.h"
 #include "halmos_core_conn_table.h"
 #include "halmos_http_bridge.h"
@@ -69,23 +69,9 @@ void *core_thread_pool_worker(void *arg) {
             continue;
         }
 
-        // --- CATAT WAKTU MULAI EKSEKUSI ---
-        struct timeval tv_start, tv_end;
-        gettimeofday(&tv_start, NULL);
-        // ----------------------------------
- 
         // 2. PROSES REQUEST (Dispatcher Utama)
         // Sepanjang fungsi ini, I/O terproteksi oleh conn->io_lock
         int status = http_bridge_dispatch(sock_client, event_item.events);
-
-        // --- HITUNG DURASI & REKAM KE ADAPTIVE RUNTIME ---
-        gettimeofday(&tv_end, NULL);
-        uint64_t execution_time_us = (uint64_t)(tv_end.tv_sec - tv_start.tv_sec) * 1000000ULL +
-                                     (uint64_t)(tv_end.tv_usec - tv_start.tv_usec);
-
-        // Kirim hasil pengukuran durasi ke engine adaptive di RAM
-        core_adaptive_runtime_record_task(execution_time_us);
-        // --------------------------------------------------
 
         if (status == 1) {
             // Status 1: Keep-Alive atau SSL Handshake butuh data lagi (EAGAIN)
