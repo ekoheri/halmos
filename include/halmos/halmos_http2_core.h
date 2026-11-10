@@ -6,7 +6,8 @@
 #include <pthread.h>             // Wajib ada karena kamu pakai pthread_mutex_t
 #include <sys/types.h>
  
-#include "halmos_http1_header.h" 
+#include "halmos_http1_header.h"
+#include "halmos_core_adaptive.h"  
  
 /* --- HTTP/2 FRAME TYPES --- */
 #define HTTP2_FRAME_DATA          0x0
@@ -140,6 +141,9 @@ typedef struct HTTP2Stream {
     void *fcgi_session; // Menyimpan pointer ke FCGI_Session terkait
     
     struct HTTP2Stream *node_next; // Point ke stream aktif lainnya
+
+    // === TELEMETRY FIELDS (HTTP/2) ===
+    AdaptiveTelemetry telemetry;
 } HTTP2Stream;
  
 /**
@@ -201,7 +205,6 @@ typedef struct {
     HTTP2FrameHeader current_frame_head;
     unsigned char *payload_buf;
     size_t payload_bytes_read;
- 
 } HTTP2Session;
  
 #endif

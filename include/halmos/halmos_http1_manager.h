@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <sys/types.h>
 #include "halmos_core_conn_table.h"
+#include "halmos_core_adaptive.h"
 #include "halmos_http1_header.h"
 #include "halmos_fcgi_session.h"
 
@@ -49,6 +50,9 @@ typedef struct {
     size_t fcgi_write_len;     // Total panjang data
     size_t fcgi_write_offset;  // Posisi byte yang sudah sukses terkirim
     bool is_fcgi_headers_sent; // Penanda apakah header HTTP/1 sudah terkirim
+
+    // --- TELEMETRY FIELDS Untuk adaptive runtime ---
+    AdaptiveTelemetry telemetry;
 } HTTP1Session;
 
 void http1_session_destroy(void *session);

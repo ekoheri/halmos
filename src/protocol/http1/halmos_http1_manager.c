@@ -68,49 +68,66 @@ int http1_manager_session(halmos_conn_t *conn) {
     int sock_client = conn->fd;
     bool is_tls = (conn->ssl != NULL);
 
+    struct timespec cpu_tick_start;
+    core_adaptive_telemetry_tick_begin(&session->telemetry, &cpu_tick_start);
+
+    int res = 2; // Default return
+
     // =========================================================================
     // 1A. STATE: BACA REQUEST HEADER
     // =========================================================================
     if (session->state == STATE_READ_HEADERS) {
-        int res = handle_read_headers_state(conn, session, sock_client, is_tls);
-        if (res <= 0 || res == 2) return res;
+        res = handle_read_headers_state(conn, session, sock_client, is_tls);
+        if (res <= 0 || res == 2) goto done;
     }
 
     // =========================================================================
     // 1B. STATE: BACA BODY REQUEST
     // =========================================================================
     if (session->state == STATE_READ_BODY) {
-        int res = handle_read_body_state(conn, session, sock_client, is_tls);
-        if (res <= 0 || res == 2) return res;
+        res = handle_read_body_state(conn, session, sock_client, is_tls);
+        if (res <= 0 || res == 2) goto done;
     }
         
     // =========================================================================
     // 2. STATE: HANDLE REQUEST & PREPARE RESPONSE
     // =========================================================================
     if (session->state == STATE_HANDLE_REQUEST) {
-        return http1_manager_routing_bridge(conn, session);
+        res = http1_manager_routing_bridge(conn, session);
+        goto done;
     }
 
     // =========================================================================
     // 3. STATE: PEMROSESAN FASTCGI BERBASIS FSM
     // =========================================================================
     if (session->state == STATE_FCGI_PROCESSING) {
-        return handle_fcgi_processing_state(conn, session, sock_client, is_tls);
+        res = handle_fcgi_processing_state(conn, session, sock_client, is_tls);
+        goto done;
     }
 
     // =========================================================================
     // 4. STATE: PENGIRIMAN FILE STATIS (EPOLLOUT)
     // =========================================================================
     if (session->state == STATE_SEND_STATIC_FILE) {
-        return handle_static_file_state(conn, session, sock_client, is_tls);
+        res = handle_static_file_state(conn, session, sock_client, is_tls);
+        goto done;
     }
+
+done:
+    // AKHIRI TICK: Dijamin 100% terpanggil terlepas dari state mana pun yang selesai!
+    core_adaptive_telemetry_tick_end(&session->telemetry, &cpu_tick_start);
     
-    return 2;
+    return res;
 }
 
 void http1_session_destroy(void *session) {
     HTTP1Session *s = (HTTP1Session *)session;
     if (!s) return;
+
+    // Panggil fungsi finalisasi terpusat
+    core_adaptive_telemetry_finalize(&s->telemetry);
+    // ========================================================
+
     if (s->buffer) free(s->buffer);
     if (s->file_fd >= 0) close(s->file_fd);
 

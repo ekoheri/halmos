@@ -20,11 +20,10 @@
 #include <ctype.h>
 #include <signal.h>
 #include <stdatomic.h>
+#include <time.h>
 
-#define INITIAL_CAPACITY 1000
-#define MAX_LINE_LENGTH 1024
 
-#define HISTORY_SLOTS 60 // Menyimpan 60 slot riwayat akses (misal per detik atau per menit)
+#define HISTORY_SLOTS 60 // Menyimpan 60 slot riwayat akses (misal per 60 detik atau per 1 menit)
 
 typedef struct {
     uint64_t io_counts[HISTORY_SLOTS];
@@ -65,7 +64,6 @@ int      g_fcgi_rust_quota     = 0;
 int      g_fcgi_python_quota   = 0;
 
 // --- 5. RUNTIME OTONOM (In-Memory Self-Tuning Variables) ---
-// Variabel privat, aman dari modifikasi liar luar modul
 static float    g_runtime_queue_threshold_ratio = 0.50f;
 static int      g_runtime_spawn_worker_step     = 4;
 static int      g_runtime_timeout_worker_idle   = 30;
@@ -82,16 +80,16 @@ static char* trim_string_safe(char *str);
 static PHPConfig fetch_php_fpm_config(void);
 
 // --- 1. Deteksi Hardware & Sistem Operasi ---
-static HardwareProfile core_detect_hardware(void);
+static HardwareProfile detect_hardware(void);
 
 // --- 2. Kalkulasi Anggaran RAM Berdasarkan Backend Aktif ---
-static MemoryBudget core_calculate_memory_budgets(const HardwareProfile *hw);
+static MemoryBudget calculate_memory_budgets(const HardwareProfile *hw);
 
 // --- 3. Kalkulasi Kapasitas Worker Pool ---
-static WorkerCapacity core_calculate_worker_capacity(const HardwareProfile *hw, const MemoryBudget *mb);
+static WorkerCapacity calculate_worker_capacity(const HardwareProfile *hw, const MemoryBudget *mb);
 
 // --- 4. Kalkulasi Qoota Backend (fatsCG) ---
-static BackendQuotas core_calculate_backend_quotas(const HardwareProfile *hw, const MemoryBudget *mb, const WorkerCapacity *wc);
+static BackendQuotas calculate_backend_quotas(const HardwareProfile *hw, const MemoryBudget *mb, const WorkerCapacity *wc);
 
 // --- 5. menulis ke log atau menampilkan perhitungan adaptive ke monitor
 static void core_print_adaptive_summary(
@@ -106,16 +104,22 @@ static void core_print_adaptive_summary(
 /* Helper untuk adaptive runtime*/
 static void core_adaptive_set_policy(float threshold, int spawn_step, int timeout_idle);
 
+static uint64_t timespec_diff_us(const struct timespec *start, const struct timespec *end);
+
+static void runtime_record_task(uint64_t total_cpu_us, uint64_t total_wall_us, uint64_t resumes);
+
+static void* runtime_autoscale_evaluator(void *arg);
+
 /********************************************************************
  * BAGIAN A: STARTUP HARDWARE-AWARE INITIALIZATION
  ********************************************************************/
 
 void core_adaptive_hw_aware_init(int print_to_terminal) {
     // 1. Eksekusi tahapan modular secara berurutan
-    HardwareProfile hw = core_detect_hardware();
-    MemoryBudget mb = core_calculate_memory_budgets(&hw);
-    WorkerCapacity wc = core_calculate_worker_capacity(&hw, &mb);
-    BackendQuotas quotas = core_calculate_backend_quotas(&hw, &mb, &wc);
+    HardwareProfile hw = detect_hardware();
+    MemoryBudget mb = calculate_memory_budgets(&hw);
+    WorkerCapacity wc = calculate_worker_capacity(&hw, &mb);
+    BackendQuotas quotas = calculate_backend_quotas(&hw, &mb, &wc);
     
     // Status backend untuk keperluan logging/audit
     bool is_php_active = (config.php.node_count > 0 || strlen(config.php_fpm_config_path) > 0);
@@ -154,7 +158,7 @@ bool core_adaptive_runtime_init(void) {
 
     atomic_store(&g_adaptive_active, true);
 
-    if (pthread_create(&g_runtime_adaptive_tid, NULL, core_adaptive_runtime_background_loop, NULL) != 0) {
+    if (pthread_create(&g_runtime_adaptive_tid, NULL, runtime_autoscale_evaluator, NULL) != 0) {
         write_log("[ERROR] Failed to start runtime adaptive background thread.");
         pthread_mutex_destroy(&g_runtime_win.lock);
         atomic_store(&g_adaptive_active, false);
@@ -176,136 +180,13 @@ void core_adaptive_runtime_destroy(void) {
     write_log("[ADAPTIVE RAM] Runtime self-tuning engine destroyed cleanly.");
 }
 
-// Pencatatan Task (Langsung diakumulasi ke slot waktu aktif saat ini)
-
-void core_adaptive_runtime_record_task(uint64_t execution_time_us) {
-    // Tentukan sendiri secara otomatis: > 10ms (10000 us) dianggap CPU-bound
-    int bound_type = (execution_time_us > 10000) ? 1 : 0; 
-    
+// Setter (Opsional, jika ada modul lain yang butuh override kebijakan)
+void core_adaptive_set_policy(float threshold, int spawn_step, int timeout_idle) {
     pthread_mutex_lock(&g_runtime_win.lock);
-    int idx = g_runtime_win.current_index;
-    if (bound_type == 1) {
-        g_runtime_win.cpu_counts[idx]++;
-    } else {
-        g_runtime_win.io_counts[idx]++;
-    }
+    g_runtime_queue_threshold_ratio = threshold;
+    g_runtime_spawn_worker_step     = spawn_step;
+    g_runtime_timeout_worker_idle   = timeout_idle;
     pthread_mutex_unlock(&g_runtime_win.lock);
-}
-
-// Background Loop yang Bergeser Mengikuti Slot Waktu (Sliding Window)
-void* core_adaptive_runtime_background_loop(void *arg) {
-    (void)arg;
-
-    // Deteksi jumlah core sekali saja saat awal loop
-    long n_cores = sysconf(_SC_NPROCESSORS_ONLN);
-    if (n_cores < 1) n_cores = 1; 
-    int high_load_threshold = (int)(n_cores * 2);
-
-    while (atomic_load(&g_adaptive_active)) {
-        // Tidur per 1 detik yang dipecah menjadi interval 100ms agar responsif saat shutdown
-        for (int i = 0; i < 10 && atomic_load(&g_adaptive_active); i++) {
-            usleep(100000); // 100ms * 10 = 1 detik
-        }
-        if (!atomic_load(&g_adaptive_active)) break;
-
-        // 1. Ambil dan reset window metrik dengan penguncian mutex window
-        pthread_mutex_lock(&g_runtime_win.lock);
-        int latest_idx = g_runtime_win.current_index;
-        g_runtime_win.current_index = (g_runtime_win.current_index + 1) % HISTORY_SLOTS;
-        
-        int next_idx = g_runtime_win.current_index;
-        g_runtime_win.cpu_counts[next_idx] = 0;
-        g_runtime_win.io_counts[next_idx] = 0;
-
-        double weighted_cpu_sum = 0.0;
-        double weighted_io_sum = 0.0;
-        double total_weight = 0.0;
-
-        for (int i = 0; i < HISTORY_SLOTS; i++) {
-            int target_idx = (latest_idx - i + HISTORY_SLOTS) % HISTORY_SLOTS;
-            double weight = (double)(HISTORY_SLOTS - i); 
-
-            weighted_cpu_sum += (double)g_runtime_win.cpu_counts[target_idx] * weight;
-            weighted_io_sum  += (double)g_runtime_win.io_counts[target_idx] * weight;
-            total_weight     += weight;
-        }
-        pthread_mutex_unlock(&g_runtime_win.lock);
-
-        // 2. Ambil policy saat ini sebagai referensi/status aktif
-        AdaptivePolicy current_policy = core_adaptive_get_policy();
-
-        // 3. Ambil kondisi antrean saat ini secara aman
-        pthread_mutex_lock(&global_queue.lock);
-        int current_count   = global_queue.count;
-        int max_limit       = global_queue.max_queue_limit;
-        int total_workers   = global_queue.total_workers;
-        int active_workers  = global_queue.active_workers;
-        pthread_mutex_unlock(&global_queue.lock);
-
-        float load_factor = (max_limit > 0) ? (float)current_count / max_limit : 0;
-        
-        // Hitung rasio utilisasi worker (0.0 hingga 1.0+)
-        float worker_utilization = (total_workers > 0) ? (float)active_workers / total_workers : 0.0f;
-
-        // Inisialisasi nilai baru mengikuti nilai saat ini (agar stabil jika tidak ada perubahan)
-        float new_threshold = current_policy.threshold_ratio;
-        int new_spawn_step  = current_policy.spawn_step;
-        int new_timeout     = current_policy.timeout_idle;
-
-        // --- DEFINISI BATAS HYSSTERESIS ---
-        // Atas (Scale-Up Trigger) = 0.60, Bawah (Scale-Down Trigger) = 0.40
-        float upper_limit = 0.60f;
-        float lower_limit = 0.40f;
-
-        // --- EVALUASI UTAMA DENGAN HYSSTERESIS & ANTREAN ---
-        // --- EVALUASI UTAMA DENGAN HYSSTERESIS & WORKER UTILIZATION ---
-        if (load_factor >= upper_limit || current_count > high_load_threshold || worker_utilization >= 0.85f) {
-            // Kondisi High Load: Antrean penuh, atau worker hampir 100% sibuk
-            new_timeout = 300; // Tahan worker lebih lama agar tidak cepat didrop
-        } 
-        else if (load_factor <= lower_limit && current_count == 0 && worker_utilization <= 0.30f) {
-            // Kondisi Normal / Idle: Antrean kosong & utilisasi worker di bawah 30%
-            new_timeout = 30;
-            
-            // Evaluasi karakteristik CPU vs IO dari metrik saat benar-benar idle
-            if (total_weight > 0.0) {
-                double final_cpu_score = weighted_cpu_sum / total_weight;
-                double final_io_score  = weighted_io_sum / total_weight;
-                double total_score     = final_cpu_score + final_io_score;
-
-                if (total_score >= 1.0) {
-                    float cpu_ratio = (float)(final_cpu_score / total_score);
-                    float io_ratio  = (float)(final_io_score / total_score);
-
-                    if (cpu_ratio > 0.5f) {
-                        new_threshold = 0.35f;
-                        new_spawn_step  = 2;
-                    } 
-                    else if (io_ratio > 0.8f) {
-                        new_threshold = 0.60f;
-                        new_spawn_step  = 4;
-                    } else {
-                        new_threshold = 0.50f;
-                        new_spawn_step  = 4;
-                    }
-                }
-            }
-        }
-        else if (current_count > 0 || worker_utilization > 0.30f) {
-            // Light load / zona transisi hysteresis
-            new_timeout = 60;
-        }
-        // JIKA DI ZONA AMAN HYSTERESIS (antara 0.40 dan 0.60 tanpa lonjakan): 
-        // Variabel new_timeout dan new_threshold dipertahankan seperti nilai sebelumnya (tidak flapping).
-
-        // --- SIMPAN KEBIJAKAN BARU JIKA ADA PERUBAHAN (MENGHINDARI WRITE SIA-SIA) ---
-        if (new_threshold != current_policy.threshold_ratio ||
-            new_spawn_step  != current_policy.spawn_step ||
-            new_timeout     != current_policy.timeout_idle) {
-            core_adaptive_set_policy(new_threshold, new_spawn_step, new_timeout);
-        }
-    }
-    return NULL;
 }
 
 // Snapshot Getter (Aman & Konsisten)
@@ -317,6 +198,51 @@ AdaptivePolicy core_adaptive_get_policy(void) {
     policy.timeout_idle   = g_runtime_timeout_worker_idle;
     pthread_mutex_unlock(&g_runtime_win.lock);
     return policy;
+}
+
+// 1. SATU FUNGSI UNTUK MEMULAI TICK (Otomatis inisialisasi jika baru, sekaligus catat CPU tick)
+void core_adaptive_telemetry_tick_begin(AdaptiveTelemetry *t, struct timespec *cpu_start) {
+    if (!t || !cpu_start) return;
+    
+    // Jika struct belum pernah diinisialisasi (pertama kali request masuk)
+    if (t->wall_start.tv_sec == 0) {
+        clock_gettime(CLOCK_MONOTONIC, &t->wall_start);
+        t->total_cpu_time_us = 0;
+        t->resume_count = 0;
+    }
+    
+    // Selalu catat waktu awal CPU untuk slice/resume kali ini
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, cpu_start);
+}
+
+// 2. SATU FUNGSI UNTUK MENGAKHIRI TICK (Hitung CPU & tambah resume_count)
+void core_adaptive_telemetry_tick_end(AdaptiveTelemetry *t, struct timespec *cpu_start) {
+    if (!t || !cpu_start) return;
+    
+    struct timespec cpu_end;
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &cpu_end);
+    
+    t->total_cpu_time_us += timespec_diff_us(cpu_start, &cpu_end);
+    t->resume_count++; // Otomatis terhitung per eksekusi event loop
+}
+
+// 3. FINALISASI AKHIR (Saat request benar-benar tuntas/mati)
+void core_adaptive_telemetry_finalize(AdaptiveTelemetry *t) {
+    if (!t || t->wall_start.tv_sec == 0) return;
+
+    struct timespec wall_end;
+    clock_gettime(CLOCK_MONOTONIC, &wall_end);
+    
+    uint64_t total_wall_time_us = timespec_diff_us(&t->wall_start, &wall_end);
+    uint64_t total_cpu_us       = t->total_cpu_time_us;
+    uint64_t resumes            = t->resume_count;
+
+    // Cetak log terpusat
+    //fprintf(stderr, "[TELEMETRY %s] Wall: %lu us | CPU: %lu us | Resumes: %lu\n", 
+    //         proto_name, total_wall_time_us, total_cpu_us, resumes);
+
+    // Suapi ke RuntimeMetricsWindow (60 slot history Anda)
+    runtime_record_task(total_cpu_us, total_wall_time_us, resumes);
 }
 
 /* Fungsi helper untuk core_adaptive_hw_aware_init */
@@ -414,7 +340,7 @@ PHPConfig fetch_php_fpm_config(void) {
     return cfg;
 }
 
-HardwareProfile core_detect_hardware(void) {
+HardwareProfile detect_hardware(void) {
     HardwareProfile hw;
     
     // --- 1. DETEKSI JUMLAH CORE (CPU) DENGAN DUKUNGAN CGROUPS ---
@@ -525,7 +451,7 @@ HardwareProfile core_detect_hardware(void) {
     return hw;
 }
 
-MemoryBudget core_calculate_memory_budgets(const HardwareProfile *hw) {
+MemoryBudget calculate_memory_budgets(const HardwareProfile *hw) {
     MemoryBudget mb;
     
     // Cadangan untuk OS & Database (25%, min 512MB, maks 4096MB)
@@ -588,7 +514,7 @@ MemoryBudget core_calculate_memory_budgets(const HardwareProfile *hw) {
     return mb;
 }
 
-WorkerCapacity core_calculate_worker_capacity(const HardwareProfile *hw, const MemoryBudget *mb) {
+WorkerCapacity calculate_worker_capacity(const HardwareProfile *hw, const MemoryBudget *mb) {
     WorkerCapacity wc;
     
     // Batas kapasitas maksimum berdasarkan core (misal 32 atau 64 per core)
@@ -639,7 +565,7 @@ WorkerCapacity core_calculate_worker_capacity(const HardwareProfile *hw, const M
     return wc;
 }
 
-BackendQuotas core_calculate_backend_quotas(const HardwareProfile *hw, const MemoryBudget *mb, const WorkerCapacity *wc) {
+BackendQuotas calculate_backend_quotas(const HardwareProfile *hw, const MemoryBudget *mb, const WorkerCapacity *wc) {
     BackendQuotas quotas = {0};
 
     // Cek status backend aktif
@@ -831,11 +757,162 @@ void core_print_adaptive_summary(
     }
 }
 
-// Setter (Opsional, jika ada modul lain yang butuh override kebijakan)
-void core_adaptive_set_policy(float threshold, int spawn_step, int timeout_idle) {
+/* Fungsi helper untuk adative runtime autoscale */
+uint64_t timespec_diff_us(const struct timespec *start, const struct timespec *end) {
+    int64_t sec = end->tv_sec - start->tv_sec;
+    int64_t nsec = end->tv_nsec - start->tv_nsec;
+
+    if (nsec < 0) {
+        sec--;
+        nsec += 1000000000LL;
+    }
+
+    return (uint64_t)(sec * 1000000LL + nsec / 1000LL);
+}
+
+// Pencatatan Task (Langsung diakumulasi ke slot waktu aktif saat ini)
+
+void runtime_record_task(uint64_t total_cpu_us, uint64_t total_wall_us, uint64_t resumes) {
+    if (total_wall_us == 0) return;
+
+    double cpu_ratio = (double)total_cpu_us / (double)total_wall_us;
+    
+    // Kriteria baru yang lebih kaya:
+    // - Jika CPU memakan > 40% waktu -> CPU-bound (1)
+    // - Atau jika resumes sangat tinggi (misal > 50 kali resume meskipun CPU kecil) -> Ini murni Heavy I/O / Network Waiting (0)
+    int bound_type = 0;
+    if (cpu_ratio > 0.40) {
+        bound_type = 1; // CPU-bound
+    } else if (resumes > 50) {
+        bound_type = 0; // Heavy I/O-bound (banyak tertahan non-blocking yield)
+    } else {
+        bound_type = 0; // Fast / Normal I/O
+    }
+    
     pthread_mutex_lock(&g_runtime_win.lock);
-    g_runtime_queue_threshold_ratio = threshold;
-    g_runtime_spawn_worker_step     = spawn_step;
-    g_runtime_timeout_worker_idle   = timeout_idle;
+    int idx = g_runtime_win.current_index;
+    if (idx >= 0 && idx < HISTORY_SLOTS) {
+        if (bound_type == 1) {
+            g_runtime_win.cpu_counts[idx]++;
+        } else {
+            g_runtime_win.io_counts[idx]++;
+        }
+    }
     pthread_mutex_unlock(&g_runtime_win.lock);
+}
+
+// Background Loop yang Bergeser Mengikuti Slot Waktu (Sliding Window)
+void* runtime_autoscale_evaluator(void *arg) {
+    (void)arg;
+
+    // Deteksi jumlah core sekali saja saat awal loop
+    long n_cores = sysconf(_SC_NPROCESSORS_ONLN);
+    if (n_cores < 1) n_cores = 1; 
+    int high_load_threshold = (int)(n_cores * 2);
+
+    while (atomic_load(&g_adaptive_active)) {
+        // Tidur per 1 detik yang dipecah menjadi interval 100ms agar responsif saat shutdown
+        for (int i = 0; i < 10 && atomic_load(&g_adaptive_active); i++) {
+            usleep(100000); // 100ms * 10 = 1 detik
+        }
+        if (!atomic_load(&g_adaptive_active)) break;
+
+        // 1. Ambil dan reset window metrik dengan penguncian mutex window
+        pthread_mutex_lock(&g_runtime_win.lock);
+        int latest_idx = g_runtime_win.current_index;
+        g_runtime_win.current_index = (g_runtime_win.current_index + 1) % HISTORY_SLOTS;
+        
+        int next_idx = g_runtime_win.current_index;
+        g_runtime_win.cpu_counts[next_idx] = 0;
+        g_runtime_win.io_counts[next_idx] = 0;
+
+        double weighted_cpu_sum = 0.0;
+        double weighted_io_sum = 0.0;
+        double total_weight = 0.0;
+
+        for (int i = 0; i < HISTORY_SLOTS; i++) {
+            int target_idx = (latest_idx - i + HISTORY_SLOTS) % HISTORY_SLOTS;
+            double weight = (double)(HISTORY_SLOTS - i); 
+
+            weighted_cpu_sum += (double)g_runtime_win.cpu_counts[target_idx] * weight;
+            weighted_io_sum  += (double)g_runtime_win.io_counts[target_idx] * weight;
+            total_weight     += weight;
+        }
+        pthread_mutex_unlock(&g_runtime_win.lock);
+
+        // 2. Ambil policy saat ini sebagai referensi/status aktif
+        AdaptivePolicy current_policy = core_adaptive_get_policy();
+
+        // 3. Ambil kondisi antrean saat ini secara aman
+        pthread_mutex_lock(&global_queue.lock);
+        int current_count   = global_queue.count;
+        int max_limit       = global_queue.max_queue_limit;
+        int total_workers   = global_queue.total_workers;
+        int active_workers  = global_queue.active_workers;
+        pthread_mutex_unlock(&global_queue.lock);
+
+        float load_factor = (max_limit > 0) ? (float)current_count / max_limit : 0;
+        
+        // Hitung rasio utilisasi worker (0.0 hingga 1.0+)
+        float worker_utilization = (total_workers > 0) ? (float)active_workers / total_workers : 0.0f;
+
+        // Inisialisasi nilai baru mengikuti nilai saat ini (agar stabil jika tidak ada perubahan)
+        float new_threshold = current_policy.threshold_ratio;
+        int new_spawn_step  = current_policy.spawn_step;
+        int new_timeout     = current_policy.timeout_idle;
+
+        // --- DEFINISI BATAS HYSSTERESIS ---
+        // Atas (Scale-Up Trigger) = 0.60, Bawah (Scale-Down Trigger) = 0.40
+        float upper_limit = 0.60f;
+        float lower_limit = 0.40f;
+
+        // --- EVALUASI UTAMA DENGAN HYSSTERESIS & ANTREAN ---
+        // --- EVALUASI UTAMA DENGAN HYSSTERESIS & WORKER UTILIZATION ---
+        if (load_factor >= upper_limit || current_count > high_load_threshold || worker_utilization >= 0.85f) {
+            // Kondisi High Load: Antrean penuh, atau worker hampir 100% sibuk
+            new_timeout = 300; // Tahan worker lebih lama agar tidak cepat didrop
+        } 
+        else if (load_factor <= lower_limit && current_count == 0 && worker_utilization <= 0.30f) {
+            // Kondisi Normal / Idle: Antrean kosong & utilisasi worker di bawah 30%
+            new_timeout = 30;
+            
+            // Evaluasi karakteristik CPU vs IO dari metrik saat benar-benar idle
+            if (total_weight > 0.0) {
+                double final_cpu_score = weighted_cpu_sum / total_weight;
+                double final_io_score  = weighted_io_sum / total_weight;
+                double total_score     = final_cpu_score + final_io_score;
+
+                if (total_score >= 1.0) {
+                    float cpu_ratio = (float)(final_cpu_score / total_score);
+                    float io_ratio  = (float)(final_io_score / total_score);
+
+                    if (cpu_ratio > 0.5f) {
+                        new_threshold = 0.35f;
+                        new_spawn_step  = 2;
+                    } 
+                    else if (io_ratio > 0.8f) {
+                        new_threshold = 0.60f;
+                        new_spawn_step  = 4;
+                    } else {
+                        new_threshold = 0.50f;
+                        new_spawn_step  = 4;
+                    }
+                }
+            }
+        }
+        else if (current_count > 0 || worker_utilization > 0.30f) {
+            // Light load / zona transisi hysteresis
+            new_timeout = 60;
+        }
+        // JIKA DI ZONA AMAN HYSTERESIS (antara 0.40 dan 0.60 tanpa lonjakan): 
+        // Variabel new_timeout dan new_threshold dipertahankan seperti nilai sebelumnya (tidak flapping).
+
+        // --- SIMPAN KEBIJAKAN BARU JIKA ADA PERUBAHAN (MENGHINDARI WRITE SIA-SIA) ---
+        if (new_threshold != current_policy.threshold_ratio ||
+            new_spawn_step  != current_policy.spawn_step ||
+            new_timeout     != current_policy.timeout_idle) {
+            core_adaptive_set_policy(new_threshold, new_spawn_step, new_timeout);
+        }
+    }
+    return NULL;
 }

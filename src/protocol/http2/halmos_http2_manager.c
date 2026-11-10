@@ -274,6 +274,18 @@ int dispatch_frame(HTTP2Session *session, int sock_client, bool is_tls) {
     HTTP2FrameHeader *head = &session->current_frame_head;
     unsigned char *payload = session->payload_buf;
     
+    // === 1. CARI STREAM TERKAIT BERDASARKAN STREAM_ID ===
+    HTTP2Stream *st = NULL;
+    if (head->stream_id > 0) {
+        st = http2_stream_find(session, head->stream_id);
+    }
+
+    struct timespec cpu_tick_start;
+    if (st) {
+        core_adaptive_telemetry_tick_begin(&st->telemetry, &cpu_tick_start);
+    }
+
+
     switch (head->type) {
         case 0x00: http2_parser_handle_data(session, head, payload); break;
         case 0x01: http2_parser_handle_headers(session, head, payload); break;
@@ -333,6 +345,12 @@ int dispatch_frame(HTTP2Session *session, int sock_client, bool is_tls) {
     
     session->read_state = 0;
     session->header_bytes_read = 0;
+
+    // === 3. SELESAI PENGUKURAN CPU TICK & AKUMULASI KE STREAM ===
+    if (st) {
+        core_adaptive_telemetry_tick_end(&st->telemetry, &cpu_tick_start);
+    }
+
     return 1;
 }
 //Akhir paket Helper http2_manager_session
