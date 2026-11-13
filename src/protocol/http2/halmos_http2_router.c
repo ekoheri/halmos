@@ -62,6 +62,28 @@ void http2_router_bridge(HTTP2Session *session, HTTP2Stream *stream) {
         http2_multipart_parse(req);
     }
 
+    // --- PENGAMANAN KHUSUS PHP: Blokir bot scanner untuk file .php fiktif ---
+    if (backend_type == 0) { // Hanya divalidasi jika targetnya PHP
+        VHostEntry *vh = (VHostEntry *)req->vhost_context;
+        const char *active_root = (vh && vh->root[0] != '\0') ? vh->root : config.document_root;
+        char *safe_path = sanitize_path(active_root, req->uri);
+        struct stat st;
+
+        // Jika file .php tidak ditemukan di disk, langsung lempar HTTP 404
+        if (!safe_path || stat(safe_path, &st) != 0 || !S_ISREG(st.st_mode)) {
+            if (safe_path) free(safe_path);
+            
+            // Kirim respons 404 melalui kanal HTTP/2 stream
+            http2_response_send_header(session, stream, 404);
+            http2_response_send_data(session, stream, "<h1>404 Not Found</h1>", 21, true);
+            write_log_access("HTTP/2", req->client_ip, req->method, req->uri, 404, 21);
+            
+            stream->state = 4; // Tandai stream selesai/ditutup
+            return; // Hentikan eksekusi, cegah alokasi FastCGI yang sia-sia!
+        }
+        free(safe_path);
+    }
+
     // 3. JALUR FASTCGI BACKEND
     if (backend_type != -1) {
         route_fastcgi_backend(session, stream, req, backend_type);

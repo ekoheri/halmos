@@ -21,6 +21,9 @@
 #include <netinet/tcp.h>
 #include <poll.h>
 
+// Tentukan batas aman maksimal buffer per stream (contoh: 10 MB)
+#define MAX_FCGI_GATHER_CAPACITY (10 * 1024 * 1024)
+
 static ssize_t http1_session_write(FCGI_Session *session, const void *buf, size_t len) {
     if (!session || session->sock_client < 0) return -2;
 
@@ -341,7 +344,6 @@ bool fcgi_fsm_step_http2(FCGI_Session *session) {
 // ================================================================================
 
 // Helper HTTP1 : Menulis payload langsung ke Ring Buffer statis session->rx_buffer
-// Helper HTTP1 : Menulis payload langsung ke Ring Buffer statis session->rx_buffer
 void handle_payload_http1(FCGI_Session *session, const char *payload, int read_bytes) {
     if (!session || read_bytes <= 0) return;
 
@@ -485,13 +487,41 @@ void handle_payload_http2(HTTP2Stream *stream, const char *payload, int read_byt
         }
     }
 
+    // Ubah bagian pengecekan kapasitas di halmos_fcgi_fsm.c:
     if (payload_offset < read_bytes) {
         int body_chunk = read_bytes - payload_offset;
         if (body_chunk > 0) {
-            if (stream->fcgi_g_ptr + (size_t)body_chunk <= stream->fcgi_g_capacity) {
-                memcpy(stream->fcgi_gather_buf + stream->fcgi_g_ptr, payload + payload_offset, (size_t)body_chunk);
-                stream->fcgi_g_ptr += (size_t)body_chunk;
+            size_t required_space = stream->fcgi_g_ptr + (size_t)body_chunk;
+            
+            // Jika kapasitas buffer tidak cukup, lakukan realloc secara dinamis!
+            if (required_space > stream->fcgi_g_capacity) {
+                size_t new_capacity = stream->fcgi_g_capacity * 2;
+                while (new_capacity < required_space) {
+                    new_capacity *= 2; // Gandakan terus sampai muat
+                }
+                
+                if (new_capacity > MAX_FCGI_GATHER_CAPACITY) {
+                    // Log peringatan keamanan bahwa ada payload melebihi batas wajar
+                    write_log_error("Payload FastCGI melampaui batas safety cap (10MB). Stream dihentikan.");
+                    
+                    // Tandai stream error / tutup paksa untuk mencegah OOM
+                    stream->state = HTTP2_STATE_CLOSED;
+                    stream->is_fcgi_active = false;
+                    return; 
+                }
+
+                unsigned char *new_buf = realloc(stream->fcgi_gather_buf, new_capacity);
+                if (!new_buf) {
+                    // Handle out of memory error jika perlu
+                    return; 
+                }
+                stream->fcgi_gather_buf = new_buf;
+                stream->fcgi_g_capacity = new_capacity;
             }
+
+            // Salin data payload tanpa ada yang terbuang
+            memcpy(stream->fcgi_gather_buf + stream->fcgi_g_ptr, payload + payload_offset, (size_t)body_chunk);
+            stream->fcgi_g_ptr += (size_t)body_chunk;
         }
     }
 }
