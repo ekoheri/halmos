@@ -122,6 +122,7 @@ typedef enum {
     
     // fastcgi/fcgi_fsm.c
     ERR_FCGI_PAYLOAD_MEM    = 5014, // Gagal alokasi memori payload FPM di FSM
+    ERR_FCGI_PAYLOAD_LIMIT  = 5015, // Payload HTTP/2 melampaui batas memory_budget
 
     // ==========================================
     // KELOMPOK WARNING (Murni Perilaku / Aksi User)

@@ -42,10 +42,15 @@ typedef struct {
     //Storage
     char document_root[256];
     char default_page[256];
+
+    //Performance
+    int web_server_reserved_ram;    
+    size_t request_buffer_size;
+
     //Security
     size_t max_body_size; // Misal dalam byte
     bool tls_enabled;
-    bool e2ee_enabled;
+    bool ale_enabled;
     char ssl_certificate_file[512];
     char ssl_private_key_file[512];
     bool rate_limit_enabled;
@@ -61,9 +66,6 @@ typedef struct {
 
     char php_fpm_config_path[512];
 
-    //Performance    
-    int request_buffer_size;
-    
     //Virtual Host
     VHostEntry vhosts[32];    // Bisa nampung 32 domain
     int vhost_count;

@@ -451,6 +451,7 @@ void handle_payload_http1(FCGI_Session *session, const char *payload, int read_b
 void handle_payload_http2(HTTP2Stream *stream, const char *payload, int read_bytes) {
     if (!stream || read_bytes <= 0) return;
 
+    //FCGI_Session *session = stream->fcgi_session;
     int payload_offset = 0;
 
     if (!stream->fcgi_header_parsed) {
@@ -487,6 +488,27 @@ void handle_payload_http2(HTTP2Stream *stream, const char *payload, int read_byt
         }
     }
 
+    size_t dynamic_max_capacity = MAX_FCGI_GATHER_CAPACITY; // Fallback aman: 10 MB dalam byte
+            
+    if (stream->fcgi_session) {
+        // Cast secara eksplisit dari void * ke FCGI_Session *
+        FCGI_Session *session = (FCGI_Session *)stream->fcgi_session;
+        size_t configured_budget = 0;
+
+        if (session->backend_type == BACKEND_PHP) {
+            configured_budget = config.php.memory_budget;
+        } else if (session->backend_type == BACKEND_RUST) {
+            configured_budget = config.rust.memory_budget;
+        } else if (session->backend_type == BACKEND_PYTHON) {
+            configured_budget = config.python.memory_budget;
+        }
+
+        if (configured_budget > 0) {
+            dynamic_max_capacity = configured_budget;
+        }
+    }
+    //fprintf(stderr, "Max Capacity %zu bytes\n", dynamic_max_capacity);
+
     // Ubah bagian pengecekan kapasitas di halmos_fcgi_fsm.c:
     if (payload_offset < read_bytes) {
         int body_chunk = read_bytes - payload_offset;
@@ -500,9 +522,9 @@ void handle_payload_http2(HTTP2Stream *stream, const char *payload, int read_byt
                     new_capacity *= 2; // Gandakan terus sampai muat
                 }
                 
-                if (new_capacity > MAX_FCGI_GATHER_CAPACITY) {
-                    // Log peringatan keamanan bahwa ada payload melebihi batas wajar
-                    write_log_error("Payload FastCGI melampaui batas safety cap (10MB). Stream dihentikan.");
+                if (new_capacity > dynamic_max_capacity) {
+                    // Log error keamanan bahwa ada payload melebihi batas wajar
+                    write_log_error_code(ERR_FCGI_PAYLOAD_LIMIT, new_capacity, dynamic_max_capacity);
                     
                     // Tandai stream error / tutup paksa untuk mencegah OOM
                     stream->state = HTTP2_STATE_CLOSED;

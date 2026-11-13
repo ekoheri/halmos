@@ -13,6 +13,13 @@
 // Ukuran Ring Buffer statis per sesi (menggantikan malloc dinamis yang boros RAM)
 #define FCGI_RING_BUFFER_SIZE 4096  // 8192 //16384  // 16KB per buffer (cukup untuk chunking / streaming)
 
+// --- TAMBAHAN: Enum untuk Backend FastCGI ---
+typedef enum {
+    BACKEND_PHP = 0,
+    BACKEND_RUST = 1,
+    BACKEND_PYTHON = 2
+} FCGI_BackendType;
+
 // Definisi state FSM untuk Async FastCGI
 typedef enum {
     FCGI_SESSION_FREE = 0,      // Slot kosong di dalam global pool
@@ -35,11 +42,12 @@ typedef struct {
 
 // Struct Sesi FastCGI yang sepenuhnya statis (Pre-allocated di Global Pool)
 typedef struct FCGI_Session {
-    int session_id;             // Indeks unik sesi di dalam Global Pool (0 hingga MAX_FCGI_SESSIONS - 1)
-    int sock_client;            // Socket klien (untuk HTTP/1) atau socket HTTP2Session fd
-    int fpm_fd;                 // Socket upstream PHP-FPM
-    bool is_tls;                // Apakah koneksi klien menggunakan TLS
-    SSL *ssl_conn;              // Konteks SSL klien (jika TLS aktif untuk HTTP/1)
+    int session_id;                 // Indeks unik sesi di dalam Global Pool (0 hingga MAX_FCGI_SESSIONS - 1)
+    int sock_client;                // Socket klien (untuk HTTP/1) atau socket HTTP2Session fd
+    int fpm_fd;                     // Socket upstream PHP-FPM
+    FCGI_BackendType backend_type; // Menyimpan jenis backend (0: PHP, 1: Rust, 2: Python)
+    bool is_tls;                    // Apakah koneksi klien menggunakan TLS
+    SSL *ssl_conn;                  // Konteks SSL klien (jika TLS aktif untuk HTTP/1)
 
     // --- ATOMIC REFERENCE COUNTING ---
     atomic_int ref_count;

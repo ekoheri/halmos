@@ -18,6 +18,8 @@ static unsigned long parse_size(const char *str);
 
 static void parse_csv_to_group(char *value, BackendGroup *group, bool is_port);
 
+static int parse_percentage(const char *str);
+
 // Fungsi untuk membaca file konfigurasi
 int core_config_load(const char *filename) {
     FILE *file = fopen(filename, "r");
@@ -89,16 +91,16 @@ int core_config_load(const char *filename) {
 
             // Performance
             } else if (strcmp(key, "request_buffer_size") == 0) {
-                config.request_buffer_size = atoi(value);
-            } else if (strcmp(key, "queue_threshold_ratio") == 0) {
-
+                config.request_buffer_size = (size_t)parse_size(value);
+            } else if (strcmp(key, "web_server_reserved_ram") == 0) {
+                config.web_server_reserved_ram = parse_percentage(value);
             //Security    
             } else if (strcmp(key, "max_body_size") == 0) {    
                 config.max_body_size = (size_t)parse_size(value);
             } else if (strcmp(key, "tls_enabled") == 0) {
                 config.tls_enabled = (strcasecmp(value, "true") == 0);
-            } else if (strcmp(key, "e2ee_enabled") == 0) {
-                config.e2ee_enabled = (strcasecmp(value, "true") == 0);
+            } else if (strcmp(key, "ale_enabled") == 0) {
+                config.ale_enabled = (strcasecmp(value, "true") == 0);
             } else if (strcmp(key, "ssl_certificate_file") == 0) {
                 snprintf(config.ssl_certificate_file, sizeof(config.ssl_certificate_file), "%s", value);
             } else if (strcmp(key, "ssl_private_key_file") == 0) {
@@ -124,7 +126,7 @@ int core_config_load(const char *filename) {
             } else if(strcmp(key, "php_lb_strategy") == 0) {
                 snprintf(config.php.lb_strategy, sizeof(config.php.lb_strategy), "%s", value);
             } else if (strcmp(key, "php_memory_budget") == 0) {
-                 config.php.memory_budget = (int)(parse_size(value) / (1024 * 1024)); // Konversi otomatis ke MB integer
+                config.php.memory_budget = (size_t)parse_size(value); 
             
                 // Backend Rust
             } else if (strcmp(key, "rust_ext") == 0) {
@@ -136,7 +138,7 @@ int core_config_load(const char *filename) {
             } else if(strcmp(key, "rust_lb_strategy") == 0) {
                 snprintf(config.rust.lb_strategy, sizeof(config.rust.lb_strategy), "%s", value);
             } else if (strcmp(key, "rust_memory_budget") == 0) {
-                config.rust.memory_budget = (int)(parse_size(value) / (1024 * 1024));
+                config.rust.memory_budget = (size_t)parse_size(value);
 
             // Backend Python    
             } else if (strcmp(key, "python_ext") == 0) {
@@ -148,7 +150,7 @@ int core_config_load(const char *filename) {
             } else if(strcmp(key, "python_lb_strategy") == 0) {
                 snprintf(config.python.lb_strategy, sizeof(config.python.lb_strategy), "%s", value);
             } else if (strcmp(key, "python_memory_budget") == 0) {
-                config.python.memory_budget = (int)(parse_size(value) / (1024 * 1024));
+                config.python.memory_budget = (size_t)parse_size(value);
 
             // Log
             } else if (strcmp(key, "log_retention_days") == 0) {
@@ -220,4 +222,17 @@ void parse_csv_to_group(char *value, BackendGroup *group, bool is_port) {
     }
     // Update count hanya jika ini adalah parsing IP (asumsi IP adalah wajib)
     if (!is_port) group->node_count = i;
+}
+
+int parse_percentage(const char *str) {
+    if (str == NULL) return 0;
+    
+    // atoi akan mengambil angka di depan, mengabaikan spasi dan karakter '%' di belakang
+    int val = atoi(str);
+    
+    // Validasi batas pengaman persentase (min 10%, max 90% atau 100%)
+    if (val < 0) val = 0;
+    if (val > 100) val = 100;
+    
+    return val;
 }

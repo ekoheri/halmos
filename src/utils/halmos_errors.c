@@ -112,6 +112,7 @@ static const ErrorMapping ERROR_TABLE[] = {
 
     //fastcgi/fcgi_fsme.c
     { ERR_FCGI_PAYLOAD_MEM,    "Failed to allocate memory for FastCGI payload buffer (Size: %d bytes)" },
+    { ERR_FCGI_PAYLOAD_LIMIT,  "FastCGI payload size (%zu bytes) exceeds configured memory budget limit (%zu bytes). Stream terminated." },
     
     // --- WARNING ---
     //protocol/http_utils.c

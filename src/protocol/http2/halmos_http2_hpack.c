@@ -4996,7 +4996,8 @@ bool http2_hpack_decode_string_buf(const unsigned char **pos, const unsigned cha
     bool is_huffman = (first_byte & 0x80) != 0;
     uint32_t len = http2_hpack_decode_int(pos, end, 0x7F);
 
-    if (len > 10240 || *pos + len > end) {
+    size_t max_header_len = (config.request_buffer_size > 0) ? config.request_buffer_size : 4096; //10240;
+    if (len > max_header_len || *pos + len > end) {
         *pos = end;
         return false;
     }
