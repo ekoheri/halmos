@@ -318,6 +318,25 @@ int http1_manager_routing_bridge(halmos_conn_t *conn, HTTP1Session *session) {
     else if (has_extension(session->req.uri, session->req.path_info, config.rust.ext)) backend_type = 1;
     else if (has_extension(session->req.uri, session->req.path_info, config.python.ext)) backend_type = 2;
 
+    // --- PENGAMANAN KHUSUS PHP: Blokir bot scanner untuk file fiktif (wp-admin.php, dll) ---
+    if (backend_type == 0) { // Hanya berlaku untuk PHP!
+        VHostEntry *vh = (VHostEntry *)session->req.vhost_context;
+        const char *active_root = (vh && vh->root[0] != '\0') ? vh->root : config.document_root;
+        char *safe_path = sanitize_path(active_root, session->req.uri);
+        struct stat st;
+
+        // Jika file .php yang diminta tidak ada di disk, langsung tolak 404. 
+        // CPU/RAM aman dari alokasi FastCGI sia-sia akibat serangan bot.
+        if (!safe_path || stat(safe_path, &st) != 0 || !S_ISREG(st.st_mode)) {
+            if (safe_path) free(safe_path);
+            write_log_access("HTTP/1.1", session->req.client_ip, session->req.method, session->req.uri, 404, 13);
+            http1_response_send_mem(sock_client, 404, "Not Found", "<h1>404 Not Found</h1>", false, is_tls);
+            return 0; 
+        }
+        free(safe_path);
+    }
+    // --------------------------------------------------------------------------
+
     if (backend_type != -1) {
         FCGI_Session *fcgi_sess = fcgi_session_create(sock_client, is_tls, conn->ssl, &session->req, backend_type);
         if (!fcgi_sess) {

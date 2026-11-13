@@ -353,8 +353,9 @@ int collect_active_stream_ids(HTTP2Session *session, uint32_t *active_ids, int m
 }
 
 /* =========================================================================
- * HELPER 2 response_flush_active_streams: Flush FastCGI Response per Stream
+ * HELPER 2 flush_active_streams: Flush FastCGI Response per Stream
  * ========================================================================= */
+
 void flush_fcgi_stream(HTTP2Session *session, uint32_t target_sid) {
     pthread_mutex_lock(&session->streams_lock);
     HTTP2Stream *st = http2_stream_find_unlocked(session, target_sid);
@@ -363,17 +364,20 @@ void flush_fcgi_stream(HTTP2Session *session, uint32_t target_sid) {
         return;
     }
 
-    // Tahap 1: Kirim Header (Flag 0x04 = END_HEADERS)
+    // Tahap 1: Kirim Header
     if (st->fcgi_h_ptr > 0 && !st->fcgi_header_sent) {
         st->fcgi_header_parsed = true;
         http2_response_send_complex_header(session, st, (char *)st->fcgi_header_buf, 0x04);
         st->fcgi_header_sent = true;
     }
 
-    // Tahap 2: Pompa Body Data (Streaming per-stream buffer)
-    if (st->fcgi_header_sent && (st->fcgi_g_ptr > st->fcgi_g_sent || !st->is_fcgi_active)) {
+    // Tahap 2: Pompa Body Data secara beruntun (Looping Draining)
+    while (st->fcgi_header_sent && (st->fcgi_g_ptr > st->fcgi_g_sent || !st->is_fcgi_active)) {
         size_t bytes_to_send = (st->fcgi_g_ptr > st->fcgi_g_sent) ? (st->fcgi_g_ptr - st->fcgi_g_sent) : 0;
-        unsigned char *send_ptr = st->fcgi_gather_buf + st->fcgi_g_sent;
+        
+        if (bytes_to_send > 0 && (session->out_window_size <= 0 || st->out_window_size <= 0)) {
+            break; // Window habis, tunggu WINDOW_UPDATE berikutnya
+        }
 
         uint32_t max_allowed = HTTP2_MAX_FRAME_SIZE;
         if ((int32_t)max_allowed > session->out_window_size) max_allowed = (uint32_t)session->out_window_size;
@@ -381,9 +385,10 @@ void flush_fcgi_stream(HTTP2Session *session, uint32_t target_sid) {
         if (bytes_to_send > max_allowed) bytes_to_send = max_allowed;
 
         bool is_stream_finished = (!st->is_fcgi_active && (st->fcgi_g_sent + bytes_to_send >= st->fcgi_g_ptr));
-        uint8_t flags = is_stream_finished ? 0x01 : 0x00; // 0x01 = END_STREAM
+        uint8_t flags = is_stream_finished ? 0x01 : 0x00;
 
         if (bytes_to_send > 0 || is_stream_finished) {
+            unsigned char *send_ptr = st->fcgi_gather_buf + st->fcgi_g_sent;
             http2_frame_send(session->fd, session->is_tls, 0x00, flags, target_sid, send_ptr, (uint32_t)bytes_to_send);
 
             if (bytes_to_send > 0) {
@@ -391,13 +396,10 @@ void flush_fcgi_stream(HTTP2Session *session, uint32_t target_sid) {
                 st->out_window_size -= (int32_t)bytes_to_send;
                 st->fcgi_g_sent += bytes_to_send;
 
-                // ---> TARUH DI SINI <---
                 if (st->fcgi_g_sent >= st->fcgi_g_ptr) {
-                    // Semua data di buffer sudah terkirim, reset total
                     st->fcgi_g_sent = 0;
                     st->fcgi_g_ptr = 0;
                 } else if (st->fcgi_g_sent > 0) {
-                    // Geser sisa data yang belum terkirim (karena window flow control) ke depan buffer
                     size_t unsent = st->fcgi_g_ptr - st->fcgi_g_sent;
                     memmove(st->fcgi_gather_buf, st->fcgi_gather_buf + st->fcgi_g_sent, unsent);
                     st->fcgi_g_ptr = unsent;
@@ -408,21 +410,14 @@ void flush_fcgi_stream(HTTP2Session *session, uint32_t target_sid) {
             if (is_stream_finished) {
                 st->state = HTTP2_STATE_CLOSED;
                 st->is_fcgi_active = false;
-
                 if (st->fcgi_session) {
                     fcgi_session_release((FCGI_Session *)st->fcgi_session);
                     st->fcgi_session = NULL;
                 }
-                
-                /*
-                Penyebab race condition karena langsung di close(st->fpm_fd)
-                Solusinya, serahkan kepada fcgi untuk melakukan release seperti progrm diatas
-                if (st->fpm_fd >= 0) {
-                    close(st->fpm_fd);
-                    st->fpm_fd = -1;
-                }
-                */    
+                break;
             }
+        } else {
+            break;
         }
     }
     pthread_mutex_unlock(&session->streams_lock);
