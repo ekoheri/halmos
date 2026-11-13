@@ -23,7 +23,7 @@
 #include <time.h>
 
 
-#define HISTORY_SLOTS 60 // Menyimpan 60 slot riwayat akses (misal per 60 detik atau per 1 menit)
+#define HISTORY_SLOTS 120 //60 // Menyimpan 60 slot riwayat akses (misal per 60 detik atau per 1 menit)
 
 typedef struct {
     uint64_t io_counts[HISTORY_SLOTS];
@@ -454,27 +454,47 @@ HardwareProfile detect_hardware(void) {
 MemoryBudget calculate_memory_budgets(const HardwareProfile *hw) {
     MemoryBudget mb;
     
-    // Cadangan untuk OS & Database (25%, min 512MB, maks 4096MB)
-    // 1. Hitung cadangan normal (25%, min 512MB)
-    mb.reserved_ram_mb = hw->total_ram_mb / 4;
-    if (mb.reserved_ram_mb < 512) mb.reserved_ram_mb = 512;
-    if (mb.reserved_ram_mb > 4096) mb.reserved_ram_mb = 4096;
+    // 1. Tentukan persentase jatah untuk Web Server (Default 50%)
+    unsigned long web_percent = 50; 
+
+    if (config.web_server_reserved_ram > 0) {
+        web_percent = config.web_server_reserved_ram;
+        
+        // Batasan pengaman agar persentase tidak keblabasan (min 10%, max 90%)
+        if (web_percent > 90) web_percent = 90;
+        if (web_percent < 10) web_percent = 10;
+    }
+
+    // Hitung jatah RAM web server berdasarkan persentase dari config
+    unsigned long web_budget_mb = (hw->total_ram_mb * web_percent) / 100;
+    mb.reserved_ram_mb = hw->total_ram_mb - web_budget_mb;
+
+    // Batas bawah minimal cadangan OS 512MB (kecuali RAM server di bawah itu)
+    if (mb.reserved_ram_mb < 512 && hw->total_ram_mb >= 512) {
+        mb.reserved_ram_mb = 512;
+        web_budget_mb = hw->total_ram_mb - mb.reserved_ram_mb; // Sesuaikan kembali jatah web
+    }
+    
+    // Pengaman batas maksimal cadangan OS (misal dibatasi maksimal 90% dari total RAM)
+    unsigned long max_allowed_reserve = (hw->total_ram_mb * 90) / 100;
+    if (mb.reserved_ram_mb > max_allowed_reserve) {
+        mb.reserved_ram_mb = max_allowed_reserve;
+        web_budget_mb = hw->total_ram_mb - mb.reserved_ram_mb;
+    }
 
     // 2. Jika total RAM ternyata lebih kecil dari cadangan minimum yang diminta...
     if (hw->total_ram_mb <= mb.reserved_ram_mb) {
-        // Jangan diset 0! Berikan porsi minimum yang aman untuk web (misal 64 MB, 
-        // atau sisa dari total RAM dikurangi porsi OS yang sangat kecil).
         if (hw->total_ram_mb > 64) {
             mb.available_for_web_mb = hw->total_ram_mb - 64; // Sisakan 64MB untuk OS
             mb.reserved_ram_mb = 64;
         } else {
             // Jika server benar-benar "kentang" (< 64MB total RAM)
-            mb.available_for_web_mb = 32; // Paksa jatah minimum web 32MB
+            mb.available_for_web_mb = 32; 
             mb.reserved_ram_mb = hw->total_ram_mb > 32 ? hw->total_ram_mb - 32 : 8;
         }
     } else {
         // Jalur normal (aman dari underflow)
-        mb.available_for_web_mb = hw->total_ram_mb - mb.reserved_ram_mb;
+        mb.available_for_web_mb = web_budget_mb;
     }
 
     // Cek status backend aktif
@@ -485,7 +505,7 @@ MemoryBudget calculate_memory_budgets(const HardwareProfile *hw) {
     int active_count = (is_php ? 1 : 0) + (is_python ? 1 : 0) + (is_rust ? 1 : 0);
     if (active_count == 0) active_count = 1;
 
-    // Alokasi proporsional sederhana (bisa diperluas dengan sistem weight)
+    // Alokasi proporsional backend
     mb.php_budget_mb = 0;
     mb.python_budget_mb = 0;
     mb.rust_budget_mb = 0;
@@ -520,21 +540,24 @@ WorkerCapacity calculate_worker_capacity(const HardwareProfile *hw, const Memory
     // Batas kapasitas maksimum berdasarkan core (misal 32 atau 64 per core)
     int cpu_based_max = (int)(hw->num_cores * 32);
     
-    // Asumsi rata-rata konsumsi per proses backend (dalam MB)
-    int php_mem    = (config.php.memory_budget > 0) ? config.php.memory_budget : 20;
-    int python_mem = (config.python.memory_budget > 0) ? config.python.memory_budget : 40;
-    int rust_mem   = (config.rust.memory_budget > 0) ? config.rust.memory_budget : 15;
+    // Konversi budget RAM sistem dari MB (dari struct mb) ke Byte penuh
+    size_t php_budget_bytes    = (size_t)mb->php_budget_mb * 1024 * 1024;
+    size_t python_budget_bytes = (size_t)mb->python_budget_mb * 1024 * 1024;
+    size_t rust_budget_bytes   = (size_t)mb->rust_budget_mb * 1024 * 1024;
 
-    int max_by_ram = (php_mem > 0 ? (int)(mb->php_budget_mb / php_mem) : 0) +
-                     (python_mem > 0 ? (int)(mb->python_budget_mb / python_mem) : 0) +
-                     (rust_mem > 0 ? (int)(mb->rust_budget_mb / rust_mem) : 0);
+    // Ambil langsung dari config yang sudah murni byte (dengan fallback aman jika 0)
+    size_t php_mem    = (config.php.memory_budget > 0) ? (size_t)config.php.memory_budget : (20UL * 1024 * 1024);
+    size_t python_mem = (config.python.memory_budget > 0) ? (size_t)config.python.memory_budget : (40UL * 1024 * 1024);
+    size_t rust_mem   = (config.rust.memory_budget > 0) ? (size_t)config.rust.memory_budget : (15UL * 1024 * 1024);
+
+    // KELIRUAN SEBELUMNYA DIPERBAIKI DI SINI: Byte dibagi dengan Byte!
+    int max_by_ram = (php_mem > 0 ? (int)(php_budget_bytes / php_mem) : 0) +
+                     (python_mem > 0 ? (int)(python_budget_bytes / python_mem) : 0) +
+                     (rust_mem > 0 ? (int)(rust_budget_bytes / rust_mem) : 0);
 
     // --- PENYESUAIAN BATAS MINIMUM DINAMIS (RAMAH HARDWARE KECIL) ---
-    // Tentukan lantai minimum mutlak: 2 worker untuk 1 core, atau minimal 4 untuk multi-core
     int absolute_min_workers = (hw->num_cores < 2) ? 2 : 4;
 
-    // Jika kapasitas berdasarkan RAM sangat kecil, jangan dipaksa 32, 
-    // cukup ikuti absolute_min_workers agar server tetap bisa menyala.
     if (max_by_ram < absolute_min_workers) {
         max_by_ram = absolute_min_workers;
     }
@@ -545,7 +568,6 @@ WorkerCapacity calculate_worker_capacity(const HardwareProfile *hw, const Memory
 
     wc.worker_max = recommended;
     
-    // Worker minimum proporsional terhadap core, dibatasi tidak melebihi worker_max
     wc.worker_min = (int)hw->num_cores * 2;
     if (wc.worker_min < absolute_min_workers) wc.worker_min = absolute_min_workers;
     if (wc.worker_min > wc.worker_max) wc.worker_min = wc.worker_max;
@@ -680,7 +702,7 @@ void core_print_adaptive_summary(
               wc->worker_min, wc->worker_max, wc->event_batch_size, wc->core_queue_capacity);
     
     // 3. Upstream Slots Allocation Summary
-    snprintf(log_buf_3, sizeof(log_buf_3), "[UPSTREAM] Slots Allocation -> PHP: %d | Rust: %d | Python: %d | Total Upstream Slots: %d | Total Session Slots: %d ", 
+    snprintf(log_buf_3, sizeof(log_buf_3), "[UPSTREAM] Slots Allocation -> PHP: %d (From max_children) | Rust: %d | Python: %d | Total Upstream Slots: %d | Total Session Slots: %d ", 
               g_fcgi_php_quota, g_fcgi_rust_quota, g_fcgi_python_quota, g_fcgi_upstream_slots, g_fcgi_session_slots);
               
     // 4. Memory Budget Awareness (Pengganti log_buf_mem)
@@ -866,7 +888,6 @@ void* runtime_autoscale_evaluator(void *arg) {
         float upper_limit = 0.60f;
         float lower_limit = 0.40f;
 
-        // --- EVALUASI UTAMA DENGAN HYSSTERESIS & ANTREAN ---
         // --- EVALUASI UTAMA DENGAN HYSSTERESIS & WORKER UTILIZATION ---
         if (load_factor >= upper_limit || current_count > high_load_threshold || worker_utilization >= 0.85f) {
             // Kondisi High Load: Antrean penuh, atau worker hampir 100% sibuk

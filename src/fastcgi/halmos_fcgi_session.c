@@ -108,6 +108,7 @@ FCGI_Session* fcgi_session_create(int sock_client, bool is_tls, SSL *ssl_conn, R
     session->sock_client = sock_client;
     session->is_tls = is_tls;
     session->ssl_conn = ssl_conn;
+    session->backend_type = (FCGI_BackendType)backend_type;
     session->is_http2 = false;
     session->http2_stream_id = 0;
     session->h2_session = NULL;
@@ -214,6 +215,7 @@ void fcgi_session_release(FCGI_Session *session) {
         session->sock_client = -1;
         session->is_tls = false;
         session->ssl_conn = NULL;
+        session->backend_type = BACKEND_PHP;
         session->is_http2 = false;
         session->http2_stream_id = 0;
         session->h2_session = NULL;
