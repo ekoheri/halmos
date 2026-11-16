@@ -17,41 +17,29 @@
 // Pemilik variabel global global_queue
 TaskQueue global_queue;
 
-static void init_queue(TaskQueue *q, int min_limit, int max_limit, int max_queue_size);
-static int spawn_detached_worker(pthread_t *out_tid, void *(*routine)(void *), void *arg);
-//static int get_adaptive_timeout(TaskQueue *q);
-
-void core_queue_thread_worker_start(void) {
-    // Inisialisasi struct antrean global
-    init_queue(&global_queue, adaptive_hw_aware.worker_min, adaptive_hw_aware.worker_max, adaptive_hw_aware.core_queue_capacity);
-
-    int initial_workers = adaptive_hw_aware.worker_min;
+/********************************************************************
+- core_queue_init() - Mengambil parameter langsung dari g_adaptive
+ ********************************************************************/
+void core_queue_init(void) {
+    global_queue.head = global_queue.tail = NULL;
+    global_queue.count = 0;
+    global_queue.max_queue_limit = adaptive_hw_aware.core_queue_capacity; // Ambil dari Master Struct
+    global_queue.active_workers = 0;
+    global_queue.total_workers = adaptive_hw_aware.worker_min;           // Ambil dari Master Struct
+    global_queue.min_threads_limit = adaptive_hw_aware.worker_min;       // Ambil dari Master Struct
+    global_queue.max_threads_limit = adaptive_hw_aware.worker_max;       // Ambil dari Master Struct
+    global_queue.scaling_in_progress = 0;
+    global_queue.is_running = 1; 
     
-    // Buat worker thread sejumlah adaptive_hw_aware.worker_min dengan status DETACHED
-    for (int i = 0; i < initial_workers; i++) {
-        pthread_t tid;
-        if (spawn_detached_worker(&tid, core_thread_pool_worker, &global_queue) != 0) {
-            write_log_error_code(ERR_CORE_INIT_WORKER, i);
-        }
-    }
-    
-    write_log("[QUEUE] Thread pool started dynamically with %d workers (DETACHED malloc/free mode).", initial_workers);
+    pthread_mutex_init(&global_queue.lock, NULL);
+    pthread_cond_init(&global_queue.cond, NULL);
+    pthread_cond_init(&global_queue.exit_cond, NULL);
 }
 
 /********************************************************************
- * queue_thread_worker_stop()
+- core_queue_destroy() - Langsung membersihkan global_queue
  ********************************************************************/
-void core_queue_thread_worker_stop(void) {
-    pthread_mutex_lock(&global_queue.lock);
-    global_queue.is_running = 0; 
-    pthread_cond_broadcast(&global_queue.cond);
-
-    while (global_queue.total_workers > 0) {
-        pthread_cond_wait(&global_queue.exit_cond, &global_queue.lock);
-    }
-    pthread_mutex_unlock(&global_queue.lock);
-
-    // Bersihkan sisa task di dalam antrean
+void core_queue_destroy(void) {
     pthread_mutex_lock(&global_queue.lock);
     Task *curr = global_queue.head;
     global_queue.head = global_queue.tail = NULL;
@@ -71,8 +59,6 @@ void core_queue_thread_worker_stop(void) {
     pthread_mutex_destroy(&global_queue.lock);
     pthread_cond_destroy(&global_queue.cond);
     pthread_cond_destroy(&global_queue.exit_cond);
-
-    write_log("[QUEUE] Worker thread pool shutdown instantly & cleanly.");
 }
 
 /********************************************************************
@@ -132,18 +118,8 @@ int core_queue_push(TaskQueue *q, halmos_event_t event_item) {
 
     // === Spawn thread SETELAH lock dilepas ===
     if (spawn_count > 0) {
-        int actually_spawned = 0;
+        int actually_spawned = core_thread_pool_spawn_workers(spawn_count);
 
-        for (int i = 0; i < spawn_count; i++) {
-            pthread_t tid;
-            if (spawn_detached_worker(&tid, core_thread_pool_worker, q) == 0) {
-                actually_spawned++;
-            } else {
-                write_log_error_code(ERR_CORE_PTHREAD_SCALE);
-            }
-        }
-
-        // Jika ada pthread_create yang gagal, kembalikan reservasi slotnya
         if (actually_spawned < spawn_count) {
             pthread_mutex_lock(&q->lock);
             q->total_workers -= (spawn_count - actually_spawned);
@@ -232,36 +208,4 @@ int core_queue_pop(TaskQueue *q, halmos_event_t *out_event, struct timeval *arri
     pthread_mutex_unlock(&q->lock);
 
     return sock;
-}
-
-
-/* Helper / Private Function */
-void init_queue(TaskQueue *q, int min_limit, int max_limit, int max_queue_size) {
-    q->head = q->tail = NULL;
-    q->count = 0;
-    q->max_queue_limit = max_queue_size; 
-    q->active_workers = 0;
-    q->total_workers = min_limit;
-    q->min_threads_limit = min_limit;
-    q->max_threads_limit = max_limit;
-    q->scaling_in_progress = 0;
-    q->is_running = 1; 
-    
-    pthread_mutex_init(&q->lock, NULL);
-    pthread_cond_init(&q->cond, NULL);
-    pthread_cond_init(&q->exit_cond, NULL);
-}
-
-int spawn_detached_worker(pthread_t *out_tid, void *(*routine)(void *), void *arg) {
-    pthread_attr_t attr;
-    pthread_attr_init(&attr);
-    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-
-    // Membatasi stack size worker core jadi 256 KB
-    // Sebab jika tidak dibatasi, RAM yang kemakan bisa 2MB - 8 MB
-    pthread_attr_setstacksize(&attr, 256 * 1024);
-    
-    int ret = pthread_create(out_tid, &attr, routine, arg);
-    pthread_attr_destroy(&attr);
-    return ret;
 }
