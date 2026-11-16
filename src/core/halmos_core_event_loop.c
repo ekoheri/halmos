@@ -50,7 +50,7 @@ int shutdown_pipe[2];
 int core_event_loop_start(void) {
     server_running = 1;
  
-    events = malloc(sizeof(struct epoll_event) * g_event_batch_size);
+    events = malloc(sizeof(struct epoll_event) * adaptive_hw_aware.event_batch_size);
     if (!events) {
         //write_log_error("[FATAL] Failed to allocate memory for epoll events");
         write_log_error_code(ERR_CORE_EPOLL_MEM);
@@ -132,7 +132,7 @@ int core_event_loop_start(void) {
  
 void core_event_loop_run() {
     while (server_running) {
-        int num_fds = epoll_wait(epoll_fd, events, g_event_batch_size, 100); // awalnya -1
+        int num_fds = epoll_wait(epoll_fd, events, adaptive_hw_aware.event_batch_size, 100); // awalnya -1
         if (num_fds < 0) {
             if (errno != EINTR) {
                 //write_log_error("[CORE] epoll_wait critical error: %s", strerror(errno));

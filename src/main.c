@@ -258,8 +258,8 @@ int main(int argc, char *argv[]) {
             stop_thread_logger();
             return EXIT_FAILURE;
         }
-        // Mapping FD ke SSL (Ukuran g_core_queue_capacity + buffer aman)
-        ssl_init_mapping(g_core_queue_capacity + 2000); 
+        // Mapping FD ke SSL (Ukuran adaptive_hw_aware.core_queue_capacity + buffer aman)
+        ssl_init_mapping(adaptive_hw_aware.core_queue_capacity + 2000); 
         write_log("[CORE] TLS Engine & Mapping ready.");
     }
     

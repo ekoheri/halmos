@@ -18,10 +18,10 @@
 static FCGI_WorkerPool fcgi_worker_pool;
 
 bool fcgi_thread_pool_start(void) {
-    int min_workers = g_worker_min;
+    int min_workers = adaptive_hw_aware.worker_min;
     if (min_workers < 2) min_workers = 2;
     
-    int max_workers = g_worker_max;
+    int max_workers = adaptive_hw_aware.worker_max;
     if (max_workers < min_workers) max_workers = min_workers * 2;
 
     fcgi_worker_pool.min_workers = min_workers;

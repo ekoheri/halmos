@@ -148,7 +148,7 @@ static int create_backend_socket(const char *target, int port, bool is_unix) {
 }
 
 bool fcgi_upstream_start(void) {
-    fcgi_upstream.slots = (g_fcgi_upstream_slots > 0) ? g_fcgi_upstream_slots : 128;
+    fcgi_upstream.slots = (adaptive_hw_aware.total_upstream_slots > 0) ? adaptive_hw_aware.total_upstream_slots : 128;
     fcgi_upstream.connections = malloc(sizeof(FCGI_Conn) * fcgi_upstream.slots);
 
     if (!fcgi_upstream.connections) {
@@ -172,9 +172,9 @@ bool fcgi_upstream_start(void) {
     fcgi_upstream.python_group.node_count = config.python.node_count > 0 ? config.python.node_count : 1;
 
     // Set kuota default awal
-    fcgi_upstream.php_quota    = g_fcgi_php_quota;
-    fcgi_upstream.rust_quota   = g_fcgi_rust_quota;
-    fcgi_upstream.python_quota = g_fcgi_python_quota;
+    fcgi_upstream.php_quota    = adaptive_hw_aware.php_quota;
+    fcgi_upstream.rust_quota   = adaptive_hw_aware.rust_quota;
+    fcgi_upstream.python_quota = adaptive_hw_aware.python_quota;
     fcgi_upstream.current_idle_count = fcgi_upstream.slots;
 
     // Debug verifikasi singkat

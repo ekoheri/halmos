@@ -40,33 +40,18 @@ typedef struct {
     char mode[16]; 
 } PHPConfig;
 
+AdaptiveHardwareAware adaptive_hw_aware = {0};
+
 // Gunakan atomic flag khusus untuk background loop adaptive
 static atomic_bool g_adaptive_active = ATOMIC_VAR_INIT(false);
 static pthread_t   g_runtime_adaptive_tid;
 
-// --- 1. DOMAIN CORE / FRONTEND (Klien & Epoll) ---
-uint32_t g_core_max_fd         = 0;
-int      g_core_queue_capacity = 0;
-
-// --- 2. DOMAIN WORKER THREAD POOL (Shared Workers) ---
-int      g_worker_max          = 0;
-int      g_worker_min          = 0;
-int      g_event_batch_size    = 0;
-
-// --- 3. DOMAIN BACKEND / FASTCGI UPSTREAM ---
-int      g_fcgi_upstream_slots = 0;
-int      g_fcgi_queue_capacity = 0;
-int      g_fcgi_session_slots  = 0;
-
-// --- 4. DOMAIN BACKEND UPSTREAM QUOTA untuk (PHP+Rust+Python) ---
-int      g_fcgi_php_quota      = 0;
-int      g_fcgi_rust_quota     = 0;
-int      g_fcgi_python_quota   = 0;
-
 // --- 5. RUNTIME OTONOM (In-Memory Self-Tuning Variables) ---
-static float    g_runtime_queue_threshold_ratio = 0.50f;
-static int      g_runtime_spawn_worker_step     = 4;
-static int      g_runtime_timeout_worker_idle   = 30;
+static AdaptivePolicy current_policy = {
+    .threshold_ratio = 0.50f,
+    .spawn_step     = 4,
+    .timeout_idle   = 30
+};
 
 
 extern volatile sig_atomic_t server_running;
@@ -80,22 +65,19 @@ static char* trim_string_safe(char *str);
 static PHPConfig fetch_php_fpm_config(void);
 
 // --- 1. Deteksi Hardware & Sistem Operasi ---
-static HardwareProfile detect_hardware(void);
+static void detect_hardware(void);
 
 // --- 2. Kalkulasi Anggaran RAM Berdasarkan Backend Aktif ---
-static MemoryBudget calculate_memory_budgets(const HardwareProfile *hw);
+static void calculate_memory_budgets(void);
 
 // --- 3. Kalkulasi Kapasitas Worker Pool ---
-static WorkerCapacity calculate_worker_capacity(const HardwareProfile *hw, const MemoryBudget *mb);
+static void calculate_worker_capacity(void);
 
 // --- 4. Kalkulasi Qoota Backend (fatsCG) ---
-static BackendQuotas calculate_backend_quotas(const HardwareProfile *hw, const MemoryBudget *mb, const WorkerCapacity *wc);
+static void calculate_backend_quotas(void);
 
 // --- 5. menulis ke log atau menampilkan perhitungan adaptive ke monitor
 static void core_print_adaptive_summary(
-    const HardwareProfile *hw, 
-    const MemoryBudget *mb, 
-    const WorkerCapacity *wc, 
     const PHPConfig *php, 
     bool is_php_active, 
     int print_to_terminal
@@ -105,6 +87,8 @@ static void core_print_adaptive_summary(
 static void core_adaptive_set_policy(float threshold, int spawn_step, int timeout_idle);
 
 static uint64_t timespec_diff_us(const struct timespec *start, const struct timespec *end);
+
+static void core_adaptive_set_policy(float threshold, int spawn_step, int timeout_idle);
 
 static void runtime_record_task(uint64_t total_cpu_us, uint64_t total_wall_us, uint64_t resumes);
 
@@ -116,31 +100,17 @@ static void* runtime_autoscale_evaluator(void *arg);
 
 void core_adaptive_hw_aware_init(int print_to_terminal) {
     // 1. Eksekusi tahapan modular secara berurutan
-    HardwareProfile hw = detect_hardware();
-    MemoryBudget mb = calculate_memory_budgets(&hw);
-    WorkerCapacity wc = calculate_worker_capacity(&hw, &mb);
-    BackendQuotas quotas = calculate_backend_quotas(&hw, &mb, &wc);
+    detect_hardware();
+    calculate_memory_budgets();
+    calculate_worker_capacity();
+    calculate_backend_quotas();
     
     // Status backend untuk keperluan logging/audit
     bool is_php_active = (config.php.node_count > 0 || strlen(config.php_fpm_config_path) > 0);
     PHPConfig php = is_php_active ? fetch_php_fpm_config() : (PHPConfig){0};
     
-    // 2. Assign langsung ke variabel global Halmos
-    g_core_max_fd         = hw.max_fd;
-    g_worker_max          = wc.worker_max;
-    g_worker_min          = wc.worker_min;
-    g_event_batch_size    = wc.event_batch_size;
-    g_core_queue_capacity = wc.core_queue_capacity;
-    
-    g_fcgi_php_quota      = quotas.php_quota;
-    g_fcgi_rust_quota     = quotas.rust_quota;
-    g_fcgi_python_quota   = quotas.python_quota;
-    g_fcgi_upstream_slots = quotas.total_upstream_slots;
-    g_fcgi_queue_capacity = quotas.upstream_queue_capacity;
-    g_fcgi_session_slots  = quotas.session_slots;
-
     // 3. Eksekusi pelaporan/logging
-    core_print_adaptive_summary(&hw, &mb, &wc, &php, is_php_active, print_to_terminal);
+    core_print_adaptive_summary(&php, is_php_active, print_to_terminal);
 }
 
 /********************************************************************
@@ -167,6 +137,15 @@ bool core_adaptive_runtime_init(void) {
     return true;
 }
 
+// Snapshot Getter
+AdaptivePolicy core_adaptive_get_policy(void) {
+    AdaptivePolicy return_policy;
+    pthread_mutex_lock(&g_runtime_win.lock);
+    return_policy = current_policy;
+    pthread_mutex_unlock(&g_runtime_win.lock);
+    return return_policy;
+}
+
 // Fungsi untuk membersihkan sumber daya runtime adaptive saat server shutdown
 void core_adaptive_runtime_destroy(void) {
     // 1. Matikan flag background loop
@@ -178,26 +157,6 @@ void core_adaptive_runtime_destroy(void) {
     // 3. Setelah thread mati, aman untuk mendestruksi mutex
     pthread_mutex_destroy(&g_runtime_win.lock);
     write_log("[ADAPTIVE RAM] Runtime self-tuning engine destroyed cleanly.");
-}
-
-// Setter (Opsional, jika ada modul lain yang butuh override kebijakan)
-void core_adaptive_set_policy(float threshold, int spawn_step, int timeout_idle) {
-    pthread_mutex_lock(&g_runtime_win.lock);
-    g_runtime_queue_threshold_ratio = threshold;
-    g_runtime_spawn_worker_step     = spawn_step;
-    g_runtime_timeout_worker_idle   = timeout_idle;
-    pthread_mutex_unlock(&g_runtime_win.lock);
-}
-
-// Snapshot Getter (Aman & Konsisten)
-AdaptivePolicy core_adaptive_get_policy(void) {
-    AdaptivePolicy policy;
-    pthread_mutex_lock(&g_runtime_win.lock);
-    policy.threshold_ratio = g_runtime_queue_threshold_ratio;
-    policy.spawn_step     = g_runtime_spawn_worker_step;
-    policy.timeout_idle   = g_runtime_timeout_worker_idle;
-    pthread_mutex_unlock(&g_runtime_win.lock);
-    return policy;
 }
 
 // 1. SATU FUNGSI UNTUK MEMULAI TICK (Otomatis inisialisasi jika baru, sekaligus catat CPU tick)
@@ -340,9 +299,7 @@ PHPConfig fetch_php_fpm_config(void) {
     return cfg;
 }
 
-HardwareProfile detect_hardware(void) {
-    HardwareProfile hw;
-    
+void detect_hardware(void) {
     // --- 1. DETEKSI JUMLAH CORE (CPU) DENGAN DUKUNGAN CGROUPS ---
     long detected_cores = 0;
     
@@ -384,7 +341,7 @@ HardwareProfile detect_hardware(void) {
         detected_cores = sysconf(_SC_NPROCESSORS_ONLN);
     }
     
-    hw.num_cores = (detected_cores < 1) ? 1 : (int)detected_cores;
+    adaptive_hw_aware.num_cores = (detected_cores < 1) ? 1 : (int)detected_cores;
 
 
     // --- 2. DETEKSI FILE DESCRIPTOR LIMIT (RLIMIT) ---
@@ -394,11 +351,11 @@ HardwareProfile detect_hardware(void) {
     }
     
     if (rl.rlim_cur == RLIM_INFINITY || rl.rlim_cur > UINT32_MAX) {
-        hw.max_fd = 65536;
+        adaptive_hw_aware.max_fd = 65536;
     } else {
-        hw.max_fd = (uint32_t)rl.rlim_cur;
+        adaptive_hw_aware.max_fd = (uint32_t)rl.rlim_cur;
     }
-    if (hw.max_fd < 64) hw.max_fd = 64;
+    if (adaptive_hw_aware.max_fd < 64) adaptive_hw_aware.max_fd = 64;
 
 
     // --- 3. DETEKSI RAM DENGAN DUKUNGAN CGROUPS ---
@@ -437,23 +394,19 @@ HardwareProfile detect_hardware(void) {
 
     // Jika cgroups mendeteksi batas RAM yang valid, gunakan itu
     if (container_ram_mb > 0) {
-        hw.total_ram_mb = container_ram_mb;
+        adaptive_hw_aware.total_ram_mb = container_ram_mb;
     } else {
         // Fallback: Baca dari sysinfo (fisik host)
         struct sysinfo si;
         if (sysinfo(&si) != 0) {
             memset(&si, 0, sizeof(si));
         }
-        hw.total_ram_mb = (unsigned long)((si.totalram * si.mem_unit) / (1024 * 1024));
-        if (hw.total_ram_mb == 0) hw.total_ram_mb = 1024; // Fallback 1GB
+        adaptive_hw_aware.total_ram_mb = (unsigned long)((si.totalram * si.mem_unit) / (1024 * 1024));
+        if (adaptive_hw_aware.total_ram_mb == 0) adaptive_hw_aware.total_ram_mb = 1024; // Fallback 1GB
     }
-
-    return hw;
 }
 
-MemoryBudget calculate_memory_budgets(const HardwareProfile *hw) {
-    MemoryBudget mb;
-    
+void calculate_memory_budgets() {
     // 1. Tentukan persentase jatah untuk Web Server (Default 50%)
     unsigned long web_percent = 50; 
 
@@ -466,35 +419,35 @@ MemoryBudget calculate_memory_budgets(const HardwareProfile *hw) {
     }
 
     // Hitung jatah RAM web server berdasarkan persentase dari config
-    unsigned long web_budget_mb = (hw->total_ram_mb * web_percent) / 100;
-    mb.reserved_ram_mb = hw->total_ram_mb - web_budget_mb;
+    unsigned long web_budget_mb = (adaptive_hw_aware.total_ram_mb * web_percent) / 100;
+    adaptive_hw_aware.reserved_ram_mb = adaptive_hw_aware.total_ram_mb - web_budget_mb;
 
     // Batas bawah minimal cadangan OS 512MB (kecuali RAM server di bawah itu)
-    if (mb.reserved_ram_mb < 512 && hw->total_ram_mb >= 512) {
-        mb.reserved_ram_mb = 512;
-        web_budget_mb = hw->total_ram_mb - mb.reserved_ram_mb; // Sesuaikan kembali jatah web
+    if (adaptive_hw_aware.reserved_ram_mb < 512 && adaptive_hw_aware.total_ram_mb >= 512) {
+        adaptive_hw_aware.reserved_ram_mb = 512;
+        web_budget_mb = adaptive_hw_aware.total_ram_mb - adaptive_hw_aware.reserved_ram_mb; // Sesuaikan kembali jatah web
     }
     
     // Pengaman batas maksimal cadangan OS (misal dibatasi maksimal 90% dari total RAM)
-    unsigned long max_allowed_reserve = (hw->total_ram_mb * 90) / 100;
-    if (mb.reserved_ram_mb > max_allowed_reserve) {
-        mb.reserved_ram_mb = max_allowed_reserve;
-        web_budget_mb = hw->total_ram_mb - mb.reserved_ram_mb;
+    unsigned long max_allowed_reserve = (adaptive_hw_aware.total_ram_mb * 90) / 100;
+    if (adaptive_hw_aware.reserved_ram_mb > max_allowed_reserve) {
+        adaptive_hw_aware.reserved_ram_mb = max_allowed_reserve;
+        web_budget_mb = adaptive_hw_aware.total_ram_mb - adaptive_hw_aware.reserved_ram_mb;
     }
 
     // 2. Jika total RAM ternyata lebih kecil dari cadangan minimum yang diminta...
-    if (hw->total_ram_mb <= mb.reserved_ram_mb) {
-        if (hw->total_ram_mb > 64) {
-            mb.available_for_web_mb = hw->total_ram_mb - 64; // Sisakan 64MB untuk OS
-            mb.reserved_ram_mb = 64;
+    if (adaptive_hw_aware.total_ram_mb <= adaptive_hw_aware.reserved_ram_mb) {
+        if (adaptive_hw_aware.total_ram_mb > 64) {
+            adaptive_hw_aware.available_for_web_mb = adaptive_hw_aware.total_ram_mb - 64; // Sisakan 64MB untuk OS
+            adaptive_hw_aware.reserved_ram_mb = 64;
         } else {
             // Jika server benar-benar "kentang" (< 64MB total RAM)
-            mb.available_for_web_mb = 32; 
-            mb.reserved_ram_mb = hw->total_ram_mb > 32 ? hw->total_ram_mb - 32 : 8;
+            adaptive_hw_aware.available_for_web_mb = 32; 
+            adaptive_hw_aware.reserved_ram_mb = adaptive_hw_aware.total_ram_mb > 32 ? adaptive_hw_aware.total_ram_mb - 32 : 8;
         }
     } else {
         // Jalur normal (aman dari underflow)
-        mb.available_for_web_mb = web_budget_mb;
+        adaptive_hw_aware.available_for_web_mb = web_budget_mb;
     }
 
     // Cek status backend aktif
@@ -506,44 +459,40 @@ MemoryBudget calculate_memory_budgets(const HardwareProfile *hw) {
     if (active_count == 0) active_count = 1;
 
     // Alokasi proporsional backend
-    mb.php_budget_mb = 0;
-    mb.python_budget_mb = 0;
-    mb.rust_budget_mb = 0;
+    adaptive_hw_aware.php_budget_mb = 0;
+    adaptive_hw_aware.python_budget_mb = 0;
+    adaptive_hw_aware.rust_budget_mb = 0;
 
     if (active_count == 3) {
-        mb.php_budget_mb    = (mb.available_for_web_mb * 50) / 100;
-        mb.python_budget_mb = (mb.available_for_web_mb * 30) / 100;
-        mb.rust_budget_mb   = (mb.available_for_web_mb * 20) / 100;
+        adaptive_hw_aware.php_budget_mb    = (adaptive_hw_aware.available_for_web_mb * 50) / 100;
+        adaptive_hw_aware.python_budget_mb = (adaptive_hw_aware.available_for_web_mb * 30) / 100;
+        adaptive_hw_aware.rust_budget_mb   = (adaptive_hw_aware.available_for_web_mb * 20) / 100;
     } else if (active_count == 2) {
         if (is_php && is_python) {
-            mb.php_budget_mb    = (mb.available_for_web_mb * 60) / 100;
-            mb.python_budget_mb = (mb.available_for_web_mb * 40) / 100;
+            adaptive_hw_aware.php_budget_mb    = (adaptive_hw_aware.available_for_web_mb * 60) / 100;
+            adaptive_hw_aware.python_budget_mb = (adaptive_hw_aware.available_for_web_mb * 40) / 100;
         } else if (is_php && is_rust) {
-            mb.php_budget_mb    = (mb.available_for_web_mb * 70) / 100;
-            mb.rust_budget_mb   = (mb.available_for_web_mb * 30) / 100;
+            adaptive_hw_aware.php_budget_mb    = (adaptive_hw_aware.available_for_web_mb * 70) / 100;
+            adaptive_hw_aware.rust_budget_mb   = (adaptive_hw_aware.available_for_web_mb * 30) / 100;
         } else if (is_python && is_rust) {
-            mb.python_budget_mb = (mb.available_for_web_mb * 60) / 100;
-            mb.rust_budget_mb   = (mb.available_for_web_mb * 40) / 100;
+            adaptive_hw_aware.python_budget_mb = (adaptive_hw_aware.available_for_web_mb * 60) / 100;
+            adaptive_hw_aware.rust_budget_mb   = (adaptive_hw_aware.available_for_web_mb * 40) / 100;
         }
     } else {
-        if (is_php)    mb.php_budget_mb    = mb.available_for_web_mb;
-        if (is_python) mb.python_budget_mb = mb.available_for_web_mb;
-        if (is_rust)   mb.rust_budget_mb   = mb.available_for_web_mb;
+        if (is_php)    adaptive_hw_aware.php_budget_mb    = adaptive_hw_aware.available_for_web_mb;
+        if (is_python) adaptive_hw_aware.python_budget_mb = adaptive_hw_aware.available_for_web_mb;
+        if (is_rust)   adaptive_hw_aware.rust_budget_mb   = adaptive_hw_aware.available_for_web_mb;
     }
-
-    return mb;
 }
 
-WorkerCapacity calculate_worker_capacity(const HardwareProfile *hw, const MemoryBudget *mb) {
-    WorkerCapacity wc;
-    
+void calculate_worker_capacity(void) {
     // Batas kapasitas maksimum berdasarkan core (misal 32 atau 64 per core)
-    int cpu_based_max = (int)(hw->num_cores * 32);
+    int cpu_based_max = (int)(adaptive_hw_aware.num_cores * 32);
     
     // Konversi budget RAM sistem dari MB (dari struct mb) ke Byte penuh
-    size_t php_budget_bytes    = (size_t)mb->php_budget_mb * 1024 * 1024;
-    size_t python_budget_bytes = (size_t)mb->python_budget_mb * 1024 * 1024;
-    size_t rust_budget_bytes   = (size_t)mb->rust_budget_mb * 1024 * 1024;
+    size_t php_budget_bytes    = (size_t)adaptive_hw_aware.php_budget_mb * 1024 * 1024;
+    size_t python_budget_bytes = (size_t)adaptive_hw_aware.python_budget_mb * 1024 * 1024;
+    size_t rust_budget_bytes   = (size_t)adaptive_hw_aware.rust_budget_mb * 1024 * 1024;
 
     // Ambil langsung dari config yang sudah murni byte (dengan fallback aman jika 0)
     size_t php_mem    = (config.php.memory_budget > 0) ? (size_t)config.php.memory_budget : (20UL * 1024 * 1024);
@@ -556,7 +505,7 @@ WorkerCapacity calculate_worker_capacity(const HardwareProfile *hw, const Memory
                      (rust_mem > 0 ? (int)(rust_budget_bytes / rust_mem) : 0);
 
     // --- PENYESUAIAN BATAS MINIMUM DINAMIS (RAMAH HARDWARE KECIL) ---
-    int absolute_min_workers = (hw->num_cores < 2) ? 2 : 4;
+    int absolute_min_workers = (adaptive_hw_aware.num_cores < 2) ? 2 : 4;
 
     if (max_by_ram < absolute_min_workers) {
         max_by_ram = absolute_min_workers;
@@ -566,30 +515,26 @@ WorkerCapacity calculate_worker_capacity(const HardwareProfile *hw, const Memory
     if (recommended > 1024) recommended = 1024;
     if (recommended < absolute_min_workers) recommended = absolute_min_workers;
 
-    wc.worker_max = recommended;
+    adaptive_hw_aware.worker_max = recommended;
     
-    wc.worker_min = (int)hw->num_cores * 2;
-    if (wc.worker_min < absolute_min_workers) wc.worker_min = absolute_min_workers;
-    if (wc.worker_min > wc.worker_max) wc.worker_min = wc.worker_max;
+    adaptive_hw_aware.worker_min = (int)adaptive_hw_aware.num_cores * 2;
+    if (adaptive_hw_aware.worker_min < absolute_min_workers) adaptive_hw_aware.worker_min = absolute_min_workers;
+    if (adaptive_hw_aware.worker_min > adaptive_hw_aware.worker_max) adaptive_hw_aware.worker_min = adaptive_hw_aware.worker_max;
 
-    wc.event_batch_size = (wc.worker_max > MAX_EVENT_BATCH_SIZE) ? MAX_EVENT_BATCH_SIZE : wc.worker_max;
+    adaptive_hw_aware.event_batch_size = (adaptive_hw_aware.worker_max > MAX_EVENT_BATCH_SIZE) ? MAX_EVENT_BATCH_SIZE : adaptive_hw_aware.worker_max;
 
-    if (hw->max_fd > (uint32_t)(wc.worker_max > 0 ? wc.worker_max : 0)) {
-        uint32_t sisa_fd = hw->max_fd - (uint32_t)wc.worker_max;
-        wc.core_queue_capacity = (int)((sisa_fd * 60U) / 100U);
+    if (adaptive_hw_aware.max_fd > (uint32_t)(adaptive_hw_aware.worker_max > 0 ? adaptive_hw_aware.worker_max : 0)) {
+        uint32_t sisa_fd = adaptive_hw_aware.max_fd - (uint32_t)adaptive_hw_aware.worker_max;
+        adaptive_hw_aware.core_queue_capacity = (int)((sisa_fd * 60U) / 100U);
     } else {
-        wc.core_queue_capacity = 256;
+        adaptive_hw_aware.core_queue_capacity = 256;
     }
 
-    if (wc.core_queue_capacity > MAX_QUEUE_CAPACITY) wc.core_queue_capacity = MAX_QUEUE_CAPACITY;
-    if (wc.core_queue_capacity < 256) wc.core_queue_capacity = 256;
-
-    return wc;
+    if (adaptive_hw_aware.core_queue_capacity > MAX_QUEUE_CAPACITY) adaptive_hw_aware.core_queue_capacity = MAX_QUEUE_CAPACITY;
+    if (adaptive_hw_aware.core_queue_capacity < 256) adaptive_hw_aware.core_queue_capacity = 256;
 }
 
-BackendQuotas calculate_backend_quotas(const HardwareProfile *hw, const MemoryBudget *mb, const WorkerCapacity *wc) {
-    BackendQuotas quotas = {0};
-
+void calculate_backend_quotas(void) {
     // Cek status backend aktif
     bool is_php_active    = (config.php.node_count > 0 || strlen(config.php_fpm_config_path) > 0);
     bool is_python_active = (config.python.node_count > 0 || strlen(config.python.ext) > 0);
@@ -599,13 +544,13 @@ BackendQuotas calculate_backend_quotas(const HardwareProfile *hw, const MemoryBu
 
     // --- PERBAIKAN POIN 7: BATASI PHP QUOTA AGAR TIDAK MELEBIHI WORKER_MAX ---
     int php_target = is_php_active ? php.max_children : 0;
-    if (php_target > wc->worker_max) {
-        quotas.php_quota = wc->worker_max;
+    if (php_target > adaptive_hw_aware.worker_max) {
+        adaptive_hw_aware.php_quota = adaptive_hw_aware.worker_max;
     } else {
-        quotas.php_quota = php_target;
+        adaptive_hw_aware.php_quota = php_target;
     }
     
-    int sisa_jatah = wc->worker_max - quotas.php_quota;
+    int sisa_jatah = adaptive_hw_aware.worker_max - adaptive_hw_aware.php_quota;
     if (sisa_jatah < 0) {
         sisa_jatah = 0; 
     }
@@ -614,9 +559,9 @@ BackendQuotas calculate_backend_quotas(const HardwareProfile *hw, const MemoryBu
     int rust_quota = 0;
 
     if (is_python_active && is_rust_active) {
-        unsigned long total_py_rust_ram = mb->python_budget_mb + mb->rust_budget_mb;
+        unsigned long total_py_rust_ram = adaptive_hw_aware.python_budget_mb + adaptive_hw_aware.rust_budget_mb;
         if (total_py_rust_ram > 0) {
-            python_quota = (int)((sisa_jatah * mb->python_budget_mb) / total_py_rust_ram);
+            python_quota = (int)((sisa_jatah *adaptive_hw_aware.python_budget_mb) / total_py_rust_ram);
             rust_quota   = sisa_jatah - python_quota;
         } else {
             python_quota = sisa_jatah / 2;
@@ -630,23 +575,23 @@ BackendQuotas calculate_backend_quotas(const HardwareProfile *hw, const MemoryBu
         python_quota = 0;
     }
 
-    quotas.python_quota = python_quota;
-    quotas.rust_quota   = rust_quota;
+    adaptive_hw_aware.python_quota = python_quota;
+    adaptive_hw_aware.rust_quota   = rust_quota;
 
-    quotas.total_upstream_slots = quotas.php_quota + quotas.python_quota + quotas.rust_quota;
-    if (quotas.total_upstream_slots < 32) {
-        quotas.total_upstream_slots = 32;
+    adaptive_hw_aware.total_upstream_slots = adaptive_hw_aware.php_quota + adaptive_hw_aware.python_quota + adaptive_hw_aware.rust_quota;
+    if (adaptive_hw_aware.total_upstream_slots < 32) {
+        adaptive_hw_aware.total_upstream_slots = 32;
     }
 
-    int upstream_sisa = wc->worker_max - quotas.total_upstream_slots;
-    quotas.upstream_queue_capacity = (upstream_sisa > 0) ? (int)((upstream_sisa * 50U) / 100U) : 128;
-    if (quotas.upstream_queue_capacity < 64) {
-        quotas.upstream_queue_capacity = 64;
+    int upstream_sisa = adaptive_hw_aware.worker_max - adaptive_hw_aware.total_upstream_slots;
+    adaptive_hw_aware.upstream_queue_capacity = (upstream_sisa > 0) ? (int)((upstream_sisa * 50U) / 100U) : 128;
+    if (adaptive_hw_aware.upstream_queue_capacity < 64) {
+        adaptive_hw_aware.upstream_queue_capacity = 64;
     }
 
     // --- HITUNG ADAPTIVE FCGI SESSION POOL SLOTS (Pengali Konservatif) ---
     // pengali 8 slot per core CPU
-    int min_safe_sessions = (int)(hw->num_cores * 8); 
+    int min_safe_sessions = (int)(adaptive_hw_aware.num_cores * 8); 
     
     // Pastikan batas minimal pengaman tidak kurang dari 64 atau 128
     if (min_safe_sessions < 64) {
@@ -654,28 +599,24 @@ BackendQuotas calculate_backend_quotas(const HardwareProfile *hw, const MemoryBu
     }
 
     //Angka ideal ambil 50% dari upstream slot
-    int calculated_sessions = (quotas.total_upstream_slots * 50) / 100;
+    int calculated_sessions = (adaptive_hw_aware.total_upstream_slots * 50) / 100;
     
     if (calculated_sessions < min_safe_sessions) {
-        quotas.session_slots = min_safe_sessions;
-    } else if (calculated_sessions > wc->worker_max) {
-        quotas.session_slots = wc->worker_max; 
+        adaptive_hw_aware.fcgi_session_slots = min_safe_sessions;
+    } else if (calculated_sessions > adaptive_hw_aware.worker_max) {
+        adaptive_hw_aware.fcgi_session_slots = adaptive_hw_aware.worker_max; 
     } else {
-        quotas.session_slots = calculated_sessions;
+        adaptive_hw_aware.fcgi_session_slots = calculated_sessions;
     }
 
     // --- PERBAIKAN POIN 6: BATAS MUTLAK SESSION SLOTS TIDAK BOLEH > WORKER_MAX ---
-    if (quotas.session_slots > wc->worker_max) {
-        quotas.session_slots = wc->worker_max;
+    if (adaptive_hw_aware.fcgi_session_slots > adaptive_hw_aware.worker_max) {
+        adaptive_hw_aware.fcgi_session_slots = adaptive_hw_aware.worker_max;
     }
 
-    return quotas;
 }
 
 void core_print_adaptive_summary(
-    const HardwareProfile *hw, 
-    const MemoryBudget *mb, 
-    const WorkerCapacity *wc, 
     const PHPConfig *php, 
     bool is_php_active, 
     int print_to_terminal
@@ -695,19 +636,19 @@ void core_print_adaptive_summary(
 
     // 1. Hardware Initialization Summary
     snprintf(log_buf_1, sizeof(log_buf_1), "[CORE] Hardware-Aware Init -> Cores: %ld | RAM: %lu MB | Core Max FD: %u", 
-              hw->num_cores, hw->total_ram_mb, hw->max_fd);
+              adaptive_hw_aware.num_cores, adaptive_hw_aware.total_ram_mb, adaptive_hw_aware.max_fd);
 
     // 2. Workers & Queue Capacity Summary
     snprintf(log_buf_2, sizeof(log_buf_2), "[CORE] Workers (Min/Recommended Ceiling): %d/%d | Event Batch: %d | Core Queue Capacity: %d", 
-              wc->worker_min, wc->worker_max, wc->event_batch_size, wc->core_queue_capacity);
+              adaptive_hw_aware.worker_min, adaptive_hw_aware.worker_max, adaptive_hw_aware.event_batch_size, adaptive_hw_aware.core_queue_capacity);
     
     // 3. Upstream Slots Allocation Summary
     snprintf(log_buf_3, sizeof(log_buf_3), "[UPSTREAM] Slots Allocation -> PHP: %d (From max_children) | Rust: %d | Python: %d | Total Upstream Slots: %d | Total Session Slots: %d ", 
-              g_fcgi_php_quota, g_fcgi_rust_quota, g_fcgi_python_quota, g_fcgi_upstream_slots, g_fcgi_session_slots);
+              adaptive_hw_aware.php_quota, adaptive_hw_aware.rust_quota, adaptive_hw_aware.python_quota, adaptive_hw_aware.total_upstream_slots, adaptive_hw_aware.fcgi_session_slots);
               
     // 4. Memory Budget Awareness (Pengganti log_buf_mem)
     snprintf(log_buf_4, sizeof(log_buf_4), "[MEM] Budget Awareness -> Reserved (OS/DB): %lu MB | Available for Web: %lu MB [PHP Budget: %lu MB, Python Budget: %lu MB, Rust Budget: %lu MB]", 
-              mb->reserved_ram_mb, mb->available_for_web_mb, mb->php_budget_mb, mb->python_budget_mb, mb->rust_budget_mb);
+              adaptive_hw_aware.reserved_ram_mb, adaptive_hw_aware.available_for_web_mb, adaptive_hw_aware.php_budget_mb, adaptive_hw_aware.python_budget_mb, adaptive_hw_aware.rust_budget_mb);
 
     // 5 & 6. Advisory Ulimit
     struct rlimit rl;
@@ -720,20 +661,20 @@ void core_print_adaptive_summary(
     }
 
     // 7. Core Max FD Warning
-    if (hw->max_fd < 1024) {
-        snprintf(log_buf_7, sizeof(log_buf_7), "[WARN] Core Max FD (ulimit) (%u) is low for a high-concurrency server", hw->max_fd); 
+    if (adaptive_hw_aware.max_fd < 1024) {
+        snprintf(log_buf_7, sizeof(log_buf_7), "[WARN] Core Max FD (ulimit) (%u) is low for a high-concurrency server", adaptive_hw_aware.max_fd); 
     }
 
     // 8 - 12. Audit PHP-FPM Configuration
     if (is_php_active) {
-        if (php->max_children > wc->worker_max) {
+        if (php->max_children > adaptive_hw_aware.worker_max) {
             snprintf(log_buf_8, sizeof(log_buf_8), "[WARN] PHP-FPM max_children (%d) exceeds hardware-aware worker baseline (%d)", 
-                      php->max_children, wc->worker_max); 
+                      php->max_children, adaptive_hw_aware.worker_max); 
             snprintf(log_buf_9, sizeof(log_buf_9), "[ADVICE] Action: Review PHP-FPM max_children in '%s' if resource contention occurs", 
                       config.php_fpm_config_path);          
         } 
-        else if (php->max_children < (wc->worker_max / 4)) {
-            int suggested_max = wc->worker_max / 2;
+        else if (php->max_children < (adaptive_hw_aware.worker_max / 4)) {
+            int suggested_max = adaptive_hw_aware.worker_max / 2;
             int suggested_start = suggested_max / 4;
             int suggested_min = suggested_start;
             int suggested_max_spare = suggested_max / 2;
@@ -792,8 +733,16 @@ uint64_t timespec_diff_us(const struct timespec *start, const struct timespec *e
     return (uint64_t)(sec * 1000000LL + nsec / 1000LL);
 }
 
-// Pencatatan Task (Langsung diakumulasi ke slot waktu aktif saat ini)
+// Setter (Opsional, jika ada modul lain yang butuh override kebijakan)
+void core_adaptive_set_policy(float threshold, int spawn_step, int timeout_idle) {
+    pthread_mutex_lock(&g_runtime_win.lock);
+    current_policy.threshold_ratio = threshold;
+    current_policy.spawn_step      = spawn_step;
+    current_policy.timeout_idle    = timeout_idle;
+    pthread_mutex_unlock(&g_runtime_win.lock);
+}
 
+// Pencatatan Task (Langsung diakumulasi ke slot waktu aktif saat ini)
 void runtime_record_task(uint64_t total_cpu_us, uint64_t total_wall_us, uint64_t resumes) {
     if (total_wall_us == 0) return;
 
@@ -828,9 +777,8 @@ void* runtime_autoscale_evaluator(void *arg) {
     (void)arg;
 
     // Deteksi jumlah core sekali saja saat awal loop
-    long n_cores = sysconf(_SC_NPROCESSORS_ONLN);
-    if (n_cores < 1) n_cores = 1; 
-    int high_load_threshold = (int)(n_cores * 2);
+    int num_cores = (adaptive_hw_aware.num_cores > 0) ? adaptive_hw_aware.num_cores : 1;
+    int high_load_threshold = num_cores * 2;
 
     while (atomic_load(&g_adaptive_active)) {
         // Tidur per 1 detik yang dipecah menjadi interval 100ms agar responsif saat shutdown

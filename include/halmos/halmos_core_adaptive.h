@@ -40,22 +40,22 @@
 -        * reserved_ram_mb   = clamp(total_ram_mb / 4, 512, 4096)
 -        * available_for_web = total_ram_mb - reserved_ram_mb
 -    - Alokasi Proporsional Backend & Upstream Buffer:
--        * `g_fcgi_upstream_slots` : Menghasilkan kuota slot paralel aman untuk PHP, Rust, dan Python 
+-        * `fcgi_upstream_slots` : Menghasilkan kuota slot paralel aman untuk PHP, Rust, dan Python 
 -          berdasarkan anggaran RAM bersih agar proses anak FPM tidak memicu *OOM Killer*.
--        * `g_fcgi_session_slots`  : Kapasitas maksimum global pool sesi konkuren di backend. 
+-        * `fcgi_session_slots`  : Kapasitas maksimum global pool sesi konkuren di backend. 
 -          Berfungsi sebagai plafon global tempat sesi FastCGI dialokasikan secara efisien 
 -          tanpa membebani kapasitas maksimal proses upstream secara berlebihan.
 -        * `g_fcgi_queue_capacity` : Buffer antrean tunggu yang menampung request HTTP 
 -          tatkala seluruh slot upstream/FPM sibuk, mencegah penolakan koneksi mentah (ECONNREFUSED).
 - 
-- 3. PENYELARASAN FILE DESCRIPTOR (FD) & ANTREAN FRONTEND (`g_core_max_fd` & `g_core_queue_capacity`):
+- 3. PENYELARASAN FILE DESCRIPTOR (FD) & ANTREAN FRONTEND (`g_core_max_fd` & `queue_capacity`):
 -    - Telemetri: Membaca batasan proses secara jujur (`RLIMIT_NOFILE` / ulimit) 
 -      menggunakan `getrlimit()` tanpa mencoba memodifikasi kernel secara paksa.
 -    - Rumus Dasar & Komputasi Core FD:
 -        * g_core_max_fd     = clamp(rlim_cur, 64, UINT32_MAX)  // (Ditangani jika unlimited)
 -    - Integrasi Antar Pilar (CPU, RAM, & FD) pada Queue Frontend:
 -        * sisa_fd           = (g_core_max_fd > (uint32_t)g_worker_max) ? (g_core_max_fd - (uint32_t)g_worker_max) : 0
--        * g_core_queue_capacity = clamp((sisa_fd * 60) / 100, 256, MAX_QUEUE_CAPACITY)
+-        * queue_capacity = clamp((sisa_fd * 60) / 100, 256, MAX_QUEUE_CAPACITY)
 -    - Epistemologi Antrean: Meskipun dihitung dari sisa FD, kapasitas antrean ini 
 -      secara dinamis dikoreksi oleh kapasitas CPU (`g_worker_max` sebagai pengurang) 
 -      dan divalidasi selaras dengan batas aman RAM backend (`g_fcgi_upstream_slots`) 
@@ -66,7 +66,7 @@
 -    - sisa_jatah          = max(0, g_worker_max - php_quota)
 -    - Python/Rust Quota   = Didistribusikan proporsional dari sisa_jatah berdasarkan rasio RAM.
 -    - g_fcgi_upstream_slots = Total keseluruhan slot upstream yang diizinkan aktif.
--    - g_fcgi_session_slots  = Plafon global manajemen sesi global pool yang diturunkan 
+-    - fcgi_session_slots  = Plafon global manajemen sesi global pool yang diturunkan 
 -                            dari proporsi kapasitas hulu untuk efisiensi alokasi memori runtime.
 - 
 - --------------------------------------------------------------------------
@@ -100,7 +100,7 @@
 -            │    └── Penjelasan     : Bukan sekadar salinan mentah ulimit, melainkan telah divalidasi:
 -            │                         jika 'unlimited' dikunci ke plafon aman (misal 65536), 
 -            │                         dan jika terlalu kecil dinaikkan ke batas minimal aman (minimal 64).
--            └── g_core_queue_capacity (Buffer antrean HTTP request gelombang masuk)
+-            └── queue_capacity (Buffer antrean HTTP request gelombang masuk)
 -                 ├── Sumber Bahan Baku (FD)   : Berasal dari g_core_max_fd (kapasitas total socket ulimit)
 -                 ├── Faktor Koreksi (CPU)     : Dikurangi oleh g_worker_max (kapasitas pekerja aktif saat itu)
 -                 ├── Pagar Pengaman (RAM)     : Dibatasi secara sistemik agar tidak membanjiri g_fcgi_upstream_slots
@@ -117,37 +117,32 @@
 
  // Menampung batasan fisik dasar dari sistem operasi & hardware
 typedef struct {
+    // 1. Domain Hardware / OS
     long num_cores;
     unsigned long total_ram_mb;
     uint32_t max_fd;
-} HardwareProfile;
 
-// Menampung kalkulasi anggaran RAM
-typedef struct {
+    // 2. Domain Memory Budget
     unsigned long reserved_ram_mb;
     unsigned long available_for_web_mb;
     unsigned long php_budget_mb;
     unsigned long python_budget_mb;
     unsigned long rust_budget_mb;
-} MemoryBudget;
 
-// Menampung kapasitas worker & event loop batch
-typedef struct {
+    // 3. Domain Worker & Frontend Queue
     int worker_min;
     int worker_max;
     int event_batch_size;
     int core_queue_capacity;
-} WorkerCapacity;
 
-// Menampung kuota slot FastCGI backend & antrean upstream
-typedef struct {
+    // 4. Domain Backend / FastCGI Upstream & Quotas
     int php_quota;
     int python_quota;
     int rust_quota;
     int total_upstream_slots;
     int upstream_queue_capacity;
-    int session_slots;
-} BackendQuotas;
+    int fcgi_session_slots;
+} AdaptiveHardwareAware; 
 
 // --- STRUCT TELEMETRI UNIVERSAL (Dipakai HTTP/1 & HTTP/2) ---
 typedef struct {

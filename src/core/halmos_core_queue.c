@@ -23,11 +23,11 @@ static int spawn_detached_worker(pthread_t *out_tid, void *(*routine)(void *), v
 
 void core_queue_thread_worker_start(void) {
     // Inisialisasi struct antrean global
-    init_queue(&global_queue, g_worker_min, g_worker_max, g_core_queue_capacity);
+    init_queue(&global_queue, adaptive_hw_aware.worker_min, adaptive_hw_aware.worker_max, adaptive_hw_aware.core_queue_capacity);
 
-    int initial_workers = g_worker_min;
+    int initial_workers = adaptive_hw_aware.worker_min;
     
-    // Buat worker thread sejumlah g_worker_min dengan status DETACHED
+    // Buat worker thread sejumlah adaptive_hw_aware.worker_min dengan status DETACHED
     for (int i = 0; i < initial_workers; i++) {
         pthread_t tid;
         if (spawn_detached_worker(&tid, core_thread_pool_worker, &global_queue) != 0) {
@@ -36,6 +36,43 @@ void core_queue_thread_worker_start(void) {
     }
     
     write_log("[QUEUE] Thread pool started dynamically with %d workers (DETACHED malloc/free mode).", initial_workers);
+}
+
+/********************************************************************
+ * queue_thread_worker_stop()
+ ********************************************************************/
+void core_queue_thread_worker_stop(void) {
+    pthread_mutex_lock(&global_queue.lock);
+    global_queue.is_running = 0; 
+    pthread_cond_broadcast(&global_queue.cond);
+
+    while (global_queue.total_workers > 0) {
+        pthread_cond_wait(&global_queue.exit_cond, &global_queue.lock);
+    }
+    pthread_mutex_unlock(&global_queue.lock);
+
+    // Bersihkan sisa task di dalam antrean
+    pthread_mutex_lock(&global_queue.lock);
+    Task *curr = global_queue.head;
+    global_queue.head = global_queue.tail = NULL;
+    global_queue.count = 0;
+    pthread_mutex_unlock(&global_queue.lock);
+
+    while (curr) {
+        Task *tmp = curr;
+        curr = curr->next;
+        if (tmp->event.fd >= 0) {
+            core_conn_t_deactivate(tmp->event.fd);
+            close(tmp->event.fd);
+        }
+        free(tmp);
+    }
+
+    pthread_mutex_destroy(&global_queue.lock);
+    pthread_cond_destroy(&global_queue.cond);
+    pthread_cond_destroy(&global_queue.exit_cond);
+
+    write_log("[QUEUE] Worker thread pool shutdown instantly & cleanly.");
 }
 
 /********************************************************************
@@ -197,42 +234,6 @@ int core_queue_pop(TaskQueue *q, halmos_event_t *out_event, struct timeval *arri
     return sock;
 }
 
-/********************************************************************
- * queue_thread_worker_stop()
- ********************************************************************/
-void core_queue_thread_worker_stop(void) {
-    pthread_mutex_lock(&global_queue.lock);
-    global_queue.is_running = 0; 
-    pthread_cond_broadcast(&global_queue.cond);
-
-    while (global_queue.total_workers > 0) {
-        pthread_cond_wait(&global_queue.exit_cond, &global_queue.lock);
-    }
-    pthread_mutex_unlock(&global_queue.lock);
-
-    // Bersihkan sisa task di dalam antrean
-    pthread_mutex_lock(&global_queue.lock);
-    Task *curr = global_queue.head;
-    global_queue.head = global_queue.tail = NULL;
-    global_queue.count = 0;
-    pthread_mutex_unlock(&global_queue.lock);
-
-    while (curr) {
-        Task *tmp = curr;
-        curr = curr->next;
-        if (tmp->event.fd >= 0) {
-            core_conn_t_deactivate(tmp->event.fd);
-            close(tmp->event.fd);
-        }
-        free(tmp);
-    }
-
-    pthread_mutex_destroy(&global_queue.lock);
-    pthread_cond_destroy(&global_queue.cond);
-    pthread_cond_destroy(&global_queue.exit_cond);
-
-    write_log("[QUEUE] Worker thread pool shutdown instantly & cleanly.");
-}
 
 /* Helper / Private Function */
 void init_queue(TaskQueue *q, int min_limit, int max_limit, int max_queue_size) {
@@ -264,23 +265,3 @@ int spawn_detached_worker(pthread_t *out_tid, void *(*routine)(void *), void *ar
     pthread_attr_destroy(&attr);
     return ret;
 }
-
-/*
-int get_adaptive_timeout(TaskQueue *q) {
-    long n_cores = sysconf(_SC_NPROCESSORS_ONLN);
-    if (n_cores < 1) n_cores = 1; 
-
-    int high_load_threshold = (int)(n_cores * 2);
-    float load_factor = (q->max_queue_limit > 0) ? (float)q->count / q->max_queue_limit : 0;
-
-    if (load_factor > config.queue_threshold_ratio || q->count > high_load_threshold) {
-        return config.timeout_worker_high_load; 
-    }
-    else if (q->count > 0) {
-        return config.timeout_worker_light_load; 
-    } 
-    else {
-        return config.timeout_worker_idle; 
-    }
-}
-*/
