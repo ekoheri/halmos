@@ -13,12 +13,59 @@
 #include <string.h>
 #include <errno.h>
 #include <time.h>
- 
-void mark_worker_idle(TaskQueue *q);
- 
+
+static int spawn_detached_worker(pthread_t *out_tid, void *(*routine)(void *), void *arg);
+static void mark_worker_idle(TaskQueue *q);
+
 /********************************************************************
- * halmos_worker_routine() -> [SIKLUS KERJA KOKI]
- * Persis Logika Boss: Ambil -> Masak -> Beresin Meja
+- core_thread_pool_start() - Memulai Antrean & Worker Pool
+ ********************************************************************/
+void core_thread_pool_start(void) {
+    int initial_workers = adaptive_hw_aware.worker_min;
+    
+    // Buat worker thread sejumlah worker_min dengan status DETACHED
+    for (int i = 0; i < initial_workers; i++) {
+        pthread_t tid;
+        if (spawn_detached_worker(&tid, core_thread_pool_worker, &global_queue) != 0) {
+            write_log_error_code(ERR_CORE_INIT_WORKER, i);
+        }
+    }
+}
+
+/********************************************************************
+- core_thread_pool_stop() - Menghentikan Worker Pool & Sinkronisasi Exit
+ ********************************************************************/
+void core_thread_pool_stop(void) {
+    // 1. Beritahu queue untuk berhenti & broadcast thread yang sedang menunggu
+    pthread_mutex_lock(&global_queue.lock);
+    global_queue.is_running = 0; 
+    pthread_cond_broadcast(&global_queue.cond);
+
+    // 2. Tunggu sampai seluruh worker benar-benar keluar (total_workers == 0)
+    while (global_queue.total_workers > 0) {
+        pthread_cond_wait(&global_queue.exit_cond, &global_queue.lock);
+    }
+    pthread_mutex_unlock(&global_queue.lock);
+}
+
+/********************************************************************
+- core_thread_pool_spawn_workers() - Helper untuk Upscaling Thread
+ ********************************************************************/
+int core_thread_pool_spawn_workers(int count) {
+    int actually_spawned = 0;
+    for (int i = 0; i < count; i++) {
+        pthread_t tid;
+        if (spawn_detached_worker(&tid, core_thread_pool_worker, &global_queue) == 0) {
+            actually_spawned++;
+        } else {
+            write_log_error_code(ERR_CORE_PTHREAD_SCALE);
+        }
+    }
+    return actually_spawned;
+}
+
+/********************************************************************
+ * core_thread_pool_worker() -> [SIKLUS KERJA KOKI]
  ********************************************************************/
 void *core_thread_pool_worker(void *arg) {
     (void)arg;
@@ -104,7 +151,23 @@ void *core_thread_pool_worker(void *arg) {
     }
     return NULL;
 }
- 
+
+/* Helper core_thread_pool*/
+
+/********************************************************************
+- spawn_detached_worker()
+ ********************************************************************/
+int spawn_detached_worker(pthread_t *out_tid, void *(*routine)(void *), void *arg) {
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    pthread_attr_setstacksize(&attr, 256 * 1024); // Batasi stack size worker jadi 256 KB
+    
+    int ret = pthread_create(out_tid, &attr, routine, arg);
+    pthread_attr_destroy(&attr);
+    return ret;
+}
+
 /********************************************************************
  * mark_worker_idle()
  * ---------------------------------------------------------------
@@ -117,8 +180,5 @@ void *core_thread_pool_worker(void *arg) {
  * Status active_workers dikurangi satu.
  ********************************************************************/
 void mark_worker_idle(TaskQueue *q) {
-    //pthread_mutex_lock(&q->lock);
-    //q->active_workers--;
-    //pthread_mutex_unlock(&q->lock);
     atomic_fetch_sub(&q->active_workers, 1);
 }

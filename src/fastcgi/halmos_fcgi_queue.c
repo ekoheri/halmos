@@ -24,11 +24,11 @@ bool fcgi_queue_start(void) {
     FCGI_TaskQueue *q = &global_fcgi_queue;
     q->head = q->tail = NULL;
     q->size = 0;
-    q->max_queue_limit = g_fcgi_queue_capacity;
+    q->max_queue_limit = adaptive_hw_aware.upstream_queue_capacity;
     q->active_workers = 0;
-    q->total_workers = g_worker_min;
-    q->min_threads_limit = g_worker_min;
-    q->max_threads_limit = g_worker_max;
+    q->total_workers = adaptive_hw_aware.worker_min;
+    q->min_threads_limit = adaptive_hw_aware.worker_min;
+    q->max_threads_limit = adaptive_hw_aware.worker_max;
     q->scaling_in_progress = 0;
     q->is_running = 1;
 
@@ -190,7 +190,7 @@ FCGI_Task* fcgi_queue_pop(struct timeval *arrival) {
 
         //DOWNSCALE : Jika sebuah worker thread menunggu tugas di dalam antrean (pop) hingga 
         // mengalami waktu habis/timeout (ETIMEDOUT), antrean kosong (q->head == NULL), 
-        // dan jumlah worker saat ini masih di atas batas minimal (g_worker_min), 
+        // dan jumlah worker saat ini masih di atas batas minimal (adaptive_hw_aware.worker_min), 
         // maka worker tersebut akan memangkas dirinya sendiri (q->total_workers--) 
         // dan keluar secara anggun untuk menghemat sumber daya sistem.
         if (rc == ETIMEDOUT && q->head == NULL && q->total_workers > q->min_threads_limit) {

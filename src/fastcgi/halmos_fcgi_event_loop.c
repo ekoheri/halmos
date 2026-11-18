@@ -12,7 +12,7 @@
 // Variabel global state poller upstream
 static FCGI_AsyncEventLoop upstream_poller;
 
-// Pointer array events yang dialokasikan secara dinamis berdasarkan g_event_batch_size
+// Pointer array events yang dialokasikan secara dinamis berdasarkan adaptive_hw_aware.event_batch_size
 static struct epoll_event *g_epoll_events = NULL;
 
 bool fcgi_event_loop_start(void) {
@@ -22,8 +22,8 @@ bool fcgi_event_loop_start(void) {
         return false;
     }
 
-    // Alokasikan memori epoll_event secara dinamis berdasarkan nilai adaptif g_event_batch_size
-    g_epoll_events = (struct epoll_event*)malloc(sizeof(struct epoll_event) * g_event_batch_size);
+    // Alokasikan memori epoll_event secara dinamis berdasarkan nilai adaptif adaptive_hw_aware.event_batch_size
+    g_epoll_events = (struct epoll_event*)malloc(sizeof(struct epoll_event) * adaptive_hw_aware.event_batch_size);
     if (!g_epoll_events) {
         write_log_error_code(ERR_FCGI_EPOLL_MEM);
         close(upstream_poller.epoll_fd);
@@ -138,11 +138,11 @@ bool fcgi_event_loop_del(int fpm_fd) {
 void* fcgi_event_loop_run(void *arg) {
     (void)arg;
 
-    //fprintf(stderr, "[FCGI_POLLER_ROUTINE] Poller worker thread running loop (adaptive batch size: %d)...\n", g_event_batch_size);
+    //fprintf(stderr, "[FCGI_POLLER_ROUTINE] Poller worker thread running loop (adaptive batch size: %d)...\n", adaptive_hw_aware.event_batch_size);
 
     while (atomic_load(&upstream_poller.running)) {
-        // Menggunakan g_event_batch_size hasil kalkulasi adaptive hardware
-        int n = epoll_wait(upstream_poller.epoll_fd, g_epoll_events, g_event_batch_size, 1000); // Timeout 1 detik
+        // Menggunakan adaptive_hw_aware.event_batch_size hasil kalkulasi adaptive hardware
+        int n = epoll_wait(upstream_poller.epoll_fd, g_epoll_events, adaptive_hw_aware.event_batch_size, 1000); // Timeout 1 detik
         if (n < 0) {
             if (errno == EINTR) continue;
             //fprintf(stderr, "[FCGI_POLLER_ROUTINE] ERROR: epoll_wait returned error: %s\n", strerror(errno));

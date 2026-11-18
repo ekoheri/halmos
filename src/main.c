@@ -258,8 +258,8 @@ int main(int argc, char *argv[]) {
             stop_thread_logger();
             return EXIT_FAILURE;
         }
-        // Mapping FD ke SSL (Ukuran g_core_queue_capacity + buffer aman)
-        ssl_init_mapping(g_core_queue_capacity + 2000); 
+        // Mapping FD ke SSL (Ukuran adaptive_hw_aware.core_queue_capacity + buffer aman)
+        ssl_init_mapping(adaptive_hw_aware.core_queue_capacity + 2000); 
         write_log("[CORE] TLS Engine & Mapping ready.");
     }
     
@@ -271,18 +271,22 @@ int main(int argc, char *argv[]) {
     halmos_ws_system_init();
     write_log("[CORE] WebSocket Registry & Subsystems ready.");
 
-    // 8. Inisialisasi Antrean (Dapur) & Thread Pool Dinamis
+    // 8. Inisialisasi Antrean (Dapur) 
+    core_queue_init();
+    write_log("[CORE] Core Queue started.");
+
+    // 9. Inisialisasi Thread Pool Dinamis
     // Menggunakan batas antrean dari config
-    core_queue_thread_worker_start();
+    core_thread_pool_start();
     write_log("[CORE] Core Worker thread pool started dynamically.");
 
-    // 9. Inisialisasi janitor jika fungsi rate limited diaktifkan
+    // 10. Inisialisasi janitor jika fungsi rate limited diaktifkan
     if(config.rate_limit_enabled == true) {
         sec_traffic_start_janitor();
         write_log("[SEC] Security Janitor thread started.");    
     }
     
-    // 10. Start upstream untuk koneksi ke backend
+    // 11. Start upstream untuk koneksi ke backend
     if (!fcgi_upstream_start()) {
         fprintf(stderr, "Failed to create upstream backend or connect to backend socket!\n");
         stop_thread_logger();
@@ -290,7 +294,7 @@ int main(int argc, char *argv[]) {
     }
     write_log("[UPSTREAM] FastCGI Upstream Connection Pool initialized.");
 
-    // 11. Inisialisasi session pool untuk sesi di backend
+    // 12. Inisialisasi session pool untuk sesi di backend
     if (!fcgi_global_pool_init()) {
         fprintf(stderr, "[FATAL] Failed to initialize FastCGI Global Session Pool!\n");
         stop_thread_logger();
@@ -298,7 +302,7 @@ int main(int argc, char *argv[]) {
     }
     write_log("[CORE] FastCGI Global Session Pool initialized.");
 
-    // 12. Inisialisasi queue backend, untuk menampung antrian request ke backend
+    // 13. Inisialisasi queue backend, untuk menampung antrian request ke backend
     if (!fcgi_queue_start()) {
         fprintf(stderr, "Failed to initialize FCGI task queue!\n");
         stop_thread_logger();
@@ -306,7 +310,7 @@ int main(int argc, char *argv[]) {
     }
     write_log("[CORE] FastCGI Task Queue started.");
 
-    // 13. Inisialisasi event loop di backend
+    // 14. Inisialisasi event loop di backend
     if (!fcgi_event_loop_start()) {
         fprintf(stderr, "Failed to initialize FastCGI Async Event Loop!\n> exit(1);\n");
         stop_thread_logger();
@@ -314,7 +318,7 @@ int main(int argc, char *argv[]) {
     }
     write_log("[CORE] FastCGI Async Event Loop started.");
 
-    // 14. Inisialisasi Worker Pool FastCGI
+    // 15. Inisialisasi Worker Pool FastCGI
     if (!fcgi_thread_pool_start()) {
         fprintf(stderr, "Failed to initialize FCGI thread pool!\n");
         stop_thread_logger();
@@ -322,7 +326,7 @@ int main(int argc, char *argv[]) {
     }
     write_log("[CORE] FastCGI Worker Pool started.");
     
-    // 15. Inisialisasi Network & Epoll di core
+    // 16. Inisialisasi Network & Epoll di core
     if (core_event_loop_start() != 0) {
         fprintf(stderr, "[FATAL] Failed to start event loop.\n");
         stop_thread_logger();
@@ -330,7 +334,7 @@ int main(int argc, char *argv[]) {
     }
     write_log("[CORE] Core Network & Epoll Event Loop started.");
 
-    // 16. Inisialisasi virtual host inotify
+    // 17. Inisialisasi virtual host inotify
     // === TAMBAHKAN INI DI SINI ===
     // Karena epoll_fd sudah tercipta di dalam core_event_loop_start(), 
     // kita bisa langsung mendaftarkan inotify vhost ke epoll utama.
@@ -342,7 +346,7 @@ int main(int argc, char *argv[]) {
     write_log("[CORE] Starting Halmos Web Server v1.0.0-rc1...");
     log_memory_footprint("Initial Memory Footprint (VmRSS)", "VmRSS:");
    
-    // 17. RUN! Resepsionis Epoll Utama
+    // 18. RUN! Resepsionis Epoll Utama
     core_event_loop_run();
 
     // =======================================================
@@ -383,8 +387,11 @@ int main(int argc, char *argv[]) {
     fcgi_global_pool_destroy();
     write_log("[CORE] FastCGI Global Session Pool destroyed.");
 
-    core_queue_thread_worker_stop();
+    core_thread_pool_stop();
     write_log("[CORE] Core Worker thread pool joined & stopped.");
+
+    core_queue_destroy();
+    write_log("[CORE] Core Queue stopped.");
 
     // 3. Hentikan Core Network Event Loop & Worker Pool Utama
     core_event_loop_destroy();

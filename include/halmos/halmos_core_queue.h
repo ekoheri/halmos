@@ -35,9 +35,15 @@ typedef struct {
 } TaskQueue;
 
 // --- PROTOTIPE FUNGSI ---
-void core_queue_thread_worker_start(void);
+
+// Inisialisasi & Penghancuran Antrean (Public)
+void core_queue_init(void);
+void core_queue_destroy(void);
+
+// Operasi Dasar Antrean
+//void core_queue_thread_worker_start(void);
 int core_queue_push(TaskQueue *q, halmos_event_t event_item);
 int core_queue_pop(TaskQueue *q, halmos_event_t *out_event, struct timeval *arrival);
-void core_queue_thread_worker_stop(void);
+//void core_queue_thread_worker_stop(void);
 
 #endif

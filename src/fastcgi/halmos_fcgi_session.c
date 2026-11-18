@@ -22,7 +22,7 @@ static pthread_mutex_t g_pool_lock;
  * Menginisialisasi Global Session Pool sekali di awal server startup.
  */
 bool fcgi_global_pool_init(void) {
-    g_max_sessions = (g_fcgi_session_slots > 0) ? g_fcgi_session_slots : 64;
+    g_max_sessions = (adaptive_hw_aware.fcgi_session_slots > 0) ? adaptive_hw_aware.fcgi_session_slots : 64;
     
     // Alokasi memori tunggal untuk seluruh pool sesi
     g_session_pool = malloc(sizeof(FCGI_Session) * g_max_sessions);
