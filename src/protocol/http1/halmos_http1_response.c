@@ -37,8 +37,20 @@ void http1_response_send_headers(int client_fd, int status, const char *msg,
         "Content-Type: %s\r\n"
         "Content-Length: %zu\r\n"
         "Connection: %s\r\n"
-        "Server: Halmos-Savage/2.1\r\n\r\n",
+        "Server: Halmos/1.1.2\r\n\r\n",
         status, msg, mime, len, ka ? "keep-alive" : "close");
+
+    /*
+    // Ini ada tanbahan Alt-Svc: h3=\":443\"; ma=2592000\r\n\r\n yang artinya support HTTP3
+    int h_len = snprintf(header, sizeof(header),
+        "HTTP/1.1 %d %s\r\n"
+        "Content-Type: %s\r\n"
+        "Content-Length: %zu\r\n"
+        "Connection: %s\r\n"
+        "Server: Halmos/1.1.2\r\n"
+        "Alt-Svc: h3=\":443\"; ma=2592000\r\n\r\n", 
+        status, msg, mime, len, ka ? "keep-alive" : "close");
+    */    
     
     if (h_len > 0) {
         halmos_send_mem(client_fd, header, (size_t)h_len, is_tls);
@@ -72,8 +84,22 @@ void http1_response_send_dir_listing(int sock_client, const char *path, const ch
     }
 
     // Kirim Header Chunked/Close untuk Directory Listing Dynamic
-    const char *h = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\nServer: Halmos-Savage/2.1\r\n\r\n"
+    const char *h = "HTTP/1.1 200 OK\r\n"
+                    "Content-Type: text/html\r\n"
+                    "Connection: close\r\n"
+                    "Server: Halmos-Savage/2.1\r\n\r\n"
                     "<!DOCTYPE html><html><head><title>Index of ";
+    
+    /*
+    // Ada tambahan "Alt-Svc: h3=\":443\"; ma=2592000\r\n\r\n" artinya support HTTP3
+    const char *h = "HTTP/1.1 200 OK\r\n"
+                    "Content-Type: text/html\r\n"
+                    "Connection: close\r\n"
+                    "Server: Halmos-Savage/2.1\r\n"
+                    "Alt-Svc: h3=\":443\"; ma=2592000\r\n\r\n" 
+                    "<!DOCTYPE html><html><head><title>Index of ";
+    */                
+    
     halmos_send_mem(sock_client, h, strlen(h), is_tls);
     halmos_send_mem(sock_client, uri, strlen(uri), is_tls);
     

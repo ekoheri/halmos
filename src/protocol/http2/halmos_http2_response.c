@@ -82,6 +82,27 @@ void http2_response_send_header(HTTP2Session *session, HTTP2Stream *stream, int 
     memcpy(&hpack_buf[pos], mime_to_use, mlen);
     pos += mlen;
 
+    /*
+    // === TAMBAHAN ALT-SVC untuk mendukung HTTP/3 ===
+    const char *alt_svc_key = "alt-svc";
+    const char *alt_svc_val = "h3=\":443\"; ma=2592000";
+    size_t ak_len = strlen(alt_svc_key);
+    size_t av_len = strlen(alt_svc_val);
+
+    // 0x00 = Literal Header Field without Indexing - New Name
+    hpack_buf[pos++] = 0x00; 
+    
+    // Panjang nama header (alt-svc = 7 bytes)
+    hpack_buf[pos++] = (unsigned char)ak_len;
+    memcpy(hpack_buf + pos, alt_svc_key, ak_len);
+    pos += (int)ak_len;
+
+    // Panjang nilai header
+    hpack_buf[pos++] = (unsigned char)av_len;
+    memcpy(hpack_buf + pos, alt_svc_val, av_len);
+    pos += (int)av_len;
+    */
+
     //fprintf(stderr, "[H2-HEADER][DEBUG] Stream %u: Sending status %d header frame (%d bytes, MIME: %s)\n", 
     //        stream->stream_id, status_code, pos, mime_to_use);
 
@@ -158,6 +179,15 @@ void http2_response_send_complex_header(HTTP2Session *session, HTTP2Stream *stre
     int final_status = 200;
     bool has_location = false;
 
+    /*
+    // --- DEKLARASI VARIABEL ALT-SVC UNTUK MENSUPPORT HTTP/3 ---
+    const char *alt_svc_key = "alt-svc";
+    const char *alt_svc_val = "h3=\":443\"; ma=2592000";
+    size_t ak_len = strlen(alt_svc_key);
+    size_t av_len = strlen(alt_svc_val);
+    // -----------------------------------------------------
+    */
+
     // 1. DETEKSI HEADER "Status:"
     char *status_ptr = strcasestr(raw_headers, "Status:");
     if (status_ptr) {
@@ -203,7 +233,25 @@ void http2_response_send_complex_header(HTTP2Session *session, HTTP2Stream *stre
         }
     }
 
-    // 5. PARSING BARIS DEMI BARIS HEADER DARI FASTCGI
+    /* 
+    // 5. header untuk HTTP/3
+    if ((size_t)pos + ak_len + av_len + 16 > buf_capacity) {
+        buf_capacity += 128;
+        unsigned char *new_buf = (unsigned char *)realloc(hpack_buf, buf_capacity);
+        if (new_buf) hpack_buf = new_buf;
+    }
+
+    hpack_buf[pos++] = 0x00; // Literal without indexing - New Name
+    hpack_buf[pos++] = (unsigned char)ak_len;
+    memcpy(hpack_buf + pos, alt_svc_key, ak_len);
+    pos += (int)ak_len;
+
+    hpack_buf[pos++] = (unsigned char)av_len;
+    memcpy(hpack_buf + pos, alt_svc_val, av_len);
+    pos += (int)av_len;
+    */
+
+    // 6. PARSING BARIS DEMI BARIS HEADER DARI FASTCGI
     char *saveptr;
     char *headers_copy = strdup(raw_headers);
     if (!headers_copy) {

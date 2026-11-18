@@ -57,10 +57,12 @@
 #include "halmos_core_thread_pool.h"
 #include "halmos_sec_traffic.h"
 #include "halmos_sec_tls.h"
+#include "halmos_sec_quic_tls.h"
 #include "halmos_fcgi_upstream.h"
 #include "halmos_fcgi_event_loop.h"
 #include "halmos_fcgi_queue.h"
 #include "halmos_fcgi_thread_pool.h"
+#include "halmos_core_quic_event_loop.h"
 #include "halmos_http_route.h"
 #include "halmos_http_vhost.h"
 #include "halmos_ws_system.h"
@@ -258,6 +260,12 @@ int main(int argc, char *argv[]) {
             stop_thread_logger();
             return EXIT_FAILURE;
         }
+
+        if (quic_ssl_init() < 0) {
+            fprintf(stderr, "[ERROR] Gagal menginisialisasi QUIC TLS Engine\n");
+            stop_thread_logger();
+            return EXIT_FAILURE;
+        }
         // Mapping FD ke SSL (Ukuran adaptive_hw_aware.core_queue_capacity + buffer aman)
         ssl_init_mapping(adaptive_hw_aware.core_queue_capacity + 2000); 
         write_log("[CORE] TLS Engine & Mapping ready.");
@@ -334,6 +342,13 @@ int main(int argc, char *argv[]) {
     }
     write_log("[CORE] Core Network & Epoll Event Loop started.");
 
+    if (!core_quic_event_loop_start()) {
+        fprintf(stderr, "[FATAL] Failed to start QUIC event loop thread.\n");
+        stop_thread_logger();
+        return EXIT_FAILURE;
+    }
+    write_log("[CORE] QUIC Background Event Loop started on UDP port 4433.");
+
     // 17. Inisialisasi virtual host inotify
     // === TAMBAHKAN INI DI SINI ===
     // Karena epoll_fd sudah tercipta di dalam core_event_loop_start(), 
@@ -396,9 +411,15 @@ int main(int argc, char *argv[]) {
     // 3. Hentikan Core Network Event Loop & Worker Pool Utama
     core_event_loop_destroy();
 
+    core_quic_event_loop_stop();
+    write_log("[CORE] QUIC Background Event Loop stopped & joined.");
+
     // 4. Bersihkan TLS & Connection Table
     if (config.tls_enabled) {
         ssl_cleanup();
+
+        quic_ssl_cleanup();
+
         write_log("[CORE] TLS Resources cleaned up.");
     }
    
