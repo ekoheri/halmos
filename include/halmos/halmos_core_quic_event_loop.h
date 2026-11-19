@@ -16,4 +16,6 @@ bool core_quic_event_loop_start(void);
  */
 void core_quic_event_loop_stop(void);
 
+int core_quic_event_loop_get_server_fd(void);
+
 #endif /* CORE_QUIC_EVENT_LOOP_H */

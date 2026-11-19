@@ -63,6 +63,8 @@
 #include "halmos_fcgi_queue.h"
 #include "halmos_fcgi_thread_pool.h"
 #include "halmos_core_quic_event_loop.h"
+#include "halmos_core_quic_queue.h"
+#include "halmos_core_quic_thread_pool.h"
 #include "halmos_http_route.h"
 #include "halmos_http_vhost.h"
 #include "halmos_ws_system.h"
@@ -215,9 +217,6 @@ int main(int argc, char *argv[]) {
             printf("\nConfiguration test SUCCESSFUL.\n");
             printf("Please adjust the %s configuration before running the web server.\n", config.php_fpm_config_path);
             return EXIT_SUCCESS;
-        } else if (strcmp(argv[1], "-v") == 0 || strcmp(argv[1], "--version") == 0) {
-            printf("%s v%s\n", HALMOS_NAME, HALMOS_VERSION);
-            return EXIT_SUCCESS;
         } else {
             printf("Unknown command. Use '-h' or '--help' for available options.\n");
             return EXIT_SUCCESS;
@@ -227,7 +226,7 @@ int main(int argc, char *argv[]) {
     setup_signals();
 
     // 1. Load Konfigurasi (Log ke stderr jika gagal sebelum logger aktif)
-    if(core_config_load(HALMOS_CONFIG_PATH) != 0){
+    if (core_config_load(HALMOS_CONFIG_PATH) != 0) {
         return EXIT_FAILURE;
     }
 
@@ -237,7 +236,6 @@ int main(int argc, char *argv[]) {
 
     // 3. Hitung Parameter Hardware & OS Limit
     core_adaptive_hw_aware_init(0);
-
 
     if (!core_adaptive_runtime_init()) {
         fprintf(stderr, "[FATAL] Failed to initialize runtime self-tuning adaptive engine.\n");
@@ -253,9 +251,9 @@ int main(int argc, char *argv[]) {
         return EXIT_FAILURE;
     }
 
-    // 5. Inisialisasi Layanan SSL
+    // 5. Inisialisasi Layanan SSL & Sub-sistem QUIC
     if (config.tls_enabled) {
-        if(ssl_init() != 0) {
+        if (ssl_init() != 0) {
             fprintf(stderr, "[FATAL] Failed to initialize SSL Engine.\n");
             stop_thread_logger();
             return EXIT_FAILURE;
@@ -263,14 +261,28 @@ int main(int argc, char *argv[]) {
 
         if (quic_ssl_init() < 0) {
             fprintf(stderr, "[ERROR] Gagal menginisialisasi QUIC TLS Engine\n");
+            ssl_cleanup();
             stop_thread_logger();
             return EXIT_FAILURE;
         }
+
+        if (core_quic_queue_init() != 0) {
+            fprintf(stderr, "[FATAL] Failed to initialize QUIC Task Queue.\n");
+            quic_ssl_cleanup();
+            ssl_cleanup();
+            stop_thread_logger();
+            return EXIT_FAILURE;
+        }
+        write_log("[CORE] QUIC Task Queue initialized.");
+
+        core_quic_thread_pool_start();
+        write_log("[CORE] QUIC Worker Thread Pool started.");
+
         // Mapping FD ke SSL (Ukuran adaptive_hw_aware.core_queue_capacity + buffer aman)
-        ssl_init_mapping(adaptive_hw_aware.core_queue_capacity + 2000); 
+        ssl_init_mapping(adaptive_hw_aware.core_queue_capacity + 2000);
         write_log("[CORE] TLS Engine & Mapping ready.");
     }
-    
+
     // 6. Inisialisasi Virtual Host
     http_vhost_init_all();
     write_log("[CORE] Virtual Host ready.");
@@ -279,7 +291,7 @@ int main(int argc, char *argv[]) {
     halmos_ws_system_init();
     write_log("[CORE] WebSocket Registry & Subsystems ready.");
 
-    // 8. Inisialisasi Antrean (Dapur) 
+    // 8. Inisialisasi Antrean (Dapur)
     core_queue_init();
     write_log("[CORE] Core Queue started.");
 
@@ -289,11 +301,11 @@ int main(int argc, char *argv[]) {
     write_log("[CORE] Core Worker thread pool started dynamically.");
 
     // 10. Inisialisasi janitor jika fungsi rate limited diaktifkan
-    if(config.rate_limit_enabled == true) {
+    if (config.rate_limit_enabled == true) {
         sec_traffic_start_janitor();
-        write_log("[SEC] Security Janitor thread started.");    
+        write_log("[SEC] Security Janitor thread started.");
     }
-    
+
     // 11. Start upstream untuk koneksi ke backend
     if (!fcgi_upstream_start()) {
         fprintf(stderr, "Failed to create upstream backend or connect to backend socket!\n");
@@ -333,7 +345,7 @@ int main(int argc, char *argv[]) {
         return 1;
     }
     write_log("[CORE] FastCGI Worker Pool started.");
-    
+
     // 16. Inisialisasi Network & Epoll di core
     if (core_event_loop_start() != 0) {
         fprintf(stderr, "[FATAL] Failed to start event loop.\n");
@@ -342,36 +354,41 @@ int main(int argc, char *argv[]) {
     }
     write_log("[CORE] Core Network & Epoll Event Loop started.");
 
-    if (!core_quic_event_loop_start()) {
-        fprintf(stderr, "[FATAL] Failed to start QUIC event loop thread.\n");
-        stop_thread_logger();
-        return EXIT_FAILURE;
+    if (config.tls_enabled) {
+        if (!core_quic_event_loop_start()) {
+            fprintf(stderr, "[FATAL] Failed to start QUIC event loop thread.\n");
+            core_quic_queue_stop();
+            core_quic_thread_pool_stop();
+            core_quic_queue_destroy();
+            quic_ssl_cleanup();
+            ssl_cleanup();
+            stop_thread_logger();
+            return EXIT_FAILURE;
+        }
+        write_log("[CORE] QUIC Background Event Loop started.");
     }
-    write_log("[CORE] QUIC Background Event Loop started on UDP port 4433.");
 
     // 17. Inisialisasi virtual host inotify
-    // === TAMBAHKAN INI DI SINI ===
-    // Karena epoll_fd sudah tercipta di dalam core_event_loop_start(), 
+    // Karena epoll_fd sudah tercipta di dalam core_event_loop_start(),
     // kita bisa langsung mendaftarkan inotify vhost ke epoll utama.
-    // (Asumsikan epoll_fd bisa diakses secara global atau diekspos via getter)
-    extern int epoll_fd; // Jika epoll_fd dideklarasikan global di core event loop
+    extern int epoll_fd;
     http_vhost_init_inotify(epoll_fd);
     write_log("[CORE] Virtual Host Inotify watcher registered to epoll.");
-    
+
     write_log("[CORE] Starting Halmos Web Server v1.0.0-rc1...");
     log_memory_footprint("Initial Memory Footprint (VmRSS)", "VmRSS:");
-   
+
     // 18. RUN! Resepsionis Epoll Utama
     core_event_loop_run();
 
     // =======================================================
     // --- GRACEFUL SHUTDOWN CLEANUP SEQUENCE ---
     // =======================================================
-    
+
     log_memory_footprint("Peak Memory Footprint (VmHWM)", "VmHWM:");
     write_log("[CORE] Shutdown signal caught. Cleaning up resources...");
 
-    core_event_loop_stop(); 
+    core_event_loop_stop();
     write_log("[CORE] Core Network Event Loop stopped.");
 
     // 1. Hentikan background/maintenance thread mandiri terlebih dahulu
@@ -408,28 +425,33 @@ int main(int argc, char *argv[]) {
     core_queue_destroy();
     write_log("[CORE] Core Queue stopped.");
 
-    // 3. Hentikan Core Network Event Loop & Worker Pool Utama
+    // 3. Hentikan Core Network Event Loop
     core_event_loop_destroy();
 
-    core_quic_event_loop_stop();
-    write_log("[CORE] QUIC Background Event Loop stopped & joined.");
-
-    // 4. Bersihkan TLS & Connection Table
+    // 4. Hentikan QUIC & Bersihkan TLS Resources
     if (config.tls_enabled) {
+        core_quic_event_loop_stop();
+        write_log("[CORE] QUIC Background Event Loop stopped & joined.");
+
+        core_quic_queue_stop();
+        core_quic_thread_pool_stop();
+        write_log("[CORE] QUIC Worker Thread Pool stopped.");
+
+        core_quic_queue_destroy();
+        write_log("[CORE] QUIC Task Queue destroyed.");
+
         ssl_cleanup();
-
         quic_ssl_cleanup();
-
         write_log("[CORE] TLS Resources cleaned up.");
     }
-   
+
     core_conn_t_destroy();
     write_log("[CORE] Connection Table destroyed.");
 
     write_log("[CORE] %s shutdown complete. Bye!", HALMOS_NAME);
-    
+
     // 5. Terakhir: Matikan logger
     stop_thread_logger();
-    
+
     return EXIT_SUCCESS;
 }

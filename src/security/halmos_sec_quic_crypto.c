@@ -158,8 +158,7 @@ int quic_hkdf_expand_label_sha256(const unsigned char *secret, const char *label
     unsigned char hkdf_label[512];
     size_t label_len = strlen(label);
     size_t full_label_len = 6 + label_len; // "tls13 " adalah 6 byte + panjang label
-    size_t total_len = 2 + 1 + full_label_len + 1 + hash_len;
-
+    
     size_t pos = 0;
     // Length (2 bytes, network byte order)
     hkdf_label[pos++] = (unsigned char)(out_len >> 8);
@@ -199,27 +198,61 @@ int quic_hkdf_expand_label_sha256(const unsigned char *secret, const char *label
     return ret;
 }
 
-int quic_unprotect_header(unsigned char *packet, size_t packet_len, 
-                          size_t pn_offset, const unsigned char *hp_key) {
+static const EVP_CIPHER *quic_hp_cipher_from_key_len(size_t key_len) {
+    if (key_len == 32) {
+        return EVP_aes_256_ecb();
+    }
+    if (key_len == 16) {
+        return EVP_aes_128_ecb();
+    }
+    return NULL;
+}
+
+static const EVP_CIPHER *quic_aead_cipher_from_key_len(size_t key_len) {
+    if (key_len == 32) {
+        return EVP_aes_256_gcm();
+    }
+    if (key_len == 16) {
+        return EVP_aes_128_gcm();
+    }
+    return NULL;
+}
+
+int quic_unprotect_header(unsigned char *packet, size_t packet_len,
+                          size_t pn_offset, const unsigned char *hp_key,
+                          size_t key_len) {
+    if (!packet || !hp_key) {
+        return 0;
+    }
+
+    const EVP_CIPHER *hp_cipher = quic_hp_cipher_from_key_len(key_len);
+    if (!hp_cipher) {
+        fprintf(stderr, "[HP DEBUG ERROR] key_len tidak didukung: %zu\n", key_len);
+        return 0;
+    }
+
     EVP_CIPHER_CTX *ctx = NULL;
     int outlen = 0;
     unsigned char sample[16];
-    unsigned char mask[16]; // PERBAIKAN KRITIS: Diperbesar jadi 16 byte penuh untuk mencegah stack corruption dari AES-ECB
+    unsigned char mask[16];
     uint8_t first_byte_mask = 0;
     int ret = 0;
 
     size_t sample_offset = pn_offset + 4;
     if (sample_offset + 16 > packet_len) {
-        fprintf(stderr, "[HP DEBUG ERROR] Buffer tidak cukup untuk sampel! sample_offset=%zu, packet_len=%zu\n", sample_offset, packet_len);
+        fprintf(stderr, "[HP DEBUG ERROR] Buffer tidak cukup untuk sampel! sample_offset=%zu, packet_len=%zu\n",
+                sample_offset, packet_len);
         return 0;
     }
 
     memcpy(sample, packet + sample_offset, 16);
 
     ctx = EVP_CIPHER_CTX_new();
-    if (!ctx) goto cleanup;
+    if (!ctx) {
+        goto cleanup;
+    }
 
-    if (!EVP_EncryptInit_ex(ctx, EVP_aes_128_ecb(), NULL, hp_key, NULL)) {
+    if (!EVP_EncryptInit_ex(ctx, hp_cipher, NULL, hp_key, NULL)) {
         goto cleanup;
     }
     EVP_CIPHER_CTX_set_padding(ctx, 0);
@@ -237,6 +270,9 @@ int quic_unprotect_header(unsigned char *packet, size_t packet_len,
     }
 
     size_t pn_length = (packet[0] & 0x03) + 1;
+    if (pn_offset + pn_length > packet_len) {
+        goto cleanup;
+    }
 
     for (size_t i = 0; i < pn_length; i++) {
         packet[pn_offset + i] ^= mask[1 + i];
@@ -245,15 +281,31 @@ int quic_unprotect_header(unsigned char *packet, size_t packet_len,
     ret = 1;
 
 cleanup:
-    if (ctx) EVP_CIPHER_CTX_free(ctx);
+    if (ctx) {
+        EVP_CIPHER_CTX_free(ctx);
+    }
     return ret;
 }
 
 int quic_decrypt_payload(const unsigned char *ciphertext_with_tag, size_t ciphertext_with_tag_len,
                          const unsigned char *aad, size_t aad_len,
-                         const unsigned char *key, const unsigned char *iv,
-                         uint64_t packet_number,
+                         const unsigned char *key, size_t key_len,
+                         const unsigned char *iv, uint64_t packet_number,
                          unsigned char *out_plaintext, size_t *out_plaintext_len) {
+    if (!ciphertext_with_tag || !key || !iv || !out_plaintext || !out_plaintext_len) {
+        return 0;
+    }
+
+    const EVP_CIPHER *aead_cipher = quic_aead_cipher_from_key_len(key_len);
+    if (!aead_cipher) {
+        fprintf(stderr, "[AEAD DEBUG ERROR] key_len tidak didukung: %zu\n", key_len);
+        return 0;
+    }
+
+    if (ciphertext_with_tag_len < 16) {
+        return 0;
+    }
+
     EVP_CIPHER_CTX *ctx = NULL;
     int len = 0;
     int plaintext_len = 0;
@@ -265,19 +317,23 @@ int quic_decrypt_payload(const unsigned char *ciphertext_with_tag, size_t cipher
         nonce[11 - i] ^= (unsigned char)(packet_number >> (8 * i));
     }
 
-    if (ciphertext_with_tag_len < 16) {
-        return 0;
-    }
-
     size_t actual_ct_len = ciphertext_with_tag_len - 16;
     const unsigned char *tag = ciphertext_with_tag + actual_ct_len;
 
     ctx = EVP_CIPHER_CTX_new();
-    if (!ctx) goto cleanup;
+    if (!ctx) {
+        goto cleanup;
+    }
 
-    if (!EVP_DecryptInit_ex(ctx, EVP_aes_128_gcm(), NULL, NULL, NULL)) goto cleanup;
-    if (!EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, 12, NULL)) goto cleanup;
-    if (!EVP_DecryptInit_ex(ctx, NULL, NULL, key, nonce)) goto cleanup;
+    if (!EVP_DecryptInit_ex(ctx, aead_cipher, NULL, NULL, NULL)) {
+        goto cleanup;
+    }
+    if (!EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, 12, NULL)) {
+        goto cleanup;
+    }
+    if (!EVP_DecryptInit_ex(ctx, NULL, NULL, key, nonce)) {
+        goto cleanup;
+    }
 
     if (!EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, 16, (void *)tag)) {
         goto cleanup;
@@ -289,10 +345,12 @@ int quic_decrypt_payload(const unsigned char *ciphertext_with_tag, size_t cipher
         }
     }
 
-    if (!EVP_DecryptUpdate(ctx, out_plaintext, &len, ciphertext_with_tag, (int)actual_ct_len)) {
-        goto cleanup;
+    if (actual_ct_len > 0) {
+        if (!EVP_DecryptUpdate(ctx, out_plaintext, &len, ciphertext_with_tag, (int)actual_ct_len)) {
+            goto cleanup;
+        }
+        plaintext_len = len;
     }
-    plaintext_len = len;
 
     if (EVP_DecryptFinal_ex(ctx, out_plaintext + plaintext_len, &len) <= 0) {
         goto cleanup;
@@ -303,8 +361,27 @@ int quic_decrypt_payload(const unsigned char *ciphertext_with_tag, size_t cipher
     ret = 1;
 
 cleanup:
-    if (ctx) EVP_CIPHER_CTX_free(ctx);
+    if (ctx) {
+        EVP_CIPHER_CTX_free(ctx);
+    }
     return ret;
+}
+
+void quic_conn_set_server_scid(
+    QuicConnection *conn,
+    const unsigned char *scid,
+    size_t scid_len
+) {
+    if (!conn) {
+        return;
+    }
+    if (scid && scid_len > 0 && scid_len <= sizeof(conn->server_scid)) {
+        memcpy(conn->server_scid, scid, scid_len);
+        conn->server_scid_len = scid_len;
+    } else {
+        conn->server_scid_len = 0;
+        memset(conn->server_scid, 0, sizeof(conn->server_scid));
+    }
 }
 
 size_t quic_build_server_initial_payload(
@@ -315,8 +392,8 @@ size_t quic_build_server_initial_payload(
     (void)client_largest_acked;
     size_t pos = 0;
 
-    out_payload[pos++] = 0x06; 
-    out_payload[pos++] = 0x00; 
+    out_payload[pos++] = 0x06;
+    out_payload[pos++] = 0x00;
 
     if (tls_data_len < 64) {
         out_payload[pos++] = (unsigned char)tls_data_len;
@@ -337,42 +414,83 @@ size_t quic_build_server_initial_payload(
 }
 
 int quic_encrypt_server_initial(
+    QuicConnection *conn,
     const unsigned char *plaintext, size_t plaintext_len,
-    const unsigned char *dcid, size_t dcid_len,   
-    const unsigned char *scid, size_t scid_len,   
+    const unsigned char *out_dcid, size_t out_dcid_len,
+    const unsigned char *out_scid, size_t out_scid_len,
     uint64_t packet_number,
     const unsigned char *server_key, const unsigned char *server_iv, const unsigned char *server_hp,
     unsigned char *out_packet, size_t *out_packet_len
 ) {
-    unsigned char work_buf[65535];
+    if (!plaintext || plaintext_len == 0 || !out_packet || !out_packet_len) {
+        fprintf(stderr, "[QUIC INITIAL DBG] Argumen tidak valid (plaintext_len=%zu)\n", plaintext_len);
+        return 0;
+    }
+
+    fprintf(stderr, "[QUIC INITIAL DBG] conn=%p, pn=%llu, dcid_len=%zu, scid_len=%zu\n",
+            (void *)conn,
+            (unsigned long long)packet_number,
+            out_dcid_len,
+            out_scid_len);
+
+    if (out_scid && out_scid_len > 0) {
+        fprintf(stderr, "[QUIC INITIAL DBG] out_scid hex=");
+        for (size_t i = 0; i < out_scid_len; i++) {
+            fprintf(stderr, "%02x%s", out_scid[i], (i + 1 < out_scid_len) ? " " : "");
+        }
+        fprintf(stderr, "\n");
+    } else {
+        fprintf(stderr, "[QUIC INITIAL DBG] PERINGATAN: out_scid kosong/NULL (scid_len=%zu)\n", out_scid_len);
+    }
+
+    if (conn) {
+        quic_conn_set_server_scid(conn, out_scid, out_scid_len);
+        fprintf(stderr, "[QUIC INITIAL DBG] Tersimpan di conn->server_scid_len=%zu\n", conn->server_scid_len);
+    } else {
+        fprintf(stderr, "[QUIC INITIAL DBG] PERINGATAN: conn == NULL, SCID tidak tersimpan ke QuicConnection\n");
+    }
+
+    unsigned char work_buf[4096];
     size_t pos = 0;
 
-    work_buf[pos++] = 0xC0 | 0x00;
+    // First byte: Long Header (0x80) | Fixed bit (0x40) | Initial (0x00) | PN len-1 (0x00 -> 1 byte)
+    work_buf[pos++] = 0xC0;
+
+    // Version: QUIC v1 (0x00000001)
     work_buf[pos++] = 0x00;
     work_buf[pos++] = 0x00;
     work_buf[pos++] = 0x00;
     work_buf[pos++] = 0x01;
 
-    work_buf[pos++] = (unsigned char)scid_len;
-    memcpy(work_buf + pos, scid, scid_len);
-    pos += scid_len;
+    // Destination Connection ID (DCID) dari paket Initial server = SCID klien
+    work_buf[pos++] = (unsigned char)out_dcid_len;
+    if (out_dcid_len > 0 && out_dcid) {
+        memcpy(work_buf + pos, out_dcid, out_dcid_len);
+        pos += out_dcid_len;
+    }
 
-    work_buf[pos++] = (unsigned char)dcid_len;
-    memcpy(work_buf + pos, dcid, dcid_len);
-    pos += dcid_len;
+    // Source Connection ID (SCID) dari paket Initial server
+    work_buf[pos++] = (unsigned char)out_scid_len;
+    if (out_scid_len > 0 && out_scid) {
+        memcpy(work_buf + pos, out_scid, out_scid_len);
+        pos += out_scid_len;
+    }
 
+    // Token Length = 0 (Initial dari server tidak membawa token)
     work_buf[pos++] = 0x00;
 
     size_t est_header_len = pos;
+    size_t pn_len = 1;
     size_t tag_len = 16;
     size_t target_total_len = 1200;
-    
+
+    // Padding di dalam payload memakai QUIC PADDING frame (0x00) agar ukuran datagram >= 1200 byte
     size_t final_plaintext_len = plaintext_len;
-    unsigned char padded_plaintext[65535];
+    unsigned char padded_plaintext[4096];
     const unsigned char *final_plaintext = plaintext;
 
-    size_t current_est = est_header_len + 2 + 1 + plaintext_len + tag_len;
-    if (current_est < target_total_len) {
+    size_t current_est = est_header_len + 2 + pn_len + plaintext_len + tag_len;
+    if (current_est < target_total_len && (plaintext_len + (target_total_len - current_est)) < sizeof(padded_plaintext)) {
         size_t padding_needed = target_total_len - current_est;
         memcpy(padded_plaintext, plaintext, plaintext_len);
         memset(padded_plaintext + plaintext_len, 0x00, padding_needed);
@@ -380,21 +498,27 @@ int quic_encrypt_server_initial(
         final_plaintext_len = plaintext_len + padding_needed;
     }
 
-    size_t remaining_len = 1 + final_plaintext_len + tag_len;
+    size_t remaining_len = pn_len + final_plaintext_len + tag_len;
+    if (remaining_len >= 16384) {
+        return 0;
+    }
 
+    // Length field (2-byte QUIC varint)
     work_buf[pos++] = (unsigned char)(0x40 | (remaining_len >> 8));
     work_buf[pos++] = (unsigned char)(remaining_len & 0xFF);
 
+    // Packet Number (1 byte)
     size_t pn_offset = pos;
     work_buf[pos++] = (unsigned char)(packet_number & 0xFF);
 
     size_t aad_len = pos;
     const unsigned char *aad = work_buf;
 
+    // Nonce = server_iv XOR packet_number (big-endian di 8 byte terakhir)
     unsigned char nonce[12];
     memcpy(nonce, server_iv, 12);
     for (size_t i = 0; i < 8; i++) {
-        nonce[11 - i] ^= (unsigned char)(packet_number >> (8 * i));
+        nonce[11 - i] ^= (unsigned char)((packet_number >> (8 * i)) & 0xFF);
     }
 
     EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
@@ -412,7 +536,7 @@ int quic_encrypt_server_initial(
         return 0;
     }
     ciphertext_len = len;
-    pos += ciphertext_len;
+    pos += (size_t)ciphertext_len;
 
     unsigned char tag[16];
     if (!EVP_EncryptFinal_ex(ctx, ciphertext_dest + ciphertext_len, &len) ||
@@ -424,11 +548,15 @@ int quic_encrypt_server_initial(
     pos += 16;
     EVP_CIPHER_CTX_free(ctx);
 
+    // Header Protection sample diambil mulai pn_offset + 4 (untuk PN 1 byte)
     size_t sample_offset = pn_offset + 4;
+    if (sample_offset + 16 > pos) {
+        return 0;
+    }
     unsigned char sample[16];
     memcpy(sample, work_buf + sample_offset, 16);
 
-    unsigned char mask[16]; // PERBAIKAN KRITIS: Diperbesar menjadi 16 byte penuh
+    unsigned char mask[16];
     int outlen = 0;
     EVP_CIPHER_CTX *hp_ctx = EVP_CIPHER_CTX_new();
     if (!hp_ctx) return 0;
@@ -441,11 +569,19 @@ int quic_encrypt_server_initial(
     EVP_EncryptUpdate(hp_ctx, mask, &outlen, sample, 16);
     EVP_CIPHER_CTX_free(hp_ctx);
 
+    // Masking bit pada Long Header Initial: 4 bit terbawah first byte (0x0f) dan PN byte
     work_buf[0] ^= (mask[0] & 0x0f);
     work_buf[pn_offset] ^= mask[1];
 
     memcpy(out_packet, work_buf, pos);
     *out_packet_len = pos;
+
+    size_t dump_len = (pos < 48) ? pos : 48;
+    fprintf(stderr, "[QUIC INITIAL DBG] out_packet len=%zu, first %zu bytes hex=", pos, dump_len);
+    for (size_t i = 0; i < dump_len; i++) {
+        fprintf(stderr, "%02x%s", out_packet[i], (i + 1 < dump_len) ? " " : "");
+    }
+    fprintf(stderr, "\n");
 
     return 1;
 }
@@ -472,7 +608,7 @@ int quic_handle_decryption(const unsigned char *buffer, size_t real_packet_len, 
     if (real_packet_len > sizeof(work_buffer)) return 0;
     memcpy(work_buffer, buffer, real_packet_len);
 
-    if (!quic_unprotect_header(work_buffer, real_packet_len, pn_offset, client_hp)) {
+    if (!quic_unprotect_header(work_buffer, real_packet_len, pn_offset, client_hp, 16)) {
         return 0;
     }
 
@@ -488,31 +624,139 @@ int quic_handle_decryption(const unsigned char *buffer, size_t real_packet_len, 
     size_t ciphertext_len = real_packet_len - aad_len;
 
     return quic_decrypt_payload(ciphertext, ciphertext_len, aad, aad_len,
-                                client_key, client_iv, packet_number,
+                                client_key, 16, client_iv, packet_number,
                                 out_decrypted_payload, out_decrypted_len);
 }
 
-int quic_handle_handshake_decryption(const unsigned char *buffer, size_t real_packet_len, size_t pn_offset,
-                                     const unsigned char *client_hs_secret, // Diterima langsung dari hasil keylog/TLS engine
-                                     uint8_t *out_decrypted_payload, size_t *out_decrypted_len) {
-    unsigned char client_hs_key[16];
-    unsigned char client_hs_iv[12];
-    unsigned char client_hs_hp[16];
+static void quic_conn_get_cipher_params(const QuicConnection *conn,
+                                         size_t *out_key_len,
+                                         size_t *out_secret_len,
+                                         const char **out_md_name) {
+    size_t key_len = 16;
+    size_t secret_len = 32;
+    const char *md_name = "SHA256";
 
-    // Turunkan key, IV, dan HP khusus untuk QUIC Handshake menggunakan secret yang sah (SHA-384)
-    quic_hkdf_expand_label_sha384(client_hs_secret, "quic key", NULL, 0, client_hs_key, 16);
-    quic_hkdf_expand_label_sha384(client_hs_secret, "quic iv", NULL, 0, client_hs_iv, 12);
-    quic_hkdf_expand_label_sha384(client_hs_secret, "quic hp", NULL, 0, client_hs_hp, 16);
+    if (conn) {
+        if (conn->aead_key_len == 32 || conn->cipher_suite == QUIC_CIPHER_AES_256_GCM_SHA384) {
+            key_len = 32;
+            secret_len = 48;
+            md_name = "SHA384";
+        } else if (conn->aead_key_len == 16 || conn->cipher_suite == QUIC_CIPHER_AES_128_GCM_SHA256) {
+            key_len = 16;
+            secret_len = 32;
+            md_name = "SHA256";
+        }
+
+        if (conn->secret_len == 48 || conn->secret_len == 32) {
+            secret_len = conn->secret_len;
+            md_name = (secret_len == 48) ? "SHA384" : "SHA256";
+        }
+    }
+
+    if (out_key_len) *out_key_len = key_len;
+    if (out_secret_len) *out_secret_len = secret_len;
+    if (out_md_name) *out_md_name = md_name;
+}
+
+static int quic_hkdf_expand_label_with_md(const char *md_name,
+                                         const unsigned char *secret, size_t secret_len,
+                                         const char *label,
+                                         const unsigned char *context, size_t context_len,
+                                         unsigned char *out, size_t out_len) {
+    unsigned char info[256];
+    size_t label_len = strlen(label);
+    size_t info_len = 0;
+
+    if (!md_name || !secret || !label || !out || label_len + 6 > 255 || context_len > 255) {
+        return 0;
+    }
+
+    info[0] = (unsigned char)((out_len >> 8) & 0xFF);
+    info[1] = (unsigned char)(out_len & 0xFF);
+    info_len += 2;
+
+    info[2] = (unsigned char)(label_len + 6);
+    info_len += 1;
+
+    memcpy(info + info_len, "tls13 ", 6);
+    info_len += 6;
+    memcpy(info + info_len, label, label_len);
+    info_len += label_len;
+
+    info[info_len] = (unsigned char)context_len;
+    info_len += 1;
+    if (context_len > 0 && context) {
+        memcpy(info + info_len, context, context_len);
+        info_len += context_len;
+    }
+
+    EVP_KDF *kdf = EVP_KDF_fetch(NULL, "HKDF", NULL);
+    if (!kdf) return 0;
+
+    EVP_KDF_CTX *kctx = EVP_KDF_CTX_new(kdf);
+    int ret = 0;
+    if (kctx) {
+        int mode = EVP_KDF_HKDF_MODE_EXPAND_ONLY;
+        OSSL_PARAM params[5];
+        size_t idx = 0;
+
+        params[idx++] = OSSL_PARAM_construct_utf8_string("digest", (char *)md_name, 0);
+        params[idx++] = OSSL_PARAM_construct_int("mode", &mode);
+        params[idx++] = OSSL_PARAM_construct_octet_string("key", (void *)secret, secret_len);
+        params[idx++] = OSSL_PARAM_construct_octet_string("info", info, info_len);
+        params[idx] = OSSL_PARAM_construct_end();
+
+        if (EVP_KDF_derive(kctx, out, out_len, params) > 0) {
+            ret = 1;
+        }
+        EVP_KDF_CTX_free(kctx);
+    }
+
+    EVP_KDF_free(kdf);
+    return ret;
+}
+
+int quic_handle_handshake_decryption(const QuicConnection *conn,
+                                     const unsigned char *buffer, size_t real_packet_len, size_t pn_offset,
+                                     const unsigned char *client_hs_secret,
+                                     uint8_t *out_decrypted_payload, size_t *out_decrypted_len) {
+    if (!buffer || !client_hs_secret || !out_decrypted_payload || !out_decrypted_len) {
+        return 0;
+    }
+
+    size_t key_len = 16;
+    size_t secret_len = 32;
+    const char *md_name = "SHA256";
+    quic_conn_get_cipher_params(conn, &key_len, &secret_len, &md_name);
+
+    unsigned char client_hs_key[32];
+    unsigned char client_hs_iv[12];
+    unsigned char client_hs_hp[32];
+
+    if (!quic_hkdf_expand_label_with_md(md_name, client_hs_secret, secret_len,
+                                         "quic key", NULL, 0, client_hs_key, key_len) ||
+        !quic_hkdf_expand_label_with_md(md_name, client_hs_secret, secret_len,
+                                         "quic iv", NULL, 0, client_hs_iv, 12) ||
+        !quic_hkdf_expand_label_with_md(md_name, client_hs_secret, secret_len,
+                                         "quic hp", NULL, 0, client_hs_hp, key_len)) {
+        return 0;
+    }
 
     unsigned char work_buffer[65535];
-    if (real_packet_len > sizeof(work_buffer)) return 0;
+    if (real_packet_len > sizeof(work_buffer)) {
+        return 0;
+    }
     memcpy(work_buffer, buffer, real_packet_len);
 
-    if (!quic_unprotect_header(work_buffer, real_packet_len, pn_offset, client_hs_hp)) {
+    if (!quic_unprotect_header(work_buffer, real_packet_len, pn_offset, client_hs_hp, key_len)) {
         return 0;
     }
 
     size_t pn_len = (work_buffer[0] & 0x03) + 1;
+    if (pn_offset + pn_len > real_packet_len) {
+        return 0;
+    }
+
     uint64_t packet_number = 0;
     for (size_t j = 0; j < pn_len; j++) {
         packet_number = (packet_number << 8) | work_buffer[pn_offset + j];
@@ -524,52 +768,57 @@ int quic_handle_handshake_decryption(const unsigned char *buffer, size_t real_pa
     size_t ciphertext_len = real_packet_len - aad_len;
 
     return quic_decrypt_payload(ciphertext, ciphertext_len, aad, aad_len,
-                                client_hs_key, client_hs_iv, packet_number,
+                                client_hs_key, key_len, client_hs_iv, packet_number,
                                 out_decrypted_payload, out_decrypted_len);
 }
 
 int quic_encrypt_1rtt_packet(int sock_server, struct sockaddr_in *client_addr, socklen_t client_addr_len,
                              QuicConnection *conn, const unsigned char *payload, size_t payload_len) {
-    if (!conn->has_server_app_secret) {
+    if (!conn || !conn->has_server_app_secret) {
         fprintf(stderr, "[QUIC 1-RTT OUT ERROR] Server Application Traffic Secret belum tersedia!\n");
         return 0;
     }
 
-    // 1. Turunkan Kunci 1-RTT dari server_application_traffic_secret_0
-    unsigned char key[16], iv[12], hp[16];
-    // Menggunakan HMAC-SHA256 untuk TLS 1.3 key derivation di QUIC
-    quic_hkdf_expand_label_sha256(conn->server_application_traffic_secret_0, "quic key", NULL, 0, key, 16);
-    quic_hkdf_expand_label_sha256(conn->server_application_traffic_secret_0, "quic iv", NULL, 0, iv, 12);
-    quic_hkdf_expand_label_sha256(conn->server_application_traffic_secret_0, "quic hp", NULL, 0, hp, 16);
+    size_t key_len = 16;
+    size_t secret_len = 32;
+    const char *md_name = "SHA256";
+    quic_conn_get_cipher_params(conn, &key_len, &secret_len, &md_name);
+
+    unsigned char key[32], iv[12], hp[32];
+    if (!quic_hkdf_expand_label_with_md(md_name, conn->server_application_traffic_secret_0, secret_len,
+                                         "quic key", NULL, 0, key, key_len) ||
+        !quic_hkdf_expand_label_with_md(md_name, conn->server_application_traffic_secret_0, secret_len,
+                                         "quic iv", NULL, 0, iv, 12) ||
+        !quic_hkdf_expand_label_with_md(md_name, conn->server_application_traffic_secret_0, secret_len,
+                                         "quic hp", NULL, 0, hp, key_len)) {
+        return 0;
+    }
+
+    const EVP_CIPHER *aead_cipher = (key_len == 32) ? EVP_aes_256_gcm() : EVP_aes_128_gcm();
+    const EVP_CIPHER *hp_cipher = (key_len == 32) ? EVP_aes_256_ecb() : EVP_aes_128_ecb();
 
     unsigned char packet_out[4096];
     size_t pkt_pos = 0;
 
-    // 2. Susun Short Header (1-RTT Packet)
-    // Format: 0 1 r r r r r p (Bit 7 = 0, Bit 6 = 1 [Fixed Bit], Spin bit, Key Phase, Packet Number Length - 1)
-    // Menggunakan Packet Number Length 1 byte (PN Len = 0 -> mask & 0x03 = 0)
-    unsigned char first_byte = 0x40; // 01000000 (Short header, Fixed bit = 1)
-    packet_out[pkt_pos++] = first_byte;
+    /* Short Header (1-RTT Packet), PN length 1 byte */
+    packet_out[pkt_pos++] = 0x40;
 
-    // Destination Connection ID (DCID) milik klien
     memcpy(packet_out + pkt_pos, conn->dcid, conn->dcid_len);
     pkt_pos += conn->dcid_len;
 
     size_t pn_offset = pkt_pos;
-    // Placeholder untuk Packet Number (1 byte)
     packet_out[pkt_pos++] = (unsigned char)(conn->next_packet_number & 0xFF);
 
     size_t aad_len = pkt_pos;
     const unsigned char *aad = packet_out;
 
-    // 3. Bungkus payload ke dalam QUIC STREAM Frame (Type 0x08 = Stream Frame dengan len & off)
+    /* Bungkus payload ke dalam QUIC STREAM Frame (Type 0x08) */
     unsigned char quic_frame[4096];
     size_t qf_pos = 0;
-    quic_frame[qf_pos++] = 0x08; // Stream Frame Type (STREAM ID 0, dsb.)
-    quic_frame[qf_pos++] = 0x00; // Stream ID 0 (Varint 1 byte)
-    quic_frame[qf_pos++] = 0x00; // Offset 0 (Varint 1 byte)
-    
-    // Varint encoding untuk length payload
+    quic_frame[qf_pos++] = 0x08;
+    quic_frame[qf_pos++] = 0x00;
+    quic_frame[qf_pos++] = 0x00;
+
     if (payload_len < 64) {
         quic_frame[qf_pos++] = (unsigned char)payload_len;
     } else {
@@ -579,133 +828,160 @@ int quic_encrypt_1rtt_packet(int sock_server, struct sockaddr_in *client_addr, s
     memcpy(quic_frame + qf_pos, payload, payload_len);
     qf_pos += payload_len;
 
-    // 4. Hitung Nonce (IV XOR Packet Number)
     unsigned char nonce[12];
     memcpy(nonce, iv, 12);
     for (size_t k = 0; k < 8; k++) {
         nonce[11 - k] ^= (unsigned char)(conn->next_packet_number >> (8 * k));
     }
 
-    // 5. Enkripsi Payload dengan AES-128-GCM
     EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+    if (!ctx) return 0;
+
     int len = 0, ct_len = 0;
     unsigned char *ct_dest = packet_out + pkt_pos;
+    int ok = 0;
 
-    if (EVP_EncryptInit_ex(ctx, EVP_aes_128_gcm(), NULL, NULL, NULL) &&
+    if (EVP_EncryptInit_ex(ctx, aead_cipher, NULL, NULL, NULL) &&
         EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, 12, NULL) &&
         EVP_EncryptInit_ex(ctx, NULL, NULL, key, nonce) &&
         EVP_EncryptUpdate(ctx, NULL, &len, aad, (int)aad_len) &&
         EVP_EncryptUpdate(ctx, ct_dest, &len, quic_frame, (int)qf_pos)) {
-        
+
         ct_len = len;
-        pkt_pos += ct_len;
+        pkt_pos += (size_t)ct_len;
 
         unsigned char tag[16];
         if (EVP_EncryptFinal_ex(ctx, ct_dest + ct_len, &len) &&
             EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, 16, tag)) {
-            
+
             memcpy(ct_dest + ct_len, tag, 16);
             pkt_pos += 16;
 
-            // 6. Header Protection Masking (AES-ECB dengan kunci HP)
-            size_t sample_off = pn_offset + 4; // Sampel ciphertext setelah packet number
-            unsigned char sample[16];
-            memcpy(sample, packet_out + sample_off, 16);
+            size_t sample_off = pn_offset + 4;
+            if (sample_off + 16 <= pkt_pos) {
+                unsigned char sample[16];
+                memcpy(sample, packet_out + sample_off, 16);
 
-            unsigned char mask[16];
-            int outlen = 0;
-            EVP_CIPHER_CTX *hp_ctx = EVP_CIPHER_CTX_new();
-            if (hp_ctx) {
-                EVP_EncryptInit_ex(hp_ctx, EVP_aes_128_ecb(), NULL, hp, NULL);
-                EVP_CIPHER_CTX_set_padding(hp_ctx, 0);
-                EVP_EncryptUpdate(hp_ctx, mask, &outlen, sample, 16);
-                
-                // Terapkan mask ke byte pertama (mengambil 4 bit terbawah) dan packet number
-                packet_out[0] ^= (mask[0] & 0x0f);
-                packet_out[pn_offset] ^= mask[1];
-                EVP_CIPHER_CTX_free(hp_ctx);
+                unsigned char mask[16];
+                int outlen = 0;
+                EVP_CIPHER_CTX *hp_ctx = EVP_CIPHER_CTX_new();
+                if (hp_ctx) {
+                    if (EVP_EncryptInit_ex(hp_ctx, hp_cipher, NULL, hp, NULL)) {
+                        EVP_CIPHER_CTX_set_padding(hp_ctx, 0);
+                        EVP_EncryptUpdate(hp_ctx, mask, &outlen, sample, 16);
+                        packet_out[0] ^= (mask[0] & 0x0f);
+                        packet_out[pn_offset] ^= mask[1];
+                    }
+                    EVP_CIPHER_CTX_free(hp_ctx);
+                }
             }
 
-            // 7. Kirim paket 1-RTT ke klien via UDP
             sendto(sock_server, packet_out, pkt_pos, 0, (struct sockaddr *)client_addr, client_addr_len);
             conn->next_packet_number++;
-            fprintf(stderr, "[QUIC 1-RTT OUT] Sukses mengirim paket 1-RTT (%zu bytes)\n", pkt_pos);
+            fprintf(stderr, "[QUIC 1-RTT OUT] Sukses mengirim paket 1-RTT (%zu bytes, key_len=%zu)\n",
+                    pkt_pos, key_len);
+            ok = 1;
         }
     }
+
     EVP_CIPHER_CTX_free(ctx);
-    return 1;
+    return ok;
 }
 
-int quic_handle_1rtt_decryption(const unsigned char *packet, size_t packet_len, 
-                                  const unsigned char *app_secret, 
+int quic_handle_1rtt_decryption(const QuicConnection *conn,
+                                  const unsigned char *packet, size_t packet_len,
+                                  const unsigned char *app_secret,
                                   uint8_t dcid_len,
                                   uint8_t *decrypted_out, size_t *decrypted_len) {
-    // 1. Header Protection Unmasking pada Short Header
-    // Byte pertama dilindungi bit 0-4, Packet Number dimulai setelah DCID + Packet Number (1-4 bytes)
-    size_t pn_offset = 1 + dcid_len; // Estimasi awal posisi packet number
+    if (!packet || !app_secret || !decrypted_out || !decrypted_len) return 0;
+
+    size_t pn_offset = 1 + (size_t)dcid_len;
     if (packet_len < pn_offset + 4 + 16) return 0;
 
-    unsigned char hp_key[16], key[16], iv[12];
-    quic_hkdf_expand_label_sha384(app_secret, "quic hp", NULL, 0, hp_key, 16);
-    quic_hkdf_expand_label_sha384(app_secret, "quic key", NULL, 0, key, 16);
-    quic_hkdf_expand_label_sha384(app_secret, "quic iv", NULL, 0, iv, 12);
+    size_t key_len = 16;
+    size_t secret_len = 32;
+    const char *md_name = "SHA256";
+    quic_conn_get_cipher_params(conn, &key_len, &secret_len, &md_name);
 
-    // Ambil sample untuk HP mask
+    unsigned char hp_key[32], key[32], iv[12];
+    if (!quic_hkdf_expand_label_with_md(md_name, app_secret, secret_len,
+                                         "quic hp", NULL, 0, hp_key, key_len) ||
+        !quic_hkdf_expand_label_with_md(md_name, app_secret, secret_len,
+                                         "quic key", NULL, 0, key, key_len) ||
+        !quic_hkdf_expand_label_with_md(md_name, app_secret, secret_len,
+                                         "quic iv", NULL, 0, iv, 12)) {
+        return 0;
+    }
+
+    const EVP_CIPHER *hp_cipher = (key_len == 32) ? EVP_aes_256_ecb() : EVP_aes_128_ecb();
+    const EVP_CIPHER *aead_cipher = (key_len == 32) ? EVP_aes_256_gcm() : EVP_aes_128_gcm();
+
     unsigned char sample[16];
     memcpy(sample, packet + pn_offset + 4, 16);
 
     unsigned char mask[16];
     int outlen = 0;
     EVP_CIPHER_CTX *hp_ctx = EVP_CIPHER_CTX_new();
-    EVP_EncryptInit_ex(hp_ctx, EVP_aes_128_ecb(), NULL, hp_key, NULL);
+    if (!hp_ctx) return 0;
+
+    if (!EVP_EncryptInit_ex(hp_ctx, hp_cipher, NULL, hp_key, NULL)) {
+        EVP_CIPHER_CTX_free(hp_ctx);
+        return 0;
+    }
     EVP_CIPHER_CTX_set_padding(hp_ctx, 0);
     EVP_EncryptUpdate(hp_ctx, mask, &outlen, sample, 16);
     EVP_CIPHER_CTX_free(hp_ctx);
 
-    // Unmask byte pertama dan packet number
-    unsigned char unprotected_first_byte = packet[0] ^ (mask[0] & 0x1f);
+    unsigned char work_hdr[64];
+    size_t max_hdr = pn_offset + 4;
+    if (max_hdr > sizeof(work_hdr)) return 0;
+
+    unsigned char unprotected_first_byte = (unsigned char)(packet[0] ^ (mask[0] & 0x1f));
     int pn_length = (unprotected_first_byte & 0x03) + 1;
 
-    unsigned char unprotected_pn[4];
-    for (int i = 0; i < pn_length; i++) {
-        unprotected_pn[i] = packet[pn_offset + i] ^ mask[1 + i];
-    }
+    size_t aad_len = pn_offset + (size_t)pn_length;
+    if (aad_len > sizeof(work_hdr) || packet_len < aad_len + 16) return 0;
 
-    size_t ciphertext_offset = pn_offset + pn_length;
-    size_t ciphertext_len = packet_len - ciphertext_offset;
+    memcpy(work_hdr, packet, aad_len);
+    work_hdr[0] = unprotected_first_byte;
 
-    // 2. AES-GCM Decryption Payload
-    // Nonce = IV XOR Packet Number
-    unsigned char nonce[12];
-    memcpy(nonce, iv, 12);
     uint64_t pkt_num = 0;
     for (int i = 0; i < pn_length; i++) {
-        pkt_num = (pkt_num << 8) | unprotected_pn[i];
+        work_hdr[pn_offset + (size_t)i] ^= mask[1 + i];
+        pkt_num = (pkt_num << 8) | work_hdr[pn_offset + (size_t)i];
     }
+
+    size_t ct_with_tag_len = packet_len - aad_len;
+    size_t actual_ct_len = ct_with_tag_len - 16;
+    const unsigned char *ct_ptr = packet + aad_len;
+    const unsigned char *tag = packet + aad_len + actual_ct_len;
+
+    unsigned char nonce[12];
+    memcpy(nonce, iv, 12);
     for (size_t k = 0; k < 8; k++) {
         nonce[11 - k] ^= (unsigned char)(pkt_num >> (8 * k));
     }
 
-    // AAD adalah header paket yang tidak dienkripsi (dari byte 0 sampai ciphertext_offset)
-    const unsigned char *aad = packet;
-    size_t aad_len = ciphertext_offset;
-
     EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
-    int len = 0, plain_len = 0;
-    int success = 0;
+    if (!ctx) return 0;
 
-    if (EVP_DecryptInit_ex(ctx, EVP_aes_128_gcm(), NULL, NULL, NULL) &&
+    int len = 0, plain_len = 0, success = 0;
+
+    if (EVP_DecryptInit_ex(ctx, aead_cipher, NULL, NULL, NULL) &&
         EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, 12, NULL) &&
         EVP_DecryptInit_ex(ctx, NULL, NULL, key, nonce) &&
-        EVP_DecryptUpdate(ctx, NULL, &len, aad, (int)aad_len) &&
-        EVP_DecryptUpdate(ctx, decrypted_out, &len, packet + ciphertext_offset, (int)ciphertext_len)) {
-        
+        EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, 16, (void *)tag) &&
+        EVP_DecryptUpdate(ctx, NULL, &len, work_hdr, (int)aad_len) &&
+        EVP_DecryptUpdate(ctx, decrypted_out, &len, ct_ptr, (int)actual_ct_len)) {
+
         plain_len = len;
         if (EVP_DecryptFinal_ex(ctx, decrypted_out + plain_len, &len) > 0) {
-            *decrypted_len = plain_len + len;
+            *decrypted_len = (size_t)(plain_len + len);
             success = 1;
         }
     }
+
     EVP_CIPHER_CTX_free(ctx);
     return success;
 }
+

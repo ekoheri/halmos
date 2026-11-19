@@ -5,6 +5,7 @@
 #include "halmos_core_config.h"
 #include "halmos_core_adaptive.h"
 #include "halmos_core_queue.h"
+#include "halmos_core_quic_queue.h"
 
 #include <stdint.h>
 
@@ -23,5 +24,8 @@ extern int epoll_fd;
 
 // 5. Informasi menyimpan taskqueue
 extern TaskQueue global_queue;
+
+// 6. Informasi menyimpan quic taskqueue
+extern QuicTaskQueue quic_global_queue;
 
 #endif

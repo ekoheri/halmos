@@ -6,6 +6,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+void quic_conn_set_server_scid(QuicConnection *conn, const unsigned char *scid, size_t scid_len);
+
 int quic_derive_initial_secret(const unsigned char *dcid, size_t dcid_len, unsigned char *out_initial_secret);
 
 int quic_hkdf_expand_label(const unsigned char *secret, const char *label, 
@@ -20,14 +22,15 @@ int quic_hkdf_expand_label_sha256(const unsigned char *secret, const char *label
                                   const unsigned char *hash, size_t hash_len, 
                                   unsigned char *out, size_t out_len); 
 
-int quic_unprotect_header(unsigned char *packet, size_t packet_len, 
-                          size_t pn_offset, const unsigned char *hp_key);
+int quic_unprotect_header(unsigned char *packet, size_t packet_len,
+                          size_t pn_offset, const unsigned char *hp_key,
+                          size_t key_len);
 
-int quic_decrypt_payload(const unsigned char *ciphertext, size_t ciphertext_len,
+int quic_decrypt_payload(const unsigned char *ciphertext_with_tag, size_t ciphertext_with_tag_len,
                          const unsigned char *aad, size_t aad_len,
-                         const unsigned char *key, const unsigned char *iv,
-                         uint64_t packet_number,
-                         unsigned char *out_plaintext, size_t *out_plaintext_len); 
+                         const unsigned char *key, size_t key_len,
+                         const unsigned char *iv, uint64_t packet_number,
+                         unsigned char *out_plaintext, size_t *out_plaintext_len);
 
 size_t quic_build_server_initial_payload(
     uint64_t client_largest_acked,
@@ -35,10 +38,20 @@ size_t quic_build_server_initial_payload(
     unsigned char *out_payload
 );
 
+QuicCipherSuite quic_tls_feed_incoming_bytes(
+    SSL *ssl,
+    QuicConnection *conn,
+    const unsigned char *feed_buffer,
+    size_t feed_len,
+    const unsigned char *client_dcid,
+    size_t client_dcid_len
+);
+
 int quic_encrypt_server_initial(
+    QuicConnection *conn,
     const unsigned char *plaintext, size_t plaintext_len,
-    const unsigned char *dcid, size_t dcid_len,   // DCID dari client (menjadi SCID server)
-    const unsigned char *scid, size_t scid_len,   // SCID baru pilihan server (menjadi DCID client)
+    const unsigned char *dcid, size_t dcid_len,
+    const unsigned char *scid, size_t scid_len,
     uint64_t packet_number,
     const unsigned char *server_key, const unsigned char *server_iv, const unsigned char *server_hp,
     unsigned char *out_packet, size_t *out_packet_len
@@ -48,16 +61,18 @@ int quic_handle_decryption(const unsigned char *buffer, size_t real_packet_len, 
                                     const unsigned char *dcid_ptr, uint8_t dcid_len,
                                     uint8_t *out_decrypted_payload, size_t *out_decrypted_len);
 
-int quic_handle_handshake_decryption(const unsigned char *buffer, size_t real_packet_len, size_t pn_offset,
-                                     const unsigned char *client_hs_secret, // Diterima langsung dari hasil keylog/TLS engine
+int quic_handle_handshake_decryption(const QuicConnection *conn,
+                                     const unsigned char *buffer, size_t real_packet_len, size_t pn_offset,
+                                     const unsigned char *client_hs_secret,
                                      uint8_t *out_decrypted_payload, size_t *out_decrypted_len);
 
 int quic_encrypt_1rtt_packet(int sock_server, struct sockaddr_in *client_addr, socklen_t client_addr_len,
                              QuicConnection *conn, const unsigned char *payload, size_t payload_len);
 
-int quic_handle_1rtt_decryption(const unsigned char *packet, size_t packet_len, 
-                                  const unsigned char *app_secret, 
+int quic_handle_1rtt_decryption(const QuicConnection *conn,
+                                  const unsigned char *packet, size_t packet_len,
+                                  const unsigned char *app_secret,
                                   uint8_t dcid_len,
-                                  uint8_t *decrypted_out, size_t *decrypted_len);                                     
+                                  uint8_t *decrypted_out, size_t *decrypted_len);                                    
 
 #endif
